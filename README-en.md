@@ -9,6 +9,8 @@
 
 `home_cloud_shield` is a local DNS filtering experiment project targeting **HarmonyOS 6.0+**, built with **DevEco Studio**. The app intercepts DNS traffic through a local VPN, combines **AdGuard-style rules** with native bridge capabilities, and is used to validate DNS filtering, rule management, logging, and GPL-compliant source distribution workflows on HarmonyOS.
 
+Project URL: <https://github.com/Tlntin/home-cloud-shield>
+
 This repository currently keeps the following parts together:
 
 - OpenHarmony / ArkTS application project
@@ -21,12 +23,12 @@ This layout helps keep the build chain reproducible and makes it easier to prepa
 ## Table of Contents
 
 - [Overview](#overview)
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [Repository Layout](#repository-layout)
 - [Quick Start](#quick-start)
 - [Build Notes](#build-notes)
 - [Open Source and License](#open-source-and-license)
-- [Additional Notes](#additional-notes)
 
 ## Overview
 
@@ -39,6 +41,12 @@ Based on the current project structure and implemented pages, the project focuse
 - Import, edit, save, and export rule files
 - Display DNS requests, matched rules, domain rankings, and debug logs
 - Keep an in-app open-source notice page for release compliance
+
+## Screenshots
+
+| Home | Config | Me |
+| --- | --- | --- |
+| ![Home](https://pic1.imgdb.cn/item/69e08bc076462006f3fdcab6.jpg) | ![Config](https://pic1.imgdb.cn/item/69e08ba376462006f3fdca49.jpg) | ![Me](https://pic1.imgdb.cn/item/69e08b9876462006f3fdca32.jpg) |
 
 ## Features
 
@@ -82,7 +90,7 @@ home_cloud_shield/
 For a fresh clone, fetch submodules together with the repository:
 
 ```bash
-git clone --recurse-submodules <repo-url>
+git clone --recurse-submodules https://github.com/Tlntin/home-cloud-shield.git
 ```
 
 If you already cloned the repository without submodules, run:
@@ -122,9 +130,9 @@ The AdGuardHome OHOS shared-library scripts are located at:
 - `native/adguardhome-ohos-lib/scripts/build_ohos_shared.sh`
 - `native/adguardhome-ohos-lib/scripts/update_third_party_adguardhome.sh`
 
-For more build details, see:
+For SO library build details, see:
 
-- `native/adguardhome-ohos-lib/README.md`
+- [`native/adguardhome-ohos-lib/README.md`](./native/adguardhome-ohos-lib/README.md)
 
 ## Open Source and License
 
@@ -139,10 +147,3 @@ The app also keeps open-source notice resources for release verification:
 
 - `entry/src/main/ets/pages/OpenSourceLicense.ets`
 - `entry/src/main/resources/rawfile/adguard_open_source_licenses.txt`
-
-## Additional Notes
-
-- If `libadguardhome_ohos.so` is later shipped in a release package, update the in-app notices and release notes at the same time so the binary stays aligned with the corresponding source version.
-- When publishing a source archive or download instructions, include `.gitmodules` and the submodule initialization steps to avoid incomplete source delivery.
-- The repository is currently more focused on experimentation and engineering organization; some capabilities are still evolving.
-- This document is provided for engineering and open-source release preparation and does not constitute formal legal advice.

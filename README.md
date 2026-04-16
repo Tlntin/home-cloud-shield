@@ -9,6 +9,8 @@
 
 `栖云盾` 是一个面向 **HarmonyOS 6.0+** 的本地 DNS 过滤实验项目，使用 **DevEco Studio** 编译。应用通过本地 VPN 接管 DNS 流量，结合 **AdGuard 风格规则** 与原生桥接能力，用于验证 HarmonyOS 端的 DNS 拦截、规则管理、日志观察与开源合规分发流程。
 
+项目地址：<https://github.com/Tlntin/home-cloud-shield>
+
 当前仓库同时保留了：
 
 - OpenHarmony / ArkTS 应用工程
@@ -21,12 +23,12 @@
 ## 目录
 
 - [项目概览](#项目概览)
+- [应用截图](#应用截图)
 - [功能特性](#功能特性)
 - [仓库结构](#仓库结构)
 - [快速开始](#快速开始)
 - [构建说明](#构建说明)
 - [开源与许可证](#开源与许可证)
-- [补充说明](#补充说明)
 
 ## 项目概览
 
@@ -39,6 +41,12 @@
 - 提供规则导入、编辑、保存与导出能力
 - 展示 DNS 请求、命中规则、域名排行与调试日志
 - 保留开源授权页，便于发布时同步许可证材料
+
+## 应用截图
+
+| 首页 | 配置页 | 我的 |
+| --- | --- | --- |
+| ![首页](https://pic1.imgdb.cn/item/69e08bc076462006f3fdcab6.jpg) | ![配置页](https://pic1.imgdb.cn/item/69e08ba376462006f3fdca49.jpg) | ![我的](https://pic1.imgdb.cn/item/69e08b9876462006f3fdca32.jpg) |
 
 ## 功能特性
 
@@ -82,7 +90,7 @@ home_cloud_shield/
 首次克隆时，建议直接连同子模块一起拉取：
 
 ```bash
-git clone --recurse-submodules <repo-url>
+git clone --recurse-submodules https://github.com/Tlntin/home-cloud-shield.git
 ```
 
 如果已经普通克隆过仓库，请继续执行：
@@ -122,9 +130,9 @@ AdGuardHome OHOS 共享库相关脚本位于：
 - `native/adguardhome-ohos-lib/scripts/build_ohos_shared.sh`
 - `native/adguardhome-ohos-lib/scripts/update_third_party_adguardhome.sh`
 
-更多构建细节见：
+SO 库构建细节请直接查看：
 
-- `native/adguardhome-ohos-lib/README.md`
+- [`native/adguardhome-ohos-lib/README.md`](./native/adguardhome-ohos-lib/README.md)
 
 ## 开源与许可证
 
@@ -139,10 +147,3 @@ AdGuardHome OHOS 共享库相关脚本位于：
 
 - `entry/src/main/ets/pages/OpenSourceLicense.ets`
 - `entry/src/main/resources/rawfile/adguard_open_source_licenses.txt`
-
-## 补充说明
-
-- 若后续将 `libadguardhome_ohos.so` 正式接入应用发布包，请同步更新应用内授权页与发布说明，确保二进制与对应源码版本一致。
-- 发布源码包或提供下载说明时，请包含 `.gitmodules` 以及对应的子模块拉取方式，避免接收方拿到不完整源码。
-- 本仓库当前更偏向实验性与工程整理用途，部分能力仍处于持续迭代中。
-- 本说明用于工程与开源发布准备，不构成正式法律意见。
