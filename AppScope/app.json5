@@ -1,0 +1,11 @@
+{
+  "app": {
+    "bundleName": "com.tlntin.home_cloud_shield",
+    "vendor": "example",
+    "versionCode": 1,
+    "versionName": "0.0.1",
+    "buildVersion": "1",
+    "icon": "$media:layered_image",
+    "label": "$string:app_name"
+  }
+}

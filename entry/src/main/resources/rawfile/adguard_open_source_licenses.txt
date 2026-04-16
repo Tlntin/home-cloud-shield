@@ -1,0 +1,76 @@
+Home Cloud Shield / 栖云盾
+Open Source Notices
+
+This build includes or is based on the following open source software.
+The original and authoritative license texts remain with their respective upstream projects.
+
+======================================================================
+1. AdGuard Home
+======================================================================
+Project: https://github.com/AdguardTeam/AdGuardHome
+Upstream license: GNU General Public License, version 3
+Source in this repository: native/adguardhome-ohos-lib/third_party/AdGuardHome/
+Upstream license file: native/adguardhome-ohos-lib/third_party/AdGuardHome/LICENSE.txt
+
+Original upstream notice summary:
+AdGuard Home is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+AdGuard Home is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Usage in this project:
+AdGuard Home is used as the upstream basis for the OpenHarmony shared
+library migration and DNS filtering behavior exposed by this application.
+
+Corresponding source reminder:
+If you receive a binary build of Home Cloud Shield that includes this
+component, the corresponding source for the AdGuard Home portion must be
+made available under GPLv3 terms. In this repository, that source is
+provided through the git submodule path listed above.
+
+======================================================================
+2. OpenHarmony
+======================================================================
+Project: https://gitee.com/openharmony
+License: Apache License 2.0
+
+Usage in this project:
+OpenHarmony provides the application framework, VPN Extension APIs,
+file APIs, UI runtime, media APIs, and build toolchain used by this app.
+
+Apache 2.0 notice reminder:
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this component except in compliance with the License.
+You may obtain a copy of the License at:
+https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+======================================================================
+3. Project-local native bridge
+======================================================================
+Location: entry/src/main/cpp/
+
+Usage in this project:
+This local native bridge connects ArkTS code with local DNS/VPN packet
+processing, including request logging and IPv4/IPv6 DNS handling.
+
+License status:
+This component is part of the Home Cloud Shield project source tree and
+is distributed under the same repository licensing terms unless a file
+states otherwise.
+
+======================================================================
+Additional notes
+======================================================================
+- Domain blocking rules shown in the UI are intended to remain compatible
+	with common AdGuard Home DNS rule forms.
+- This notice page is a convenient in-app summary for the current build.
+- For complete legal text, consult the root LICENSE file, THIRD_PARTY_NOTICES.md,
+	and the original upstream license files referenced above.

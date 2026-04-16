@@ -1,0 +1,3 @@
+[submodule "native/adguardhome-ohos-lib/third_party/AdGuardHome"]
+	path = native/adguardhome-ohos-lib/third_party/AdGuardHome
+	url = https://github.com/AdguardTeam/AdGuardHome.git
