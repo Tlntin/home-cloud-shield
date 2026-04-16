@@ -46,7 +46,7 @@ Based on the current project structure and implemented pages, the project focuse
 
 | Home | Config | Me |
 | --- | --- | --- |
-| ![Home](https://pic1.imgdb.cn/item/69e08bc076462006f3fdcab6.jpg) | ![Config](https://pic1.imgdb.cn/item/69e08ba376462006f3fdca49.jpg) | ![Me](https://pic1.imgdb.cn/item/69e08b9876462006f3fdca32.jpg) |
+| ![Home](./images/home.jpg) | ![Config](./images/configs.jpg) | ![Me](./images/me.jpg) |
 
 ## Features
 

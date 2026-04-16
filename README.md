@@ -46,7 +46,7 @@
 
 | 首页 | 配置页 | 我的 |
 | --- | --- | --- |
-| ![首页](https://pic1.imgdb.cn/item/69e08bc076462006f3fdcab6.jpg) | ![配置页](https://pic1.imgdb.cn/item/69e08ba376462006f3fdca49.jpg) | ![我的](https://pic1.imgdb.cn/item/69e08b9876462006f3fdca32.jpg) |
+| ![首页](./images/home.jpg) | ![配置页](./images/configs.jpg) | ![我的](./images/me.jpg) |
 
 ## 功能特性
 
