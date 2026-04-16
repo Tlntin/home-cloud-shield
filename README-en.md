@@ -2,6 +2,10 @@
 
 [简体中文](./README.md) | [English](./README-en.md)
 
+<p align="center">
+	<img src="./images/readme_banner_en.png" alt="Qiyun Shield - HarmonyOS 6.0+ only" width="760" />
+</p>
+
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
