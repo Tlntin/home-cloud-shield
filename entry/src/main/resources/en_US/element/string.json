@@ -88,6 +88,8 @@
     { "name": "writeRulesHere", "value": "Write AdGuard-style DNS rules here" },
     { "name": "ruleFiles", "value": "Rule Files" },
     { "name": "ruleFilesHint", "value": "Import multiple rule files, enable the sets you need, and merge them in the current order." },
+    { "name": "noRuleProfiles", "value": "No rules yet" },
+    { "name": "noRuleProfilesHint", "value": "Tap the + button in the top-right corner to import a rule file. After importing, you can enable, edit, and manage rules in order." },
     { "name": "editRule", "value": "Edit Rule" },
     { "name": "renameRule", "value": "Rename" },
     { "name": "deleteRule", "value": "Delete" },

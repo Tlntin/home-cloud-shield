@@ -88,6 +88,8 @@
     { "name": "writeRulesHere", "value": "在这里输入兼容 AdGuard 的 DNS 规则" },
     { "name": "ruleFiles", "value": "规则列表" },
     { "name": "ruleFilesHint", "value": "支持导入多个规则文件，启用后会按当前顺序拼接为最终生效规则。" },
+    { "name": "noRuleProfiles", "value": "暂无规则" },
+    { "name": "noRuleProfilesHint", "value": "点击右上角 + 导入规则文件，导入后可按当前顺序启用、编辑和管理。" },
     { "name": "editRule", "value": "编辑规则" },
     { "name": "renameRule", "value": "重命名" },
     { "name": "deleteRule", "value": "删除" },

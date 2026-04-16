@@ -47,6 +47,7 @@ type LanguageKey =
   | 'lines' | 'noDnsLogs' | 'noDnsLogsHint' | 'blockedTag' | 'allowedTag' | 'rulePrefix' | 'timePrefix'
   | 'debugLog' | 'debugHint' | 'noDebugLogs' | 'configStudio' | 'configCardHint' | 'activeFile' | 'importFile'
   | 'resetDefaults' | 'rulesEditor' | 'saveRules' | 'reloadFile' | 'writeRulesHere' | 'ruleFiles' | 'ruleFilesHint'
+  | 'noRuleProfiles' | 'noRuleProfilesHint'
   | 'editRule' | 'renameRule' | 'deleteRule' | 'exportRules' | 'rulesSavedSuccess' | 'disabled' | 'defaultCustomRules'
   | 'moveUp' | 'moveDown' | 'closeEditor' | 'rulesFile' | 'myDevice' | 'myDeviceHint' | 'keepAliveOn' | 'keepAliveOff'
   | 'backgroundKeepAlive' | 'keepAliveSummary' | 'audioKeepAlive' | 'audioKeepAliveHint' | 'locationKeepAlive'
@@ -152,6 +153,8 @@ function resolveStringResource(key: LanguageKey): number {
     case 'writeRulesHere': return $r('app.string.writeRulesHere').id;
     case 'ruleFiles': return $r('app.string.ruleFiles').id;
     case 'ruleFilesHint': return $r('app.string.ruleFilesHint').id;
+    case 'noRuleProfiles': return $r('app.string.noRuleProfiles').id;
+    case 'noRuleProfilesHint': return $r('app.string.noRuleProfilesHint').id;
     case 'editRule': return $r('app.string.editRule').id;
     case 'renameRule': return $r('app.string.renameRule').id;
     case 'deleteRule': return $r('app.string.deleteRule').id;
@@ -250,7 +253,7 @@ function resolveStringResource(key: LanguageKey): number {
   }
 }
 
-const DEFAULT_RULES_TEXT = [
+const LEGACY_DEFAULT_RULES_TEXT = [
   '! AdGuard-compatible DNS rule subset',
   '! Supported:',
   '!   ||ads.example.com^',
@@ -467,6 +470,10 @@ struct Index {
     return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   }
 
+  private isLegacyDefaultRulesText(content: string): boolean {
+    return this.normalizeRuleContent(content).trim() === LEGACY_DEFAULT_RULES_TEXT;
+  }
+
   private defaultCustomRuleName(): string {
     return this.t('defaultCustomRules');
   }
@@ -485,9 +492,12 @@ struct Index {
     if (this.ruleProfiles.length > 0) {
       return;
     }
-    const currentRules: string = this.readTextFile(this.rulesFilePath);
-    const seedText: string = currentRules.length > 0 ? currentRules : DEFAULT_RULES_TEXT;
-    this.ruleProfiles = [this.createRuleProfile(this.defaultCustomRuleName(), seedText, true)];
+    const currentRules: string = this.normalizeRuleContent(this.readTextFile(this.rulesFilePath));
+    if (currentRules.trim().length === 0 || this.isLegacyDefaultRulesText(currentRules)) {
+      this.ruleProfiles = [];
+    } else {
+      this.ruleProfiles = [this.createRuleProfile(this.defaultCustomRuleName(), currentRules, true)];
+    }
     this.rulesDirty = false;
     this.savePersistState();
   }
@@ -581,6 +591,31 @@ struct Index {
 
   private ruleProfileIndex(profileId: string): number {
     return this.ruleProfiles.findIndex((profile: RuleProfile) => profile.id === profileId);
+  }
+
+  private canMoveRuleProfileUp(profileId: string): boolean {
+    return this.ruleProfileIndex(profileId) > 0;
+  }
+
+  private canMoveRuleProfileDown(profileId: string): boolean {
+    const index: number = this.ruleProfileIndex(profileId);
+    return index >= 0 && index < this.ruleProfiles.length - 1;
+  }
+
+  private moveRuleProfileUp(profileId: string): void {
+    const index: number = this.ruleProfileIndex(profileId);
+    if (index <= 0) {
+      return;
+    }
+    this.moveRuleProfile(index, index - 1);
+  }
+
+  private moveRuleProfileDown(profileId: string): void {
+    const index: number = this.ruleProfileIndex(profileId);
+    if (index < 0 || index >= this.ruleProfiles.length - 1) {
+      return;
+    }
+    this.moveRuleProfile(index, index + 1);
   }
 
   private moveRuleProfile(from: number, to: number): void {
@@ -690,9 +725,6 @@ struct Index {
           action: () => {
             try {
               this.ruleProfiles = this.ruleProfiles.filter((item: RuleProfile) => item.id !== profileId);
-              if (this.ruleProfiles.length === 0) {
-                this.ruleProfiles = [this.createRuleProfile(this.defaultCustomRuleName(), DEFAULT_RULES_TEXT, true)];
-              }
               this.rulesText = this.buildMergedRulesText();
               this.rulesDirty = true;
               this.savePersistState();
@@ -1306,10 +1338,10 @@ struct Index {
     }
 
     const currentRules: string = this.readTextFile(this.rulesFilePath);
-    if (currentRules.trim().length === 0) {
-      this.writeTextFile(this.rulesFilePath, DEFAULT_RULES_TEXT);
+    if (this.isLegacyDefaultRulesText(currentRules)) {
+      this.writeTextFile(this.rulesFilePath, '');
     }
-    this.rulesText = currentRules.length > 0 ? currentRules : DEFAULT_RULES_TEXT;
+    this.rulesText = this.isLegacyDefaultRulesText(currentRules) ? '' : currentRules;
 
     hilog.info(
       DOMAIN,
@@ -1397,7 +1429,9 @@ struct Index {
             updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
           });
         });
-        if (nextProfiles.length > 0) {
+        if (nextProfiles.length === 1 && this.isLegacyDefaultRulesText(nextProfiles[0].content)) {
+          this.ruleProfiles = [];
+        } else if (nextProfiles.length > 0) {
           this.ruleProfiles = nextProfiles;
         }
       }
@@ -1600,7 +1634,7 @@ struct Index {
     }
     this.ensureRuleProfilesInitialized();
     const mergedRules: string = this.buildMergedRulesText();
-    this.rulesText = mergedRules.length > 0 ? mergedRules : DEFAULT_RULES_TEXT;
+    this.rulesText = mergedRules;
   }
 
   private errorMessage(err: Object): string {
@@ -1788,7 +1822,7 @@ struct Index {
       return;
     }
 
-    this.rulesText = mergedRules.length > 0 ? mergedRules : DEFAULT_RULES_TEXT;
+    this.rulesText = mergedRules;
     this.rulesDirty = false;
     this.errorText = '';
     this.savePersistState();
@@ -1799,8 +1833,8 @@ struct Index {
   }
 
   private resetRulesToDefault(): void {
-    this.ruleProfiles = [this.createRuleProfile(this.defaultCustomRuleName(), DEFAULT_RULES_TEXT, true)];
-    this.rulesText = DEFAULT_RULES_TEXT;
+    this.ruleProfiles = [];
+    this.rulesText = '';
     this.rulesDirty = true;
     this.errorText = '';
     this.savePersistState();
@@ -2413,14 +2447,14 @@ struct Index {
     return this.isDarkModeActive() ? '#224C8BCB' : '#249FD4FF';
   }
 
-  private useImmersiveHdsTabBar(): boolean {
-    return deviceInfo.sdkApiVersion >= 23;
+  private getBottomTabOverlayHeight(): number {
+    const tabHeight: number = 50;
+    const floatingBottomMargin: number = 24;
+    return tabHeight + floatingBottomMargin;
   }
 
   private contentBottomInset(): number {
-    return this.useImmersiveHdsTabBar()
-      ? Math.max(56, this.avoidPaddingBottom + 50)
-      : Math.max(50, this.avoidPaddingBottom + 44);
+    return Math.max(0, this.avoidPaddingBottom) + this.getBottomTabOverlayHeight();
   }
 
   @Builder
@@ -2891,141 +2925,62 @@ struct Index {
   }
 
   @Builder
-  private ClassicTabHost() {
-    Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
-      TabContent() {
-        Column() {
-          this.HomeTab();
-        }
-        .width('100%')
-        .height('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Start)
+  private CurrentTabPage() {
+    Column() {
+      if (this.currentTab === 0) {
+        this.HomeTab();
+      } else if (this.currentTab === 1) {
+        this.ConfigTab();
+      } else {
+        this.MeTab();
       }
-      .width('100%')
-      .height('100%')
-      .tabBar(this.t('tabHome'))
-
-      TabContent() {
-        Column() {
-          this.ConfigTab();
-        }
-        .width('100%')
-        .height('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Start)
-      }
-      .width('100%')
-      .height('100%')
-      .tabBar(this.t('tabConfig'))
-
-      TabContent() {
-        Column() {
-          this.MeTab();
-        }
-        .width('100%')
-        .height('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Start)
-      }
-      .width('100%')
-      .height('100%')
-      .tabBar(this.t('tabMe'))
     }
-    .barMode(BarMode.Fixed)
-    .animationDuration(120)
-    .layoutWeight(1)
     .width('100%')
     .height('100%')
-    .vertical(false)
-    .barOverlap(true)
-    .backgroundColor(Color.Transparent)
-    .onChange((index: number) => {
+    .alignItems(HorizontalAlign.Start)
+    .justifyContent(FlexAlign.Start)
+    .backgroundColor('#00000000')
+  }
+
+  @Builder
+  private BottomNavItem(index: number, activeIcon: Resource, inactiveIcon: Resource, label: string) {
+    Column({ space: 4 }) {
+      SymbolGlyph(this.currentTab === index ? activeIcon : inactiveIcon)
+        .fontSize(16)
+        .fontColor([this.currentTab === index ? this.selectedChipTextTone() : this.secondaryTextColor()])
+      Text(label)
+        .fontSize(10)
+        .fontWeight(this.currentTab === index ? FontWeight.Bold : FontWeight.Medium)
+        .fontColor(this.currentTab === index ? this.selectedChipTextTone() : this.secondaryTextColor())
+    }
+    .layoutWeight(1)
+    .padding({ top: 6, bottom: 6, left: 8, right: 8 })
+    .borderRadius(14)
+    .backgroundColor(this.currentTab === index ? this.selectedChipSurfaceTone() : '#00000000')
+    .onClick(() => {
+      if (this.currentTab === index) {
+        return;
+      }
       this.currentTab = index;
       this.savePersistState();
     })
   }
 
   @Builder
-  private ImmersiveTabHost() {
-    HdsTabs({ barPosition: BarPosition.End, index: this.currentTab }) {
-      TabContent() {
-        Column() {
-          this.HomeTab();
-        }
-        .width('100%')
-        .height('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Start)
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor('#00000000')
-      .tabBar(new BottomTabBarStyle(
-        { normal: new SymbolGlyphModifier($r('sys.symbol.house')), selected: new SymbolGlyphModifier($r('sys.symbol.house_fill')) },
-        this.t('tabHome')
-      ))
-
-      TabContent() {
-        Column() {
-          this.ConfigTab();
-        }
-        .width('100%')
-        .height('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Start)
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor('#00000000')
-      .tabBar(new BottomTabBarStyle(
-        { normal: new SymbolGlyphModifier($r('sys.symbol.gearshape')), selected: new SymbolGlyphModifier($r('sys.symbol.gearshape_fill')) },
-        this.t('tabConfig')
-      ))
-
-      TabContent() {
-        Column() {
-          this.MeTab();
-        }
-        .width('100%')
-        .height('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Start)
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor('#00000000')
-      .tabBar(new BottomTabBarStyle(
-        { normal: new SymbolGlyphModifier($r('sys.symbol.person')), selected: new SymbolGlyphModifier($r('sys.symbol.person_fill')) },
-        this.t('tabMe')
-      ))
+  private ClassicTabHost() {
+    Row({ space: 4 }) {
+      this.BottomNavItem(0, $r('sys.symbol.house_fill'), $r('sys.symbol.house'), this.t('tabHome'));
+      this.BottomNavItem(1, $r('sys.symbol.gearshape_fill'), $r('sys.symbol.gearshape'), this.t('tabConfig'));
+      this.BottomNavItem(2, $r('sys.symbol.person_fill'), $r('sys.symbol.person'), this.t('tabMe'));
     }
-    .backgroundColor('#00000000')
-    .barOverlap(true)
-    .vertical(false)
-    .scrollable(false)
-    .layoutWeight(1)
-    .width('100%')
-    .height('100%')
-    .padding({ top: 0, bottom: 0 })
-    .margin({ top: 0, bottom: 0 })
-    .barFloatingStyle({
-      barBottomMargin: Math.max(0, this.avoidPaddingBottom),
-      systemMaterialEffect: {
-        materialType: hdsMaterial.MaterialType.ADAPTIVE,
-        materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
-      }
-    })
-    .onChange((index: number) => {
-      this.currentTab = index;
-      this.savePersistState();
-    })
+    .width('82%')
+    .padding({ left: 4, right: 4, top: 5, bottom: 5 })
+    .margin({ bottom: 24 })
+    .backgroundColor(this.floatingBarTone())
+    .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+    .borderRadius(20)
+    .border({ width: 1, color: this.cardBorderTone() })
+    .shadow({ radius: 8, color: this.cardShadowTone() })
   }
 
   @Builder
@@ -3546,81 +3501,139 @@ struct Index {
             : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
         })
 
-        List({ space: 12 }) {
-          ForEach(this.ruleProfiles, (profile: RuleProfile, index: number) => {
-            ListItem() {
-              Column({ space: 10 }) {
-                Row({ space: 10 }) {
-                  Column({ space: 4 }) {
-                    Text(profile.name)
-                      .fontSize(17)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor(this.primaryTextColor())
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(this.ruleProfileMetaText(profile))
-                      .fontSize(12)
-                      .fontColor(this.secondaryTextColor())
+        if (this.ruleProfiles.length === 0) {
+          Column({ space: 12 }) {
+            Text(this.t('noRuleProfiles'))
+              .fontSize(18)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.t('noRuleProfilesHint'))
+              .fontSize(13)
+              .lineHeight(20)
+              .textAlign(TextAlign.Center)
+              .fontColor(this.secondaryTextColor())
+            Button(this.t('importFile'))
+              .height(40)
+              .padding({ left: 18, right: 18 })
+              .backgroundColor(this.coolChipSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .fontColor(this.selectedChipTextTone())
+              .borderRadius(14)
+              .border({ width: 1, color: this.cardBorderTone() })
+              .onClick(() => {
+                this.importRulesFile().catch((err: BusinessError) => {
+                  this.errorText = this.errorMessage(err);
+                });
+              })
+          }
+          .width('100%')
+          .margin({ top: 4 })
+          .padding({ left: 24, right: 24, top: 32, bottom: 32 })
+          .alignItems(HorizontalAlign.Center)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(22)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .shadow({ radius: 10, color: this.sheetShadowTone() })
+        } else {
+          List({ space: 12 }) {
+            ForEach(this.ruleProfiles, (profile: RuleProfile, index: number) => {
+              ListItem() {
+                Column({ space: 10 }) {
+                  Row({ space: 10 }) {
+                    Column({ space: 4 }) {
+                      Text(profile.name)
+                        .fontSize(17)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(this.primaryTextColor())
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      Text(this.ruleProfileMetaText(profile))
+                        .fontSize(12)
+                        .fontColor(this.secondaryTextColor())
+                    }
+                    .layoutWeight(1)
+                    .alignItems(HorizontalAlign.Start)
+
+                    Toggle({ type: ToggleType.Switch, isOn: profile.enabled })
+                      .selectedColor(this.accentBlueTone())
+                      .switchPointColor('#FFFFFF')
+                      .onChange((value: boolean) => {
+                        this.toggleRuleProfileEnabled(profile.id, value);
+                      })
                   }
-                  .layoutWeight(1)
-                  .alignItems(HorizontalAlign.Start)
+                  .width('100%')
 
-                  Toggle({ type: ToggleType.Switch, isOn: profile.enabled })
-                    .selectedColor(this.accentBlueTone())
-                    .switchPointColor('#FFFFFF')
-                    .onChange((value: boolean) => {
-                      this.toggleRuleProfileEnabled(profile.id, value);
-                    })
+                  Row({ space: 8 }) {
+                    Button(this.t('moveUp'))
+                      .enabled(this.canMoveRuleProfileUp(profile.id))
+                      .height(34)
+                      .layoutWeight(1)
+                      .backgroundColor(this.coolNeutralChipSurfaceTone())
+                      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                      .fontColor(this.primaryTextColor())
+                      .borderRadius(12)
+                      .border({ width: 1, color: this.cardBorderTone() })
+                      .onClick(() => {
+                        this.moveRuleProfileUp(profile.id);
+                      })
+                    Button(this.t('moveDown'))
+                      .enabled(this.canMoveRuleProfileDown(profile.id))
+                      .height(34)
+                      .layoutWeight(1)
+                      .backgroundColor(this.coolNeutralChipSurfaceTone())
+                      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                      .fontColor(this.primaryTextColor())
+                      .borderRadius(12)
+                      .border({ width: 1, color: this.cardBorderTone() })
+                      .onClick(() => {
+                        this.moveRuleProfileDown(profile.id);
+                      })
+                  }
+                  .width('100%')
+
+                  Row({ space: 8 }) {
+                    Button(this.t('editRule'))
+                      .height(34)
+                      .layoutWeight(1)
+                      .backgroundColor(this.coolChipSurfaceTone())
+                      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                      .fontColor(this.selectedChipTextTone())
+                      .borderRadius(12)
+                      .border({ width: 1, color: this.cardBorderTone() })
+                      .onClick(() => {
+                        this.openRuleEditor(profile.id);
+                      })
+                    Button(this.t('deleteRule'))
+                      .height(34)
+                      .layoutWeight(1)
+                      .backgroundColor(this.coolNeutralChipSurfaceTone())
+                      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                      .fontColor('#B42318')
+                      .borderRadius(12)
+                      .border({ width: 1, color: this.cardBorderTone() })
+                      .onClick(() => {
+                        this.confirmDeleteRuleProfile(profile.id);
+                      })
+                  }
+                  .width('100%')
                 }
                 .width('100%')
-
-                Row({ space: 8 }) {
-                  Button(this.t('editRule'))
-                    .height(34)
-                    .layoutWeight(1)
-                    .backgroundColor(this.coolChipSurfaceTone())
-                    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                    .fontColor(this.selectedChipTextTone())
-                    .borderRadius(12)
-                    .border({ width: 1, color: this.cardBorderTone() })
-                    .onClick(() => {
-                      this.openRuleEditor(profile.id);
-                    })
-                  Button(this.t('deleteRule'))
-                    .height(34)
-                    .layoutWeight(1)
-                    .backgroundColor(this.coolNeutralChipSurfaceTone())
-                    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                    .fontColor('#B42318')
-                    .borderRadius(12)
-                    .border({ width: 1, color: this.cardBorderTone() })
-                    .onClick(() => {
-                      this.confirmDeleteRuleProfile(profile.id);
-                    })
-                }
-                .width('100%')
+                .alignItems(HorizontalAlign.Start)
+                .padding({ left: 16, right: 16, top: 18, bottom: 18 })
+                .backgroundColor(this.sheetInputSurfaceTone())
+                .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+                .borderRadius(18)
+                .border({ width: 1, color: this.sheetBorderTone() })
+                .shadow({ radius: 10, color: this.sheetShadowTone() })
               }
-              .width('100%')
-              .alignItems(HorizontalAlign.Start)
-              .padding({ left: 16, right: 16, top: 18, bottom: 18 })
-              .backgroundColor(this.sheetInputSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-              .borderRadius(18)
-              .border({ width: 1, color: this.sheetBorderTone() })
-              .shadow({ radius: 10, color: this.sheetShadowTone() })
-            }
-            .editable(EditMode.Movable)
-          }, (profile: RuleProfile) => profile.id)
-          .onMove((from: number, to: number) => {
-            this.moveRuleProfile(from, to);
-          })
+            }, (profile: RuleProfile) => profile.id)
+          }
+          .width('100%')
+          .height('100%')
+          .margin({ top: 4 })
+          .scrollBar(BarState.Off)
         }
-        .width('100%')
-        .height('100%')
-        .margin({ top: 4 })
-        .scrollBar(BarState.Off)
-        .editMode(true)
-        .editModeOptions({})
       }
       .width('100%')
       .constraintSize({ minHeight: '100%' })
@@ -4167,7 +4180,7 @@ struct Index {
   }
 
   build() {
-    Stack({ alignContent: Alignment.TopStart }) {
+    Stack({ alignContent: Alignment.Bottom }) {
       Stack() {
         Column() {}
           .width('100%')
@@ -4204,38 +4217,116 @@ struct Index {
       .height('100%')
       .align(Alignment.TopStart)
 
-      Column({ space: 16 }) {
-        if (this.errorText.length > 0) {
-          Text(this.errorText)
-            .fontSize(13)
-            .fontColor('#B42318')
-            .padding(12)
-            .backgroundColor(this.softRedTone())
-            .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-            .borderRadius(14)
-            .width('100%')
-        }
+      Stack({ alignContent: Alignment.TopStart }) {
+        Column({ space: 16 }) {
+          if (this.errorText.length > 0) {
+            Text(this.errorText)
+              .fontSize(13)
+              .fontColor('#B42318')
+              .padding(12)
+              .backgroundColor(this.softRedTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .width('100%')
+          }
 
-        if (this.useImmersiveHdsTabBar()) {
-          this.ImmersiveTabHost()
-        } else {
-          this.ClassicTabHost()
+          if (deviceInfo.sdkApiVersion >= 23) {
+            HdsTabs({ barPosition: BarPosition.End, index: this.currentTab }) {
+              TabContent() {
+                Column() {
+                  this.HomeTab();
+                }
+                .width('100%')
+                .height('100%')
+                .layoutWeight(1)
+                .justifyContent(FlexAlign.Start)
+                .alignItems(HorizontalAlign.Start)
+              }
+              .width('100%')
+              .height('100%')
+              .backgroundColor('#00000000')
+              .tabBar(new BottomTabBarStyle(
+                { normal: new SymbolGlyphModifier($r('sys.symbol.house')), selected: new SymbolGlyphModifier($r('sys.symbol.house_fill')) },
+                this.t('tabHome')
+              ))
+
+              TabContent() {
+                Column() {
+                  this.ConfigTab();
+                }
+                .width('100%')
+                .height('100%')
+                .layoutWeight(1)
+                .justifyContent(FlexAlign.Start)
+                .alignItems(HorizontalAlign.Start)
+              }
+              .width('100%')
+              .height('100%')
+              .backgroundColor('#00000000')
+              .tabBar(new BottomTabBarStyle(
+                { normal: new SymbolGlyphModifier($r('sys.symbol.gearshape')), selected: new SymbolGlyphModifier($r('sys.symbol.gearshape_fill')) },
+                this.t('tabConfig')
+              ))
+
+              TabContent() {
+                Column() {
+                  this.MeTab();
+                }
+                .width('100%')
+                .height('100%')
+                .layoutWeight(1)
+                .justifyContent(FlexAlign.Start)
+                .alignItems(HorizontalAlign.Start)
+              }
+              .width('100%')
+              .height('100%')
+              .backgroundColor('#00000000')
+              .tabBar(new BottomTabBarStyle(
+                { normal: new SymbolGlyphModifier($r('sys.symbol.person')), selected: new SymbolGlyphModifier($r('sys.symbol.person_fill')) },
+                this.t('tabMe')
+              ))
+            }
+            .backgroundColor('#00000000')
+            .barOverlap(true)
+            .vertical(false)
+            .scrollable(false)
+            .width('100%')
+            .height('100%')
+            .barFloatingStyle({
+              barBottomMargin: 24,
+              systemMaterialEffect: {
+                materialType: hdsMaterial.MaterialType.ADAPTIVE,
+                materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+              }
+            })
+            .onChange((index: number) => {
+              this.currentTab = index;
+              this.savePersistState();
+            })
+          } else {
+            this.CurrentTabPage()
+          }
         }
+        .width('100%')
+        .height('100%')
+        .padding({ left: 16, right: 16, top: this.contentTopInset(), bottom: 0 })
+        .justifyContent(FlexAlign.Start)
+        .alignItems(HorizontalAlign.Start)
+        .align(Alignment.TopStart)
+        .bindSheet(this.showRuleEditorSheet, this.RuleEditorSheet(), {
+          height: SheetSize.FIT_CONTENT,
+          backgroundColor: Color.Transparent,
+          onDisappear: () => {
+            this.showRuleEditorSheet = false;
+            this.editingRuleProfileId = '';
+          }
+        })
       }
       .width('100%')
       .height('100%')
-      .padding({ left: 16, right: 16, top: this.contentTopInset(), bottom: 0 })
-      .justifyContent(FlexAlign.Start)
-      .alignItems(HorizontalAlign.Start)
-      .align(Alignment.TopStart)
-      .bindSheet(this.showRuleEditorSheet, this.RuleEditorSheet(), {
-        height: SheetSize.FIT_CONTENT,
-        backgroundColor: Color.Transparent,
-        onDisappear: () => {
-          this.showRuleEditorSheet = false;
-          this.editingRuleProfileId = '';
-        }
-      })
+      if (deviceInfo.sdkApiVersion < 23) {
+        this.ClassicTabHost()
+      }
     }
     .width('100%')
     .height('100%')

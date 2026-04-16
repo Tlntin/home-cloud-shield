@@ -26,7 +26,7 @@ const DNS_SERVER_IPV6 = 'fd00:ad00::1';
 const IPV6_ROUTE = 'fd00:ad00::';
 const IPV6_PREFIX_LENGTH = 64;
 const UPSTREAM_DNS_IP = '94.140.14.14';
-const DEFAULT_RULES_TEXT = [
+const LEGACY_DEFAULT_RULES_TEXT = [
   '! AdGuard-style DNS rules',
   '! Supported examples:',
   '!   ||doubleclick.net^',
@@ -77,6 +77,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private lastRunning: boolean = false;
   private lastNote: string = 'DNS filter has not been started yet.';
 
+  private isLegacyDefaultRulesText(content: string): boolean {
+    return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim() === LEGACY_DEFAULT_RULES_TEXT;
+  }
+
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, '==/vpn_ext/onCreate/ ability=%{public}s', want.abilityName ?? '');
     this.ensureRuntimeFiles(want);
@@ -115,8 +119,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     }
 
     const existingRules: string = this.readTextFile(this.rulesFilePath);
-    if (existingRules.trim().length === 0) {
-      this.writeTextFile(this.rulesFilePath, DEFAULT_RULES_TEXT);
+    if (this.isLegacyDefaultRulesText(existingRules)) {
+      this.writeTextFile(this.rulesFilePath, '');
     }
     this.writeTextFile(this.queryLogFilePath, '');
     hilog.info(
