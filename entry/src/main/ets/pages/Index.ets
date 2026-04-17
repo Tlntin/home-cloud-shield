@@ -32,6 +32,10 @@ const WANT_STATUS_FILE_PATH = 'statusFilePath';
 const WANT_RULES_FILE_PATH = 'rulesFilePath';
 const WANT_QUERY_LOG_FILE_PATH = 'queryLogFilePath';
 const WANT_DEBUG_LOG_FILE_PATH = 'debugLogFilePath';
+const WANT_DNS_CACHE_TTL_SECONDS = 'dnsCacheTtlSeconds';
+const DEFAULT_DNS_CACHE_TTL_SECONDS = 3600;
+const CUSTOM_BLOCK_RULE_PROFILE_ID = 'custom_block_rules';
+const CUSTOM_ALLOW_RULE_PROFILE_ID = 'custom_allow_rules';
 type LangCode = 'zhHans' | 'en' | 'zhHant';
 type PreferredLangCode = 'zh-Hans' | 'en-Latn-US' | 'zh-Hant';
 type LanguageKey =
@@ -65,7 +69,11 @@ type LanguageKey =
   | 'domainStatsExportedStatus' | 'exportSuccessToast' | 'noDnsRequestsToExport' | 'dnsRequestsExportedStatus'
   | 'clearDnsRequestsFailed' | 'noDebugLogsToExport' | 'debugLogsExportedStatus' | 'copy' | 'export' | 'copyLog'
   | 'exportLog' | 'dnsSearchPlaceholder' | 'clickToExpand' | 'clickViewDebugAndCopy' | 'exportDebugLogsFailed'
-  | 'exportRulesFailed' | 'exportFileFailed';
+  | 'exportRulesFailed' | 'exportFileFailed' | 'dnsCacheTitle' | 'dnsCacheHint' | 'dnsCacheTtlLabel'
+  | 'importedRules'
+  | 'customBlockRules' | 'customAllowRules' | 'builtInRuleProfileLocked' | 'addRuleActionTitle'
+  | 'addAllowRuleAction' | 'addBlockRuleAction' | 'ruleAddedNeedsRestart' | 'ruleAlreadyExists'
+  | 'tapDomainToCreateRule';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -250,6 +258,19 @@ function resolveStringResource(key: LanguageKey): number {
     case 'exportDebugLogsFailed': return $r('app.string.exportDebugLogsFailed').id;
     case 'exportRulesFailed': return $r('app.string.exportRulesFailed').id;
     case 'exportFileFailed': return $r('app.string.exportFileFailed').id;
+    case 'dnsCacheTitle': return $r('app.string.dnsCacheTitle').id;
+    case 'dnsCacheHint': return $r('app.string.dnsCacheHint').id;
+    case 'dnsCacheTtlLabel': return $r('app.string.dnsCacheTtlLabel').id;
+    case 'importedRules': return $r('app.string.importedRules').id;
+    case 'customBlockRules': return $r('app.string.customBlockRules').id;
+    case 'customAllowRules': return $r('app.string.customAllowRules').id;
+    case 'builtInRuleProfileLocked': return $r('app.string.builtInRuleProfileLocked').id;
+    case 'addRuleActionTitle': return $r('app.string.addRuleActionTitle').id;
+    case 'addAllowRuleAction': return $r('app.string.addAllowRuleAction').id;
+    case 'addBlockRuleAction': return $r('app.string.addBlockRuleAction').id;
+    case 'ruleAddedNeedsRestart': return $r('app.string.ruleAddedNeedsRestart').id;
+    case 'ruleAlreadyExists': return $r('app.string.ruleAlreadyExists').id;
+    case 'tapDomainToCreateRule': return $r('app.string.tapDomainToCreateRule').id;
   }
 }
 
@@ -335,9 +356,16 @@ interface RuleProfile {
   content: string;
   enabled: boolean;
   updatedAt: number;
+  builtIn?: boolean;
 }
 
 type QueryActionFilter = 'all' | 'allowed' | 'blocked';
+type QuickRuleState = 'none' | 'block' | 'allow';
+
+interface QuickRuleDialogButton {
+  value: string;
+  action: () => void;
+}
 
 interface PersistState {
   keepAliveEnabled?: boolean;
@@ -347,6 +375,7 @@ interface PersistState {
   language?: LangCode;
   themeMode?: number;
   ruleProfiles?: RuleProfile[];
+  dnsCacheTtlSeconds?: number;
   currentTab: number;
 }
 
@@ -418,6 +447,9 @@ struct Index {
   @State stateFilePath: string = '';
   @State rulesText: string = '';
   @State ruleProfiles: RuleProfile[] = [];
+  @State importedRuleCountBadge: number = 0;
+  @State customBlockRuleCountBadge: number = 0;
+  @State customAllowRuleCountBadge: number = 0;
   @State queryEvents: QueryLogEntry[] = [];
   @State querySummary: QuerySummary = defaultQuerySummary();
   @State debugLines: string[] = [];
@@ -435,6 +467,8 @@ struct Index {
   @State dnsSheetFeedbackText: string = '';
   @State domainSheetFeedbackText: string = '';
   @State debugSheetFeedbackText: string = '';
+  @State dnsCacheTtlInput: string = `${DEFAULT_DNS_CACHE_TTL_SECONDS}`;
+  @State dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   @State appVersionName: string = 'loading';
   @State appVersionCode: number = 0;
   @State avoidPaddingTop: number = 0;
@@ -478,26 +512,107 @@ struct Index {
     return this.t('defaultCustomRules');
   }
 
-  private createRuleProfile(name: string, content: string, enabled: boolean = true): RuleProfile {
+  private customBlockRuleName(): string {
+    return this.t('customBlockRules');
+  }
+
+  private customAllowRuleName(): string {
+    return this.t('customAllowRules');
+  }
+
+  private createRuleProfile(name: string, content: string, enabled: boolean = true, id?: string,
+    builtIn: boolean = false): RuleProfile {
     return {
-      id: `rule_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
+      id: id ?? `rule_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
       name,
       content: this.normalizeRuleContent(content),
       enabled,
       updatedAt: Date.now(),
+      builtIn,
     };
+  }
+
+  private createBuiltInRuleProfile(id: string, name: string): RuleProfile {
+    return this.createRuleProfile(name, '', true, id, true);
+  }
+
+  private isBuiltInRuleProfile(profileId: string): boolean {
+    return profileId === CUSTOM_BLOCK_RULE_PROFILE_ID || profileId === CUSTOM_ALLOW_RULE_PROFILE_ID;
+  }
+
+  private normalizeRuleProfiles(profiles: RuleProfile[]): RuleProfile[] {
+    const importedProfiles: RuleProfile[] = [];
+    let customBlockProfile: RuleProfile | undefined = undefined;
+    let customAllowProfile: RuleProfile | undefined = undefined;
+
+    profiles.forEach((profile: RuleProfile, index: number) => {
+      const normalizedProfile: RuleProfile = {
+        id: typeof profile.id === 'string' && profile.id.length > 0 ? profile.id : `rule_${index}_${Date.now()}`,
+        name: typeof profile.name === 'string' && profile.name.trim().length > 0
+          ? profile.name.trim()
+          : `${this.defaultCustomRuleName()} ${index + 1}`,
+        content: this.normalizeRuleContent(profile.content ?? ''),
+        enabled: profile.enabled !== false,
+        updatedAt: typeof profile.updatedAt === 'number' ? profile.updatedAt : Date.now(),
+        builtIn: this.isBuiltInRuleProfile(profile.id),
+      };
+      if (normalizedProfile.id === CUSTOM_BLOCK_RULE_PROFILE_ID) {
+        customBlockProfile = {
+          id: normalizedProfile.id,
+          name: this.customBlockRuleName(),
+          content: normalizedProfile.content,
+          enabled: normalizedProfile.enabled,
+          updatedAt: normalizedProfile.updatedAt,
+          builtIn: true,
+        };
+        return;
+      }
+      if (normalizedProfile.id === CUSTOM_ALLOW_RULE_PROFILE_ID) {
+        customAllowProfile = {
+          id: normalizedProfile.id,
+          name: this.customAllowRuleName(),
+          content: normalizedProfile.content,
+          enabled: normalizedProfile.enabled,
+          updatedAt: normalizedProfile.updatedAt,
+          builtIn: true,
+        };
+        return;
+      }
+      importedProfiles.push({
+        id: normalizedProfile.id,
+        name: normalizedProfile.name,
+        content: normalizedProfile.content,
+        enabled: normalizedProfile.enabled,
+        updatedAt: normalizedProfile.updatedAt,
+        builtIn: false,
+      });
+    });
+
+    if (customBlockProfile === undefined) {
+      customBlockProfile = this.createBuiltInRuleProfile(CUSTOM_BLOCK_RULE_PROFILE_ID, this.customBlockRuleName());
+    }
+    if (customAllowProfile === undefined) {
+      customAllowProfile = this.createBuiltInRuleProfile(CUSTOM_ALLOW_RULE_PROFILE_ID, this.customAllowRuleName());
+    }
+
+    return importedProfiles.concat([customBlockProfile, customAllowProfile]);
   }
 
   private ensureRuleProfilesInitialized(): void {
     if (this.ruleProfiles.length > 0) {
+      this.ruleProfiles = this.normalizeRuleProfiles(this.ruleProfiles);
+      this.syncRuleCountBadges();
       return;
     }
     const currentRules: string = this.normalizeRuleContent(this.readTextFile(this.rulesFilePath));
     if (currentRules.trim().length === 0 || this.isLegacyDefaultRulesText(currentRules)) {
-      this.ruleProfiles = [];
+      this.ruleProfiles = this.normalizeRuleProfiles([]);
     } else {
-      this.ruleProfiles = [this.createRuleProfile(this.defaultCustomRuleName(), currentRules, true)];
+      this.ruleProfiles = this.normalizeRuleProfiles([
+        this.createRuleProfile(this.defaultCustomRuleName(), currentRules, true)
+      ]);
     }
+    this.syncRuleCountBadges();
     this.rulesDirty = false;
     this.savePersistState();
   }
@@ -530,6 +645,30 @@ struct Index {
     const enabledCount: number = this.enabledRuleProfileCount();
     const totalCount: number = this.ruleProfiles.length;
     return this.t('enabledRuleProfileSummary', enabledCount, totalCount);
+  }
+
+  private importedRuleLineCount(): number {
+    let count = 0;
+    this.ruleProfiles.forEach((profile: RuleProfile) => {
+      if (!profile.builtIn) {
+        count += this.ruleProfileLineCount(profile);
+      }
+    });
+    return count;
+  }
+
+  private builtInRuleLineCount(profileId: string): number {
+    const profile = this.ruleProfiles.find((item: RuleProfile) => item.id === profileId);
+    if (profile === undefined) {
+      return 0;
+    }
+    return this.ruleProfileLineCount(profile);
+  }
+
+  private syncRuleCountBadges(): void {
+    this.importedRuleCountBadge = this.importedRuleLineCount();
+    this.customBlockRuleCountBadge = this.builtInRuleLineCount(CUSTOM_BLOCK_RULE_PROFILE_ID);
+    this.customAllowRuleCountBadge = this.builtInRuleLineCount(CUSTOM_ALLOW_RULE_PROFILE_ID);
   }
 
   private rulesImportedMessage(count: number): string {
@@ -586,7 +725,18 @@ struct Index {
   }
 
   private ruleProfileMetaText(profile: RuleProfile): string {
-    return `${this.ruleProfileLineCount(profile)} ${this.t('lines')} · ${profile.enabled ? this.t('enabled') : this.t('disabled')}`;
+    let lineCount: number = this.ruleProfileLineCount(profile);
+    if (profile.id === CUSTOM_BLOCK_RULE_PROFILE_ID) {
+      lineCount = this.customBlockRuleCountBadge;
+    } else if (profile.id === CUSTOM_ALLOW_RULE_PROFILE_ID) {
+      lineCount = this.customAllowRuleCountBadge;
+    }
+    const lockedText: string = profile.builtIn ? ` · ${this.t('builtInRuleProfileLocked')}` : '';
+    return `${lineCount} ${this.t('lines')} · ${profile.enabled ? this.t('enabled') : this.t('disabled')}${lockedText}`;
+  }
+
+  private ruleProfileRenderKey(profile: RuleProfile): string {
+    return `${profile.id}_${profile.updatedAt}_${profile.enabled ? '1' : '0'}_${this.ruleProfileLineCount(profile)}`;
   }
 
   private ruleProfileIndex(profileId: string): number {
@@ -594,11 +744,21 @@ struct Index {
   }
 
   private canMoveRuleProfileUp(profileId: string): boolean {
+    if (this.isBuiltInRuleProfile(profileId)) {
+      return false;
+    }
     return this.ruleProfileIndex(profileId) > 0;
   }
 
   private canMoveRuleProfileDown(profileId: string): boolean {
+    if (this.isBuiltInRuleProfile(profileId)) {
+      return false;
+    }
     const index: number = this.ruleProfileIndex(profileId);
+    const customBlockIndex: number = this.ruleProfileIndex(CUSTOM_BLOCK_RULE_PROFILE_ID);
+    if (customBlockIndex >= 0) {
+      return index >= 0 && index < customBlockIndex - 1;
+    }
     return index >= 0 && index < this.ruleProfiles.length - 1;
   }
 
@@ -629,6 +789,7 @@ struct Index {
     }
     next.splice(to, 0, moved[0]);
     this.ruleProfiles = next;
+    this.syncRuleCountBadges();
     this.rulesText = this.buildMergedRulesText();
     this.rulesDirty = true;
     this.savePersistState();
@@ -644,12 +805,14 @@ struct Index {
           content: profile.content,
           enabled,
           updatedAt: Date.now(),
+          builtIn: profile.builtIn,
         });
       } else {
         next.push(profile);
       }
     });
     this.ruleProfiles = next;
+    this.syncRuleCountBadges();
     this.rulesText = this.buildMergedRulesText();
     this.rulesDirty = true;
     this.savePersistState();
@@ -673,6 +836,160 @@ struct Index {
     this.loadRulesText();
   }
 
+  private parseDnsCacheTtlInput(value: string): number {
+    const trimmed: string = value.trim();
+    if (trimmed.length === 0) {
+      return DEFAULT_DNS_CACHE_TTL_SECONDS;
+    }
+    const parsed = parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return DEFAULT_DNS_CACHE_TTL_SECONDS;
+    }
+    return parsed;
+  }
+
+  private updateDnsCacheTtl(value: string): void {
+    this.dnsCacheTtlInput = value;
+    this.dnsCacheTtlSeconds = this.parseDnsCacheTtlInput(value);
+    this.savePersistState();
+  }
+
+  private buildRuleLineForDomain(domain: string, allow: boolean): string {
+    return allow ? `@@||${domain}^` : `||${domain}^`;
+  }
+
+  private ruleProfileLines(profileContent: string): string[] {
+    return this.normalizeRuleContent(profileContent)
+      .split('\n')
+      .map((line: string) => line.trim())
+      .filter((line: string) => line.length > 0);
+  }
+
+  private quickRuleState(domain: string): QuickRuleState {
+    const normalizedDomain: string = domain.trim().toLowerCase();
+    if (normalizedDomain.length === 0) {
+      return 'none';
+    }
+    const allowRule: string = this.buildRuleLineForDomain(normalizedDomain, true);
+    const blockRule: string = this.buildRuleLineForDomain(normalizedDomain, false);
+    for (const profile of this.normalizeRuleProfiles(this.ruleProfiles)) {
+      const lines: string[] = this.ruleProfileLines(profile.content);
+      if (profile.id === CUSTOM_ALLOW_RULE_PROFILE_ID && lines.includes(allowRule)) {
+        return 'allow';
+      }
+      if (profile.id === CUSTOM_BLOCK_RULE_PROFILE_ID && lines.includes(blockRule)) {
+        return 'block';
+      }
+    }
+    return 'none';
+  }
+
+  private updateRuleProfileContent(profile: RuleProfile, nextLines: string[], originalLines: string[]): RuleProfile {
+    return {
+      id: profile.id,
+      name: profile.name,
+      content: nextLines.join('\n'),
+      enabled: profile.enabled,
+      updatedAt: nextLines.join('\n') === originalLines.join('\n') ? profile.updatedAt : Date.now(),
+      builtIn: profile.builtIn,
+    };
+  }
+
+  private quickRuleActionButton(label: string, domain: string, allow: boolean): QuickRuleDialogButton {
+    return {
+      value: label,
+      action: () => {
+        try {
+          this.upsertQuickRule(domain, allow);
+        } catch (err) {
+          this.errorText = this.errorMessage(err);
+        }
+      }
+    };
+  }
+
+  private upsertQuickRule(domain: string, allow: boolean): void {
+    const normalizedDomain: string = domain.trim().toLowerCase();
+    if (normalizedDomain.length === 0) {
+      return;
+    }
+    const targetRule: string = this.buildRuleLineForDomain(normalizedDomain, allow);
+    const oppositeRule: string = this.buildRuleLineForDomain(normalizedDomain, !allow);
+    const targetProfileId: string = allow ? CUSTOM_ALLOW_RULE_PROFILE_ID : CUSTOM_BLOCK_RULE_PROFILE_ID;
+    const oppositeProfileId: string = allow ? CUSTOM_BLOCK_RULE_PROFILE_ID : CUSTOM_ALLOW_RULE_PROFILE_ID;
+    let targetExistsBefore: boolean = false;
+    let oppositeExistsBefore: boolean = false;
+    const nextProfiles: RuleProfile[] = this.normalizeRuleProfiles(this.ruleProfiles).map((profile: RuleProfile) => {
+      const originalLines: string[] = this.ruleProfileLines(profile.content);
+      let nextLines: string[] = originalLines.slice();
+      if (profile.id === oppositeProfileId) {
+        if (nextLines.includes(oppositeRule)) {
+          oppositeExistsBefore = true;
+          nextLines = nextLines.filter((line: string) => line !== oppositeRule);
+        }
+      }
+      if (profile.id === targetProfileId) {
+        if (nextLines.includes(targetRule)) {
+          targetExistsBefore = true;
+        } else {
+          nextLines.push(targetRule);
+        }
+      }
+      return this.updateRuleProfileContent(profile, nextLines, originalLines);
+    });
+    this.ruleProfiles = nextProfiles;
+    this.syncRuleCountBadges();
+    this.rulesText = this.buildMergedRulesText();
+    this.rulesDirty = true;
+    this.currentTab = 1;
+    this.showDnsSheet = false;
+    this.showDomainSheet = false;
+    this.savePersistState();
+    this.setConfigFeedback(targetExistsBefore && !oppositeExistsBefore
+      ? this.t('ruleAlreadyExists', normalizedDomain)
+      : this.t('ruleAddedNeedsRestart', normalizedDomain));
+  }
+
+  private confirmAddRuleForDomain(domain: string): void {
+    const normalizedDomain: string = domain.trim().toLowerCase();
+    if (normalizedDomain.length === 0) {
+      return;
+    }
+    const currentState: QuickRuleState = this.quickRuleState(normalizedDomain);
+    const blockButtonText: string = currentState === 'block'
+      ? `${this.t('addBlockRuleAction')} ✓`
+      : this.t('addBlockRuleAction');
+    const allowButtonText: string = currentState === 'allow'
+      ? `${this.t('addAllowRuleAction')} ✓`
+      : this.t('addAllowRuleAction');
+    const actionButtons: QuickRuleDialogButton[] = currentState === 'allow'
+      ? [
+          this.quickRuleActionButton(allowButtonText, normalizedDomain, true),
+          this.quickRuleActionButton(blockButtonText, normalizedDomain, false)
+        ]
+      : [
+          this.quickRuleActionButton(blockButtonText, normalizedDomain, false),
+          this.quickRuleActionButton(allowButtonText, normalizedDomain, true)
+        ];
+    this.getUIContext().showAlertDialog({
+      title: this.t('addRuleActionTitle'),
+      message: normalizedDomain,
+      buttons: [
+        {
+          value: this.t('cancel'),
+          action: () => {
+            try {
+              this.promptAction?.showToast({ message: this.t('operationCanceled') });
+            } catch (_) {
+            }
+          }
+        },
+        actionButtons[0],
+        actionButtons[1]
+      ]
+    });
+  }
+
   private applyRuleEditorChanges(): void {
     const next: RuleProfile[] = [];
     let changed = false;
@@ -687,6 +1004,7 @@ struct Index {
           content: nextContent,
           enabled: profile.enabled,
           updatedAt: Date.now(),
+          builtIn: profile.builtIn,
         });
         changed = true;
       } else {
@@ -697,6 +1015,7 @@ struct Index {
       return;
     }
     this.ruleProfiles = next;
+    this.syncRuleCountBadges();
     this.rulesText = this.buildMergedRulesText();
     this.rulesDirty = true;
     this.savePersistState();
@@ -704,6 +1023,9 @@ struct Index {
   }
 
   private confirmDeleteRuleProfile(profileId: string): void {
+    if (this.isBuiltInRuleProfile(profileId)) {
+      return;
+    }
     const profile = this.ruleProfiles.find((item: RuleProfile) => item.id === profileId);
     if (profile === undefined) {
       return;
@@ -725,6 +1047,7 @@ struct Index {
           action: () => {
             try {
               this.ruleProfiles = this.ruleProfiles.filter((item: RuleProfile) => item.id !== profileId);
+              this.syncRuleCountBadges();
               this.rulesText = this.buildMergedRulesText();
               this.rulesDirty = true;
               this.savePersistState();
@@ -1367,6 +1690,7 @@ struct Index {
         rulesFilePath: this.rulesFilePath,
         queryLogFilePath: this.queryLogFilePath,
         debugLogFilePath: this.debugLogFilePath,
+        dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
       },
     };
   }
@@ -1413,6 +1737,14 @@ struct Index {
       if (typeof state.currentTab === 'number' && state.currentTab >= 0 && state.currentTab <= 2) {
         this.currentTab = state.currentTab;
       }
+      if (typeof state.dnsCacheTtlSeconds === 'number' && Number.isFinite(state.dnsCacheTtlSeconds)
+        && state.dnsCacheTtlSeconds >= 0) {
+        this.dnsCacheTtlSeconds = Math.floor(state.dnsCacheTtlSeconds);
+        this.dnsCacheTtlInput = `${this.dnsCacheTtlSeconds}`;
+      } else {
+        this.dnsCacheTtlSeconds = DEFAULT_DNS_CACHE_TTL_SECONDS;
+        this.dnsCacheTtlInput = `${DEFAULT_DNS_CACHE_TTL_SECONDS}`;
+      }
       if (Array.isArray(state.ruleProfiles)) {
         const nextProfiles: RuleProfile[] = [];
         state.ruleProfiles.forEach((item: RuleProfile, index: number) => {
@@ -1427,13 +1759,15 @@ struct Index {
             content: this.normalizeRuleContent(item.content),
             enabled: item.enabled !== false,
             updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+            builtIn: this.isBuiltInRuleProfile(item.id),
           });
         });
         if (nextProfiles.length === 1 && this.isLegacyDefaultRulesText(nextProfiles[0].content)) {
-          this.ruleProfiles = [];
+          this.ruleProfiles = this.normalizeRuleProfiles([]);
         } else if (nextProfiles.length > 0) {
-          this.ruleProfiles = nextProfiles;
+          this.ruleProfiles = this.normalizeRuleProfiles(nextProfiles);
         }
+        this.syncRuleCountBadges();
       }
       this.syncKeepAliveEnabledFlag();
       if (this.keepAliveEnabled) {
@@ -1453,6 +1787,7 @@ struct Index {
       language: this.language,
       themeMode: this.themeMode,
       ruleProfiles: this.ruleProfiles,
+      dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
       currentTab: this.currentTab,
     };
     this.writeTextFile(this.stateFilePath, JSON.stringify(state));
@@ -1796,7 +2131,10 @@ struct Index {
       }
 
       this.ensureRuleProfilesInitialized();
-      this.ruleProfiles = this.ruleProfiles.concat(importedProfiles);
+        const importedOnlyProfiles: RuleProfile[] = this.ruleProfiles.filter((profile: RuleProfile) => !profile.builtIn);
+        const builtInProfiles: RuleProfile[] = this.ruleProfiles.filter((profile: RuleProfile) => profile.builtIn);
+        this.ruleProfiles = importedOnlyProfiles.concat(importedProfiles).concat(builtInProfiles);
+        this.syncRuleCountBadges();
       this.rulesText = this.buildMergedRulesText();
       this.rulesDirty = true;
       this.currentTab = 1;
@@ -1829,11 +2167,12 @@ struct Index {
     hilog.info(DOMAIN, TAG, '==/vpn_ui/rules_saved/ path=%{public}s bytes=%{public}d', this.rulesFilePath,
       this.rulesText.length);
     this.appendDebugLog(`==/vpn_ui/rules_saved/ path=${this.rulesFilePath} bytes=${this.rulesText.length}`);
-    this.setConfigFeedback(this.t('rulesSavedSuccess'));
+    this.setConfigFeedback(this.t('ruleAddedNeedsRestart', this.t('rulesSavedSuccess')));
   }
 
   private resetRulesToDefault(): void {
-    this.ruleProfiles = [];
+    this.ruleProfiles = this.normalizeRuleProfiles([]);
+    this.syncRuleCountBadges();
     this.rulesText = '';
     this.rulesDirty = true;
     this.errorText = '';
@@ -2498,6 +2837,26 @@ struct Index {
     })
   }
 
+  @Builder
+  private RuleCountBadge(label: string, count: number, backgroundColor: string, textColor: string) {
+    Row({ space: 6 }) {
+      Text(label)
+        .fontSize(12)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(textColor)
+      Text(`${count}`)
+        .fontSize(12)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(textColor)
+    }
+    .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+    .backgroundColor(backgroundColor)
+    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+    .border({ width: 1, color: this.cardBorderTone() })
+    .borderRadius(12)
+    .margin({ right: 8, bottom: 8 })
+  }
+
   private visibleQueryEvents(): QueryLogEntry[] {
     if (this.queryEvents.length <= 8) {
       return this.queryEvents;
@@ -2568,6 +2927,11 @@ struct Index {
           .fontWeight(FontWeight.Medium)
           .width('100%')
       }
+
+      Text(this.t('tapDomainToCreateRule'))
+        .fontSize(12)
+        .fontColor(this.mutedTextColor())
+        .width('100%')
 
       TextInput({ placeholder: this.t('dnsSearchPlaceholder'), text: this.dnsSearchText })
         .width('100%')
@@ -2662,6 +3026,9 @@ struct Index {
               .border({ width: 1, color: this.sheetBorderTone() })
               .shadow({ radius: 10, color: this.sheetShadowTone(), offsetX: 0, offsetY: 4 })
             }
+            .onClick(() => {
+              this.confirmAddRuleForDomain(item.domain);
+            })
           }, (item: QueryLogEntry) => `${item.ts}_${item.domain}_${item.qtype}`)
         }
         .width('100%')
@@ -2738,6 +3105,11 @@ struct Index {
           .fontWeight(FontWeight.Medium)
           .width('100%')
       }
+
+      Text(this.t('tapDomainToCreateRule'))
+        .fontSize(12)
+        .fontColor(this.mutedTextColor())
+        .width('100%')
 
       Row({ space: 10 }) {
         ForEach(['all', 'allowed', 'blocked'] as QueryActionFilter[], (filter: QueryActionFilter) => {
@@ -2817,6 +3189,9 @@ struct Index {
               .border({ width: 1, color: this.sheetBorderTone() })
               .shadow({ radius: 10, color: this.sheetShadowTone(), offsetX: 0, offsetY: 4 })
             }
+            .onClick(() => {
+              this.confirmAddRuleForDomain(item.domain);
+            })
           }, (item: DomainQueryStats) => `${item.domain}_${item.total}_${item.totalDnsBytes}`)
         }
         .width('100%')
@@ -3466,7 +3841,7 @@ struct Index {
           }
           .alignItems(VerticalAlign.Center)
 
-          Row({ space: 8 }) {
+          Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start, alignItems: ItemAlign.Center }) {
             Text(this.enabledRuleProfileSummary())
               .fontSize(12)
               .fontColor(this.selectedChipTextTone())
@@ -3475,6 +3850,25 @@ struct Index {
               .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
               .border({ width: 1, color: this.cardBorderTone() })
               .borderRadius(12)
+              .margin({ right: 8, bottom: 8 })
+            this.RuleCountBadge(
+              this.t('importedRules'),
+              this.importedRuleCountBadge,
+              this.coolNeutralChipSurfaceTone(),
+              this.primaryTextColor()
+            )
+            this.RuleCountBadge(
+              this.t('customBlockRules'),
+              this.customBlockRuleCountBadge,
+              this.coolNeutralChipSurfaceTone(),
+              '#B42318'
+            )
+            this.RuleCountBadge(
+              this.t('customAllowRules'),
+              this.customAllowRuleCountBadge,
+              this.softGreenTone(),
+              '#185B45'
+            )
           }
           .width('100%')
 
@@ -3489,6 +3883,67 @@ struct Index {
         .width('100%')
         .alignItems(HorizontalAlign.Start)
         .padding({ left: 20, right: 20, top: 22, bottom: 24 })
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(24)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
+        })
+
+        Column({ space: 12 }) {
+          Row({ space: 8 }) {
+            this.IconBubble(this.sectionGlyph('dnsPackets'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
+            Text(this.t('dnsCacheTitle'))
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+          }
+          Text(this.t('dnsCacheHint'))
+            .fontSize(13)
+            .lineHeight(20)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+
+          Row({ space: 12 }) {
+            Column({ space: 4 }) {
+              Text(this.t('dnsCacheTtlLabel'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text('s')
+                .fontSize(12)
+                .fontColor(this.secondaryTextColor())
+            }
+            .alignItems(HorizontalAlign.Start)
+
+            TextInput({ text: this.dnsCacheTtlInput, placeholder: `${DEFAULT_DNS_CACHE_TTL_SECONDS}` })
+              .layoutWeight(1)
+              .height(44)
+              .fontSize(15)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12 })
+              .onChange((value: string) => {
+                this.updateDnsCacheTtl(value);
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(18)
         .backgroundColor(this.elevatedSurfaceTone())
         .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
         .borderRadius(24)
@@ -3557,7 +4012,6 @@ struct Index {
 
                     Toggle({ type: ToggleType.Switch, isOn: profile.enabled })
                       .selectedColor(this.accentBlueTone())
-                      .switchPointColor('#FFFFFF')
                       .onChange((value: boolean) => {
                         this.toggleRuleProfileEnabled(profile.id, value);
                       })
@@ -3605,6 +4059,7 @@ struct Index {
                         this.openRuleEditor(profile.id);
                       })
                     Button(this.t('deleteRule'))
+                      .enabled(!profile.builtIn)
                       .height(34)
                       .layoutWeight(1)
                       .backgroundColor(this.coolNeutralChipSurfaceTone())
@@ -3627,7 +4082,7 @@ struct Index {
                 .border({ width: 1, color: this.sheetBorderTone() })
                 .shadow({ radius: 10, color: this.sheetShadowTone() })
               }
-            }, (profile: RuleProfile) => profile.id)
+            }, (profile: RuleProfile) => this.ruleProfileRenderKey(profile))
           }
           .width('100%')
           .height('100%')

@@ -184,6 +184,19 @@
     { "name": "clickViewDebugAndCopy", "value": "点击查看完整日志并复制" },
     { "name": "exportDebugLogsFailed", "value": "导出调试日志失败" },
     { "name": "exportRulesFailed", "value": "导出规则失败" },
-    { "name": "exportFileFailed", "value": "导出文件失败：%s" }
+    { "name": "exportFileFailed", "value": "导出文件失败：%s" },
+    { "name": "dnsCacheTitle", "value": "DNS 缓存" },
+    { "name": "dnsCacheHint", "value": "缓存上游 DNS 响应，减少重复请求。缓存时间单位为秒，设为 0 可关闭缓存。" },
+    { "name": "dnsCacheTtlLabel", "value": "缓存时间" },
+    { "name": "importedRules", "value": "导入规则" },
+    { "name": "customBlockRules", "value": "自定义拦截" },
+    { "name": "customAllowRules", "value": "自定义放行" },
+    { "name": "builtInRuleProfileLocked", "value": "内置规则组" },
+    { "name": "addRuleActionTitle", "value": "添加自定义规则" },
+    { "name": "addAllowRuleAction", "value": "放行" },
+    { "name": "addBlockRuleAction", "value": "拦截" },
+    { "name": "ruleAddedNeedsRestart", "value": "已添加规则：%s。重启过滤后生效。" },
+    { "name": "ruleAlreadyExists", "value": "规则已存在：%s" },
+    { "name": "tapDomainToCreateRule", "value": "点击域名可快速添加放行或拦截规则" }
   ]
 }

@@ -184,6 +184,19 @@
     { "name": "clickViewDebugAndCopy", "value": "Tap to view full log and copy" },
     { "name": "exportDebugLogsFailed", "value": "Failed to export debug logs" },
     { "name": "exportRulesFailed", "value": "Failed to export rules" },
-    { "name": "exportFileFailed", "value": "Failed to export file: %s" }
+    { "name": "exportFileFailed", "value": "Failed to export file: %s" },
+    { "name": "dnsCacheTitle", "value": "DNS Cache" },
+    { "name": "dnsCacheHint", "value": "Cache upstream DNS responses to avoid repeated lookups. The cache duration is in seconds. Set to 0 to disable cache." },
+    { "name": "dnsCacheTtlLabel", "value": "Cache TTL" },
+    { "name": "importedRules", "value": "Imported Rules" },
+    { "name": "customBlockRules", "value": "Custom Block" },
+    { "name": "customAllowRules", "value": "Custom Allow" },
+    { "name": "builtInRuleProfileLocked", "value": "Built-in group" },
+    { "name": "addRuleActionTitle", "value": "Add Custom Rule" },
+    { "name": "addAllowRuleAction", "value": "Allow" },
+    { "name": "addBlockRuleAction", "value": "Block" },
+    { "name": "ruleAddedNeedsRestart", "value": "Rule added: %s. Restart filtering for it to take effect." },
+    { "name": "ruleAlreadyExists", "value": "Rule already exists: %s" },
+    { "name": "tapDomainToCreateRule", "value": "Tap a domain to quickly add an allow or block rule" }
   ]
 }

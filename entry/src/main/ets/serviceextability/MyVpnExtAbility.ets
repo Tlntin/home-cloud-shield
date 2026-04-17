@@ -17,6 +17,8 @@ const WANT_STATUS_FILE_PATH = 'statusFilePath';
 const WANT_RULES_FILE_PATH = 'rulesFilePath';
 const WANT_QUERY_LOG_FILE_PATH = 'queryLogFilePath';
 const WANT_DEBUG_LOG_FILE_PATH = 'debugLogFilePath';
+const WANT_DNS_CACHE_TTL_SECONDS = 'dnsCacheTtlSeconds';
+const DEFAULT_DNS_CACHE_TTL_SECONDS = 3600;
 const TUN_ADDRESS_IP = '10.8.0.2';
 const DNS_SERVER_IP = '10.8.0.1';
 const IPV4_ROUTE = '10.8.0.0';
@@ -72,6 +74,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private rulesFilePath: string = '';
   private queryLogFilePath: string = '';
   private debugLogFilePath: string = '';
+  private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   private statusTimer: number = -1;
   private lastPhase: string = 'idle';
   private lastRunning: boolean = false;
@@ -113,6 +116,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.rulesFilePath = rulesPath.length > 0 ? rulesPath : `${vpnDir}/${RULES_FILE_NAME}`;
     this.queryLogFilePath = queryLogPath.length > 0 ? queryLogPath : `${vpnDir}/${QUERY_LOG_FILE_NAME}`;
     this.debugLogFilePath = debugLogPath.length > 0 ? debugLogPath : `${vpnDir}/${DEBUG_LOG_FILE_NAME}`;
+    this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
     try {
       fileIo.mkdirSync(vpnDir, true);
     } catch (_) {
@@ -141,6 +145,23 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     } catch (_) {
       return '';
     }
+  }
+
+  private wantNumberParam(want: Want, key: string, fallback: number): number {
+    try {
+      const value = want.parameters?.[key];
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        return Math.floor(value);
+      }
+      if (typeof value === 'string') {
+        const parsed = parseInt(value, 10);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+          return parsed;
+        }
+      }
+    } catch (_) {
+    }
+    return fallback;
   }
 
   private buildVpnConfig(): vpnExtension.VpnConfig {
@@ -238,19 +259,21 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
         DNS_SERVER_IP,
         UPSTREAM_DNS_IP,
         this.rulesFilePath,
-        this.queryLogFilePath
+        this.queryLogFilePath,
+        this.dnsCacheTtlSeconds
       );
       hilog.info(
         DOMAIN,
         TAG,
-        '==/vpn_ext/native_start/ fd=%{public}d dns4=%{public}s upstream=%{public}s rules=%{public}s query=%{public}s',
+        '==/vpn_ext/native_start/ fd=%{public}d dns4=%{public}s upstream=%{public}s rules=%{public}s query=%{public}s cache_ttl=%{public}d',
         this.tunFd,
         DNS_SERVER_IP,
         UPSTREAM_DNS_IP,
         this.rulesFilePath,
-        this.queryLogFilePath
+        this.queryLogFilePath,
+        this.dnsCacheTtlSeconds
       );
-      this.appendDebugLog(`==/vpn_ext/native_start/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} upstream=${UPSTREAM_DNS_IP} rules=${this.rulesFilePath} query=${this.queryLogFilePath}`);
+      this.appendDebugLog(`==/vpn_ext/native_start/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} upstream=${UPSTREAM_DNS_IP} rules=${this.rulesFilePath} query=${this.queryLogFilePath} cache_ttl=${this.dnsCacheTtlSeconds}`);
       if (nativeError !== undefined) {
         throw new Error(nativeError);
       }

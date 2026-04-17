@@ -184,6 +184,19 @@
     { "name": "clickViewDebugAndCopy", "value": "點擊查看完整日誌並複製" },
     { "name": "exportDebugLogsFailed", "value": "導出調試日誌失敗" },
     { "name": "exportRulesFailed", "value": "導出規則失敗" },
-    { "name": "exportFileFailed", "value": "導出檔案失敗：%s" }
+    { "name": "exportFileFailed", "value": "導出檔案失敗：%s" },
+    { "name": "dnsCacheTitle", "value": "DNS 快取" },
+    { "name": "dnsCacheHint", "value": "快取上游 DNS 回應，減少重複請求。快取時間單位為秒，設為 0 可關閉快取。" },
+    { "name": "dnsCacheTtlLabel", "value": "快取時間" },
+    { "name": "importedRules", "value": "導入規則" },
+    { "name": "customBlockRules", "value": "自訂攔截" },
+    { "name": "customAllowRules", "value": "自訂放行" },
+    { "name": "builtInRuleProfileLocked", "value": "內建規則組" },
+    { "name": "addRuleActionTitle", "value": "添加自訂規則" },
+    { "name": "addAllowRuleAction", "value": "放行" },
+    { "name": "addBlockRuleAction", "value": "攔截" },
+    { "name": "ruleAddedNeedsRestart", "value": "已添加規則：%s。重啟過濾後生效。" },
+    { "name": "ruleAlreadyExists", "value": "規則已存在：%s" },
+    { "name": "tapDomainToCreateRule", "value": "點擊網域可快速添加放行或攔截規則" }
   ]
 }

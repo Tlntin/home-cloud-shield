@@ -14,6 +14,7 @@
 #include <string>
 #include <sys/time.h>
 #include <thread>
+#include <unordered_map>
 #include <unistd.h>
 #include <vector>
 
@@ -74,6 +75,11 @@ struct MatchResult {
     std::string matchedRule;
 };
 
+struct DnsCacheEntry {
+    std::vector<uint8_t> response;
+    int64_t expiresAtMs = 0;
+};
+
 struct StatsState {
     std::mutex mu;
     bool running = false;
@@ -97,6 +103,9 @@ struct StatsState {
     std::string queryLogPath;
     std::string upstreamDnsIp;
     std::string dnsServerIp;
+    std::vector<RuleEntry> activeRules;
+    uint32_t dnsCacheTtlSeconds = 3600;
+    std::unordered_map<std::string, DnsCacheEntry> dnsResponseCache;
     std::thread worker;
 };
 
@@ -846,6 +855,71 @@ std::vector<uint8_t> BuildBlockedDnsResponse(const uint8_t *query, size_t len, c
     return out;
 }
 
+std::string BuildDnsCacheKey(const DnsQuestion &question)
+{
+    return question.name + "|" + std::to_string(question.qtype);
+}
+
+void PruneExpiredDnsCacheLocked(StatsState &state, int64_t nowMs)
+{
+    for (auto it = state.dnsResponseCache.begin(); it != state.dnsResponseCache.end();) {
+        if (it->second.expiresAtMs <= nowMs) {
+            it = state.dnsResponseCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::vector<uint8_t> CloneCachedDnsResponseForQuery(const std::vector<uint8_t> &cachedResponse, const uint8_t *query,
+    size_t queryLen)
+{
+    if (cachedResponse.size() < 2 || query == nullptr || queryLen < 2) {
+        return {};
+    }
+
+    std::vector<uint8_t> response = cachedResponse;
+    response[0] = query[0];
+    response[1] = query[1];
+    return response;
+}
+
+bool TryGetCachedDnsResponse(const DnsQuestion &question, const uint8_t *query, size_t queryLen,
+    std::vector<uint8_t> &response)
+{
+    const int64_t nowMs = NowMs();
+    std::lock_guard<std::mutex> lock(g_state.mu);
+    if (g_state.dnsCacheTtlSeconds == 0) {
+        return false;
+    }
+
+    PruneExpiredDnsCacheLocked(g_state, nowMs);
+    const auto entry = g_state.dnsResponseCache.find(BuildDnsCacheKey(question));
+    if (entry == g_state.dnsResponseCache.end()) {
+        return false;
+    }
+
+    response = CloneCachedDnsResponseForQuery(entry->second.response, query, queryLen);
+    return !response.empty();
+}
+
+void StoreDnsResponseCache(const DnsQuestion &question, const std::vector<uint8_t> &response)
+{
+    if (response.size() < 2) {
+        return;
+    }
+
+    const int64_t nowMs = NowMs();
+    std::lock_guard<std::mutex> lock(g_state.mu);
+    if (g_state.dnsCacheTtlSeconds == 0) {
+        return;
+    }
+
+    PruneExpiredDnsCacheLocked(g_state, nowMs);
+    g_state.dnsResponseCache[BuildDnsCacheKey(question)] = {response,
+        nowMs + static_cast<int64_t>(g_state.dnsCacheTtlSeconds) * 1000};
+}
+
 std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std::string &upstreamDnsIp, std::string &error)
 {
     std::vector<uint8_t> response;
@@ -1109,22 +1183,28 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
     std::string rulesPath;
     std::string queryLogPath;
     std::string upstreamDnsIp;
+    std::vector<RuleEntry> activeRules;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         rulesPath = g_state.rulesPath;
         queryLogPath = g_state.queryLogPath;
         upstreamDnsIp = g_state.upstreamDnsIp;
+        activeRules = g_state.activeRules;
     }
 
-    const std::vector<RuleEntry> rules = LoadRulesSnapshot(rulesPath);
-    const MatchResult match = MatchDomain(question.name, question.qtype, rules);
+    const MatchResult match = MatchDomain(question.name, question.qtype, activeRules);
 
     std::vector<uint8_t> dnsResponse;
     std::string responseError;
     if (match.blocked) {
         dnsResponse = BuildBlockedDnsResponse(dnsPayload, dnsLen, question);
     } else {
-        dnsResponse = ForwardDnsQuery(dnsPayload, dnsLen, upstreamDnsIp, responseError);
+        if (!TryGetCachedDnsResponse(question, dnsPayload, dnsLen, dnsResponse)) {
+            dnsResponse = ForwardDnsQuery(dnsPayload, dnsLen, upstreamDnsIp, responseError);
+            if (!dnsResponse.empty()) {
+                StoreDnsResponseCache(question, dnsResponse);
+            }
+        }
     }
 
     if (dnsResponse.empty()) {
@@ -1227,7 +1307,7 @@ void ReaderLoop(int tunFd)
 }
 
 void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp, const std::string &upstreamDnsIp,
-    const std::string &rulesPath, const std::string &queryLogPath)
+    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds)
 {
     state.running = true;
     state.stopRequested = false;
@@ -1250,6 +1330,9 @@ void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp,
     state.upstreamDnsIp = upstreamDnsIp;
     state.rulesPath = rulesPath;
     state.queryLogPath = queryLogPath;
+    state.activeRules = LoadRulesSnapshot(rulesPath);
+    state.dnsCacheTtlSeconds = dnsCacheTtlSeconds;
+    state.dnsResponseCache.clear();
 }
 
 void StopUnlocked(StatsState &state, std::thread &worker)
@@ -1267,12 +1350,17 @@ std::string StopDnsFilter()
     if (worker.joinable()) {
         worker.join();
     }
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.activeRules.clear();
+        g_state.dnsResponseCache.clear();
+    }
     LogInfo("%{public}s", "==/vpn_native/stop/");
     return {};
 }
 
 std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::string &upstreamDnsIp,
-    const std::string &rulesPath, const std::string &queryLogPath)
+    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds)
 {
     if (fd < 0) {
         return "invalid tun fd";
@@ -1290,8 +1378,8 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
         return "query log path is required";
     }
 
-    LogInfo("==/vpn_native/start/ fd=%{public}d dns=%{public}s upstream=%{public}s rules=%{public}s query=%{public}s",
-        fd, dnsServerIp.c_str(), upstreamDnsIp.c_str(), rulesPath.c_str(), queryLogPath.c_str());
+    LogInfo("==/vpn_native/start/ fd=%{public}d dns=%{public}s upstream=%{public}s rules=%{public}s query=%{public}s cache_ttl=%{public}u",
+        fd, dnsServerIp.c_str(), upstreamDnsIp.c_str(), rulesPath.c_str(), queryLogPath.c_str(), dnsCacheTtlSeconds);
     StopDnsFilter();
 
     const int dupFd = dup(fd);
@@ -1305,7 +1393,7 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
 
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
-        ResetStatsLocked(g_state, dupFd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath);
+        ResetStatsLocked(g_state, dupFd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds);
         g_state.worker = std::thread(ReaderLoop, dupFd);
     }
 
@@ -1340,11 +1428,11 @@ std::string GetStatsJson()
 
 napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
 {
-    size_t argc = 5;
-    napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    size_t argc = 6;
+    napi_value argv[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-    if (argc < 5) {
-        return MakeUtf8(env, "tun fd, dns server ip, upstream dns ip, rules path, and query log path are required");
+    if (argc < 6) {
+        return MakeUtf8(env, "tun fd, dns server ip, upstream dns ip, rules path, query log path, and cache ttl are required");
     }
 
     int32_t fd = -1;
@@ -1352,6 +1440,7 @@ napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
     std::string upstreamDnsIp;
     std::string rulesPath;
     std::string queryLogPath;
+    int32_t dnsCacheTtlSeconds = 0;
     if (!ReadArgInt32(env, argv[0], fd)) {
         return MakeUtf8(env, "invalid tun fd");
     }
@@ -1367,8 +1456,13 @@ napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
     if (!ReadArgString(env, argv[4], queryLogPath) || queryLogPath.empty()) {
         return MakeUtf8(env, "invalid query log path");
     }
+    if (!ReadArgInt32(env, argv[5], dnsCacheTtlSeconds) || dnsCacheTtlSeconds < 0) {
+        return MakeUtf8(env, "invalid dns cache ttl");
+    }
 
-    return ReturnErrOrUndefined(env, StartDnsFilter(fd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath));
+    return ReturnErrOrUndefined(env,
+        StartDnsFilter(fd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath,
+            static_cast<uint32_t>(dnsCacheTtlSeconds)));
 }
 
 napi_value JsStopDnsFilter(napi_env env, napi_callback_info info)

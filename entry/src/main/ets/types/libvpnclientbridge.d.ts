@@ -4,7 +4,8 @@ declare module 'libvpnclientbridge.so' {
     dnsServerIp: string,
     upstreamDnsIp: string,
     rulesPath: string,
-    queryLogPath: string
+    queryLogPath: string,
+    dnsCacheTtlSeconds: number
   ): string | undefined;
   export function stopDnsFilter(): string | undefined;
   export function getStats(): string;
