@@ -96,6 +96,8 @@ struct StatsState {
     uint64_t allowedQueries = 0;
     uint64_t blockedQueries = 0;
     uint64_t loggedQueries = 0;
+        uint64_t dnsCacheHits = 0;
+        uint64_t dnsCacheMisses = 0;
     std::string lastQueryDomain;
     std::string lastMatchedRule;
     std::string lastError;
@@ -1136,8 +1138,8 @@ void UpdatePacketStatsLocked(StatsState &state, const uint8_t *packet, ssize_t l
     }
 }
 
-void LogDnsEvent(const std::string &path, const std::string &domain, uint16_t qtype, bool blocked, const std::string &rule,
-    size_t requestBytes, size_t responseBytes)
+void LogDnsEvent(const std::string &path, const std::string &domain, uint16_t qtype, bool blocked,
+    const std::string &rule, const std::string &source, size_t requestBytes, size_t responseBytes)
 {
     std::ostringstream out;
     out << '{'
@@ -1146,14 +1148,15 @@ void LogDnsEvent(const std::string &path, const std::string &domain, uint16_t qt
         << "\"qtype\":\"" << QuestionTypeName(qtype) << "\"," 
         << "\"action\":\"" << (blocked ? "blocked" : "allowed") << "\"," 
         << "\"rule\":\"" << EscapeJson(rule) << "\"," 
+        << "\"source\":\"" << EscapeJson(source) << "\"," 
         << "\"requestBytes\":" << requestBytes << ','
         << "\"responseBytes\":" << responseBytes << ','
         << "\"totalDnsBytes\":" << (requestBytes + responseBytes)
         << '}';
     AppendTextLine(path, out.str());
-    LogInfo("==/vpn_native/dns/ domain=%{public}s qtype=%{public}s action=%{public}s rule=%{public}s req=%{public}zu resp=%{public}zu",
-        domain.c_str(), QuestionTypeName(qtype), blocked ? "blocked" : "allowed", rule.c_str(), requestBytes,
-        responseBytes);
+    LogInfo("==/vpn_native/dns/ domain=%{public}s qtype=%{public}s action=%{public}s source=%{public}s rule=%{public}s req=%{public}zu resp=%{public}zu",
+        domain.c_str(), QuestionTypeName(qtype), blocked ? "blocked" : "allowed", source.c_str(), rule.c_str(),
+        requestBytes, responseBytes);
 }
 
 void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
@@ -1195,11 +1198,24 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
     const MatchResult match = MatchDomain(question.name, question.qtype, activeRules);
 
     std::vector<uint8_t> dnsResponse;
+    std::string source = "upstream";
     std::string responseError;
     if (match.blocked) {
+        source = "blocked";
         dnsResponse = BuildBlockedDnsResponse(dnsPayload, dnsLen, question);
     } else {
-        if (!TryGetCachedDnsResponse(question, dnsPayload, dnsLen, dnsResponse)) {
+        const bool cacheHit = TryGetCachedDnsResponse(question, dnsPayload, dnsLen, dnsResponse);
+        {
+            std::lock_guard<std::mutex> lock(g_state.mu);
+            if (cacheHit) {
+                g_state.dnsCacheHits++;
+            } else {
+                g_state.dnsCacheMisses++;
+            }
+        }
+        if (cacheHit) {
+            source = "cache";
+        } else {
             dnsResponse = ForwardDnsQuery(dnsPayload, dnsLen, upstreamDnsIp, responseError);
             if (!dnsResponse.empty()) {
                 StoreDnsResponseCache(question, dnsResponse);
@@ -1228,7 +1244,7 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
         return;
     }
 
-    LogDnsEvent(queryLogPath, question.name, question.qtype, match.blocked, match.matchedRule, dnsLen,
+    LogDnsEvent(queryLogPath, question.name, question.qtype, match.blocked, match.matchedRule, source, dnsLen,
         dnsResponse.size());
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
@@ -1323,6 +1339,8 @@ void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp,
     state.allowedQueries = 0;
     state.blockedQueries = 0;
     state.loggedQueries = 0;
+        state.dnsCacheHits = 0;
+        state.dnsCacheMisses = 0;
     state.lastQueryDomain.clear();
     state.lastMatchedRule.clear();
     state.lastError.clear();
@@ -1419,6 +1437,8 @@ std::string GetStatsJson()
         << "\"allowedQueries\":" << g_state.allowedQueries << ','
         << "\"blockedQueries\":" << g_state.blockedQueries << ','
         << "\"loggedQueries\":" << g_state.loggedQueries << ','
+            << "\"dnsCacheHits\":" << g_state.dnsCacheHits << ','
+            << "\"dnsCacheMisses\":" << g_state.dnsCacheMisses << ','
         << "\"lastQueryDomain\":\"" << EscapeJson(g_state.lastQueryDomain) << "\"," 
         << "\"lastMatchedRule\":\"" << EscapeJson(g_state.lastMatchedRule) << "\"," 
         << "\"lastError\":\"" << EscapeJson(g_state.lastError) << "\""

@@ -18,7 +18,13 @@ const WANT_RULES_FILE_PATH = 'rulesFilePath';
 const WANT_QUERY_LOG_FILE_PATH = 'queryLogFilePath';
 const WANT_DEBUG_LOG_FILE_PATH = 'debugLogFilePath';
 const WANT_DNS_CACHE_TTL_SECONDS = 'dnsCacheTtlSeconds';
+const WANT_LOG_RETENTION_DAYS = 'logRetentionDays';
+const WANT_LOG_MAX_SIZE_MB = 'logMaxSizeMb';
+const WANT_CLEAR_DNS_LOG_ON_START = 'clearDnsLogOnStart';
+const WANT_CLEAR_DEBUG_LOG_ON_START = 'clearDebugLogOnStart';
 const DEFAULT_DNS_CACHE_TTL_SECONDS = 3600;
+const DEFAULT_LOG_RETENTION_DAYS = 0;
+const DEFAULT_LOG_MAX_SIZE_MB = 0;
 const TUN_ADDRESS_IP = '10.8.0.2';
 const DNS_SERVER_IP = '10.8.0.1';
 const IPV4_ROUTE = '10.8.0.0';
@@ -53,6 +59,8 @@ interface NativeStats {
   allowedQueries: number;
   blockedQueries: number;
   loggedQueries: number;
+  dnsCacheHits: number;
+  dnsCacheMisses: number;
   lastQueryDomain: string;
   lastMatchedRule: string;
   lastError: string;
@@ -75,6 +83,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private queryLogFilePath: string = '';
   private debugLogFilePath: string = '';
   private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
+  private logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
+  private logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
+  private clearDnsLogOnStart: boolean = false;
+  private clearDebugLogOnStart: boolean = false;
   private statusTimer: number = -1;
   private lastPhase: string = 'idle';
   private lastRunning: boolean = false;
@@ -117,6 +129,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.queryLogFilePath = queryLogPath.length > 0 ? queryLogPath : `${vpnDir}/${QUERY_LOG_FILE_NAME}`;
     this.debugLogFilePath = debugLogPath.length > 0 ? debugLogPath : `${vpnDir}/${DEBUG_LOG_FILE_NAME}`;
     this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
+    this.logRetentionDays = this.wantNumberParam(want, WANT_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS);
+    this.logMaxSizeMb = this.wantNumberParam(want, WANT_LOG_MAX_SIZE_MB, DEFAULT_LOG_MAX_SIZE_MB);
+    this.clearDnsLogOnStart = this.wantBooleanParam(want, WANT_CLEAR_DNS_LOG_ON_START, false);
+    this.clearDebugLogOnStart = this.wantBooleanParam(want, WANT_CLEAR_DEBUG_LOG_ON_START, false);
     try {
       fileIo.mkdirSync(vpnDir, true);
     } catch (_) {
@@ -126,7 +142,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     if (this.isLegacyDefaultRulesText(existingRules)) {
       this.writeTextFile(this.rulesFilePath, '');
     }
-    this.writeTextFile(this.queryLogFilePath, '');
+    this.prepareLogFile(this.queryLogFilePath, this.clearDnsLogOnStart, this.logRetentionDays, this.logMaxSizeMb, true);
+    this.prepareLogFile(this.debugLogFilePath, this.clearDebugLogOnStart, this.logRetentionDays, this.logMaxSizeMb, false);
     hilog.info(
       DOMAIN,
       TAG,
@@ -162,6 +179,121 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     } catch (_) {
     }
     return fallback;
+  }
+
+  private wantBooleanParam(want: Want, key: string, fallback: boolean): boolean {
+    try {
+      const value = want.parameters?.[key];
+      return typeof value === 'boolean' ? value : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  private prepareLogFile(path: string, clearOnStart: boolean, retentionDays: number, maxSizeMb: number,
+    isDnsQueryLog: boolean): void {
+    if (clearOnStart) {
+      this.writeTextFile(path, '');
+      return;
+    }
+    this.ensureTextFileExists(path);
+    this.pruneLogFileByDays(path, retentionDays, isDnsQueryLog);
+    this.truncateLogFileIfNeeded(path, maxSizeMb);
+  }
+
+  private pruneLogFileByDays(path: string, retentionDays: number, isDnsQueryLog: boolean): void {
+    if (retentionDays <= 0) {
+      return;
+    }
+    const content: string = this.readTextFile(path);
+    if (content.trim().length === 0) {
+      return;
+    }
+    const cutoffMs: number = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+    const originalLines: string[] = content.split('\n');
+    const keptLines: string[] = [];
+    originalLines.forEach((rawLine: string) => {
+      const line: string = rawLine.trim();
+      if (line.length === 0) {
+        return;
+      }
+      if (this.shouldKeepLogLine(line, cutoffMs, isDnsQueryLog)) {
+        keptLines.push(line);
+      }
+    });
+    if (keptLines.length === originalLines.filter((line: string) => line.trim().length > 0).length) {
+      return;
+    }
+    this.writeTextFile(path, this.normalizeLogFileContent(keptLines));
+    hilog.info(DOMAIN, TAG, '==/vpn_ext/log_pruned_days/ path=%{public}s days=%{public}d', path, retentionDays);
+    this.appendDebugLog(`==/vpn_ext/log_pruned_days/ path=${path} days=${retentionDays}`);
+  }
+
+  private shouldKeepLogLine(line: string, cutoffMs: number, isDnsQueryLog: boolean): boolean {
+    const timestampMs: number = isDnsQueryLog ? this.parseDnsLogTimestamp(line) : this.parseDebugLogTimestamp(line);
+    if (!Number.isFinite(timestampMs)) {
+      return true;
+    }
+    return timestampMs >= cutoffMs;
+  }
+
+  private parseDnsLogTimestamp(line: string): number {
+    try {
+      const entry = JSON.parse(line) as Record<string, number>;
+      const ts = entry.ts;
+      return typeof ts === 'number' && Number.isFinite(ts) ? ts : NaN;
+    } catch (_) {
+      return NaN;
+    }
+  }
+
+  private parseDebugLogTimestamp(line: string): number {
+    const firstSpace: number = line.indexOf(' ');
+    if (firstSpace <= 0) {
+      return NaN;
+    }
+    return Date.parse(line.slice(0, firstSpace));
+  }
+
+  private normalizeLogFileContent(lines: string[]): string {
+    if (lines.length === 0) {
+      return '';
+    }
+    return `${lines.join('\n')}\n`;
+  }
+
+  private truncateLogFileIfNeeded(path: string, maxSizeMb: number): void {
+    if (maxSizeMb <= 0) {
+      return;
+    }
+    const content: string = this.readTextFile(path);
+    const maxChars: number = maxSizeMb * 1024 * 1024;
+    if (content.length <= maxChars) {
+      return;
+    }
+    let truncated: string = content.slice(content.length - maxChars);
+    const firstNewlineIndex: number = truncated.indexOf('\n');
+    if (firstNewlineIndex >= 0 && firstNewlineIndex < truncated.length - 1) {
+      truncated = truncated.slice(firstNewlineIndex + 1);
+    }
+    this.writeTextFile(path, this.normalizeLogFileContent(truncated.split('\n').filter((line: string) => line.trim().length > 0)));
+    hilog.info(DOMAIN, TAG, '==/vpn_ext/log_truncated/ path=%{public}s max_mb=%{public}d', path, maxSizeMb);
+    this.appendDebugLog(`==/vpn_ext/log_truncated/ path=${path} max_mb=${maxSizeMb}`);
+  }
+
+  private ensureTextFileExists(path: string): void {
+    let f: fileIo.File | undefined = undefined;
+    try {
+      f = fileIo.openSync(path, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
+    } catch (_) {
+    } finally {
+      if (f !== undefined) {
+        try {
+          fileIo.closeSync(f);
+        } catch (_) {
+        }
+      }
+    }
   }
 
   private buildVpnConfig(): vpnExtension.VpnConfig {
@@ -356,6 +488,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
         allowedQueries: 0,
         blockedQueries: 0,
         loggedQueries: 0,
+        dnsCacheHits: 0,
+        dnsCacheMisses: 0,
         lastQueryDomain: '',
         lastMatchedRule: '',
         lastError: this.errorMessage(err),

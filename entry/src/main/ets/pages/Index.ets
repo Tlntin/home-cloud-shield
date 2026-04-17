@@ -33,13 +33,19 @@ const WANT_RULES_FILE_PATH = 'rulesFilePath';
 const WANT_QUERY_LOG_FILE_PATH = 'queryLogFilePath';
 const WANT_DEBUG_LOG_FILE_PATH = 'debugLogFilePath';
 const WANT_DNS_CACHE_TTL_SECONDS = 'dnsCacheTtlSeconds';
+const WANT_LOG_RETENTION_DAYS = 'logRetentionDays';
+const WANT_LOG_MAX_SIZE_MB = 'logMaxSizeMb';
+const WANT_CLEAR_DNS_LOG_ON_START = 'clearDnsLogOnStart';
+const WANT_CLEAR_DEBUG_LOG_ON_START = 'clearDebugLogOnStart';
 const DEFAULT_DNS_CACHE_TTL_SECONDS = 3600;
+const DEFAULT_LOG_RETENTION_DAYS = 0;
+const DEFAULT_LOG_MAX_SIZE_MB = 0;
 const CUSTOM_BLOCK_RULE_PROFILE_ID = 'custom_block_rules';
 const CUSTOM_ALLOW_RULE_PROFILE_ID = 'custom_allow_rules';
 type LangCode = 'zhHans' | 'en' | 'zhHant';
 type PreferredLangCode = 'zh-Hans' | 'en-Latn-US' | 'zh-Hant';
 type LanguageKey =
-  'appTitle' | 'homeTitle' | 'configTitle' | 'meTitle' | 'homeSubtitle' | 'configSubtitle' | 'meSubtitle'
+  'appTitle' | 'homeTitle' | 'configTitle' | 'meTitle' | 'settingsTitle' | 'homeSubtitle' | 'configSubtitle' | 'meSubtitle' | 'settingsSubtitle'
   | 'protected' | 'standby' | 'tabHome' | 'tabHomeSub' | 'tabConfig' | 'tabConfigSub' | 'tabMe' | 'tabMeSub'
   | 'localVpn' | 'dnsFilter' | 'ipv6Ready' | 'controlCenter' | 'running' | 'readyToStart' | 'active' | 'idle'
   | 'lastDomain' | 'updated' | 'notAvailable' | 'filterStatus' | 'stopped' | 'startFilter' | 'restartFilter'
@@ -70,6 +76,11 @@ type LanguageKey =
   | 'clearDnsRequestsFailed' | 'noDebugLogsToExport' | 'debugLogsExportedStatus' | 'copy' | 'export' | 'copyLog'
   | 'exportLog' | 'dnsSearchPlaceholder' | 'clickToExpand' | 'clickViewDebugAndCopy' | 'exportDebugLogsFailed'
   | 'exportRulesFailed' | 'exportFileFailed' | 'dnsCacheTitle' | 'dnsCacheHint' | 'dnsCacheTtlLabel'
+  | 'logRetentionTitle' | 'logRetentionHint' | 'clearDnsLogOnStart' | 'clearDnsLogOnStartHint'
+  | 'clearDebugLogOnStart' | 'clearDebugLogOnStartHint' | 'logRetentionDaysLabel' | 'logRetentionDaysHint'
+  | 'logMaxSizeMbLabel' | 'logMaxSizeMbHint' | 'settingsEntry' | 'settingsEntryHint'
+  | 'cacheHits' | 'cacheMisses' | 'sourcePrefix' | 'sourceCache' | 'sourceUpstream' | 'sourceBlocked'
+  | 'domainCacheHits' | 'domainUpstreamQueries'
   | 'importedRules'
   | 'customBlockRules' | 'customAllowRules' | 'builtInRuleProfileLocked' | 'addRuleActionTitle'
   | 'addAllowRuleAction' | 'addBlockRuleAction' | 'ruleAddedNeedsRestart' | 'ruleAlreadyExists'
@@ -81,9 +92,11 @@ function resolveStringResource(key: LanguageKey): number {
     case 'homeTitle': return $r('app.string.homeTitle').id;
     case 'configTitle': return $r('app.string.configTitle').id;
     case 'meTitle': return $r('app.string.meTitle').id;
+    case 'settingsTitle': return $r('app.string.settingsTitle').id;
     case 'homeSubtitle': return $r('app.string.homeSubtitle').id;
     case 'configSubtitle': return $r('app.string.configSubtitle').id;
     case 'meSubtitle': return $r('app.string.meSubtitle').id;
+    case 'settingsSubtitle': return $r('app.string.settingsSubtitle').id;
     case 'protected': return $r('app.string.protected').id;
     case 'standby': return $r('app.string.standby').id;
     case 'tabHome': return $r('app.string.tabHome').id;
@@ -261,6 +274,26 @@ function resolveStringResource(key: LanguageKey): number {
     case 'dnsCacheTitle': return $r('app.string.dnsCacheTitle').id;
     case 'dnsCacheHint': return $r('app.string.dnsCacheHint').id;
     case 'dnsCacheTtlLabel': return $r('app.string.dnsCacheTtlLabel').id;
+    case 'logRetentionTitle': return $r('app.string.logRetentionTitle').id;
+    case 'logRetentionHint': return $r('app.string.logRetentionHint').id;
+    case 'logRetentionDaysLabel': return $r('app.string.logRetentionDaysLabel').id;
+    case 'logRetentionDaysHint': return $r('app.string.logRetentionDaysHint').id;
+    case 'logMaxSizeMbLabel': return $r('app.string.logMaxSizeMbLabel').id;
+    case 'logMaxSizeMbHint': return $r('app.string.logMaxSizeMbHint').id;
+    case 'clearDnsLogOnStart': return $r('app.string.clearDnsLogOnStart').id;
+    case 'clearDnsLogOnStartHint': return $r('app.string.clearDnsLogOnStartHint').id;
+    case 'clearDebugLogOnStart': return $r('app.string.clearDebugLogOnStart').id;
+    case 'clearDebugLogOnStartHint': return $r('app.string.clearDebugLogOnStartHint').id;
+    case 'settingsEntry': return $r('app.string.settingsEntry').id;
+    case 'settingsEntryHint': return $r('app.string.settingsEntryHint').id;
+    case 'cacheHits': return $r('app.string.cacheHits').id;
+    case 'cacheMisses': return $r('app.string.cacheMisses').id;
+    case 'sourcePrefix': return $r('app.string.sourcePrefix').id;
+    case 'sourceCache': return $r('app.string.sourceCache').id;
+    case 'sourceUpstream': return $r('app.string.sourceUpstream').id;
+    case 'sourceBlocked': return $r('app.string.sourceBlocked').id;
+    case 'domainCacheHits': return $r('app.string.domainCacheHits').id;
+    case 'domainUpstreamQueries': return $r('app.string.domainUpstreamQueries').id;
     case 'importedRules': return $r('app.string.importedRules').id;
     case 'customBlockRules': return $r('app.string.customBlockRules').id;
     case 'customAllowRules': return $r('app.string.customAllowRules').id;
@@ -301,6 +334,8 @@ interface NativeStats {
   allowedQueries: number;
   blockedQueries: number;
   loggedQueries: number;
+  dnsCacheHits: number;
+  dnsCacheMisses: number;
   lastQueryDomain: string;
   lastMatchedRule: string;
   lastError: string;
@@ -321,6 +356,7 @@ interface QueryLogEntry {
   qtype: string;
   action: string;
   rule: string;
+  source?: string;
   requestBytes?: number;
   responseBytes?: number;
   totalDnsBytes?: number;
@@ -342,6 +378,8 @@ interface DomainQueryStats {
   total: number;
   allowed: number;
   blocked: number;
+  cacheHits: number;
+  upstreamQueries: number;
   lastAction: string;
   lastRule: string;
   requestBytes: number;
@@ -376,6 +414,10 @@ interface PersistState {
   themeMode?: number;
   ruleProfiles?: RuleProfile[];
   dnsCacheTtlSeconds?: number;
+  logRetentionDays?: number;
+  logMaxSizeMb?: number;
+  clearDnsLogOnStart?: boolean;
+  clearDebugLogOnStart?: boolean;
   currentTab: number;
 }
 
@@ -394,6 +436,8 @@ function defaultStats(): NativeStats {
     allowedQueries: 0,
     blockedQueries: 0,
     loggedQueries: 0,
+    dnsCacheHits: 0,
+    dnsCacheMisses: 0,
     lastQueryDomain: '',
     lastMatchedRule: '',
     lastError: '',
@@ -469,6 +513,13 @@ struct Index {
   @State debugSheetFeedbackText: string = '';
   @State dnsCacheTtlInput: string = `${DEFAULT_DNS_CACHE_TTL_SECONDS}`;
   @State dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
+  @State logRetentionDaysInput: string = `${DEFAULT_LOG_RETENTION_DAYS}`;
+  @State logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
+  @State logMaxSizeMbInput: string = `${DEFAULT_LOG_MAX_SIZE_MB}`;
+  @State logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
+  @State clearDnsLogOnStart: boolean = false;
+  @State clearDebugLogOnStart: boolean = false;
+  @State showSettingsPage: boolean = false;
   @State appVersionName: string = 'loading';
   @State appVersionCode: number = 0;
   @State avoidPaddingTop: number = 0;
@@ -854,6 +905,52 @@ struct Index {
     this.savePersistState();
   }
 
+  private parseLogRetentionDaysInput(value: string): number {
+    const trimmed: string = value.trim();
+    if (trimmed.length === 0) {
+      return DEFAULT_LOG_RETENTION_DAYS;
+    }
+    const parsed = parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return DEFAULT_LOG_RETENTION_DAYS;
+    }
+    return parsed;
+  }
+
+  private updateLogRetentionDays(value: string): void {
+    this.logRetentionDaysInput = value;
+    this.logRetentionDays = this.parseLogRetentionDaysInput(value);
+    this.savePersistState();
+  }
+
+  private parseLogMaxSizeMbInput(value: string): number {
+    const trimmed: string = value.trim();
+    if (trimmed.length === 0) {
+      return DEFAULT_LOG_MAX_SIZE_MB;
+    }
+    const parsed = parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return DEFAULT_LOG_MAX_SIZE_MB;
+    }
+    return parsed;
+  }
+
+  private updateLogMaxSizeMb(value: string): void {
+    this.logMaxSizeMbInput = value;
+    this.logMaxSizeMb = this.parseLogMaxSizeMbInput(value);
+    this.savePersistState();
+  }
+
+  private updateClearDnsLogOnStart(value: boolean): void {
+    this.clearDnsLogOnStart = value;
+    this.savePersistState();
+  }
+
+  private updateClearDebugLogOnStart(value: boolean): void {
+    this.clearDebugLogOnStart = value;
+    this.savePersistState();
+  }
+
   private buildRuleLineForDomain(domain: string, allow: boolean): string {
     return allow ? `@@||${domain}^` : `||${domain}^`;
   }
@@ -1126,7 +1223,19 @@ struct Index {
     const responseBytes: number = item.responseBytes ?? 0;
     const totalDnsBytes: number = item.totalDnsBytes ?? (requestBytes + responseBytes);
     const ruleText: string = item.rule && item.rule.trim().length > 0 ? item.rule : this.t('none');
-    return `${item.domain}\t${item.qtype}\t${item.action}\t${ruleText}\t${requestBytes}/${responseBytes}/${totalDnsBytes}\t${item.ts}`;
+    return `${item.domain}\t${item.qtype}\t${item.action}\t${this.querySourceText(item.source)}\t${ruleText}\t${requestBytes}/${responseBytes}/${totalDnsBytes}\t${item.ts}`;
+  }
+
+  private querySourceText(source?: string): string {
+    switch ((source ?? '').trim().toLowerCase()) {
+      case 'cache':
+        return this.t('sourceCache');
+      case 'blocked':
+        return this.t('sourceBlocked');
+      case 'upstream':
+      default:
+        return this.t('sourceUpstream');
+    }
   }
 
   private dnsExportText(): string {
@@ -1159,6 +1268,8 @@ struct Index {
           total: 0,
           allowed: 0,
           blocked: 0,
+          cacheHits: 0,
+          upstreamQueries: 0,
           lastAction: item.action.trim().toLowerCase(),
           lastRule: item.rule,
           requestBytes: 0,
@@ -1173,6 +1284,12 @@ struct Index {
         stats.blocked += 1;
       } else {
         stats.allowed += 1;
+      }
+      const source: string = (item.source ?? '').trim().toLowerCase();
+      if (source === 'cache') {
+        stats.cacheHits += 1;
+      } else if (source === 'upstream') {
+        stats.upstreamQueries += 1;
       }
       stats.lastAction = item.action.trim().toLowerCase();
       stats.lastRule = item.rule;
@@ -1235,7 +1352,7 @@ struct Index {
   }
 
   private domainStatsEntryText(item: DomainQueryStats): string {
-    return `${item.domain}\t${item.total}\t${item.allowed}\t${item.blocked}\t${item.requestBytes}/${item.responseBytes}/${item.totalDnsBytes}\t${item.lastTs}`;
+    return `${item.domain}\t${item.total}\t${item.allowed}\t${item.blocked}\t${item.cacheHits}\t${item.upstreamQueries}\t${item.requestBytes}/${item.responseBytes}/${item.totalDnsBytes}\t${item.lastTs}`;
   }
 
   private domainStatsExportText(): string {
@@ -1691,6 +1808,10 @@ struct Index {
         queryLogFilePath: this.queryLogFilePath,
         debugLogFilePath: this.debugLogFilePath,
         dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
+        logRetentionDays: this.logRetentionDays,
+        logMaxSizeMb: this.logMaxSizeMb,
+        clearDnsLogOnStart: this.clearDnsLogOnStart,
+        clearDebugLogOnStart: this.clearDebugLogOnStart,
       },
     };
   }
@@ -1745,6 +1866,28 @@ struct Index {
         this.dnsCacheTtlSeconds = DEFAULT_DNS_CACHE_TTL_SECONDS;
         this.dnsCacheTtlInput = `${DEFAULT_DNS_CACHE_TTL_SECONDS}`;
       }
+      if (typeof state.logRetentionDays === 'number' && Number.isFinite(state.logRetentionDays)
+        && state.logRetentionDays >= 0) {
+        this.logRetentionDays = Math.floor(state.logRetentionDays);
+        this.logRetentionDaysInput = `${this.logRetentionDays}`;
+      } else {
+        this.logRetentionDays = DEFAULT_LOG_RETENTION_DAYS;
+        this.logRetentionDaysInput = `${DEFAULT_LOG_RETENTION_DAYS}`;
+      }
+      if (typeof state.logMaxSizeMb === 'number' && Number.isFinite(state.logMaxSizeMb)
+        && state.logMaxSizeMb >= 0) {
+        this.logMaxSizeMb = Math.floor(state.logMaxSizeMb);
+        this.logMaxSizeMbInput = `${this.logMaxSizeMb}`;
+      } else {
+        this.logMaxSizeMb = DEFAULT_LOG_MAX_SIZE_MB;
+        this.logMaxSizeMbInput = `${DEFAULT_LOG_MAX_SIZE_MB}`;
+      }
+      if (typeof state.clearDnsLogOnStart === 'boolean') {
+        this.clearDnsLogOnStart = state.clearDnsLogOnStart;
+      }
+      if (typeof state.clearDebugLogOnStart === 'boolean') {
+        this.clearDebugLogOnStart = state.clearDebugLogOnStart;
+      }
       if (Array.isArray(state.ruleProfiles)) {
         const nextProfiles: RuleProfile[] = [];
         state.ruleProfiles.forEach((item: RuleProfile, index: number) => {
@@ -1788,6 +1931,10 @@ struct Index {
       themeMode: this.themeMode,
       ruleProfiles: this.ruleProfiles,
       dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
+      logRetentionDays: this.logRetentionDays,
+      logMaxSizeMb: this.logMaxSizeMb,
+      clearDnsLogOnStart: this.clearDnsLogOnStart,
+      clearDebugLogOnStart: this.clearDebugLogOnStart,
       currentTab: this.currentTab,
     };
     this.writeTextFile(this.stateFilePath, JSON.stringify(state));
@@ -2551,6 +2698,14 @@ struct Index {
     return this.querySummary.blocked;
   }
 
+  private displayCacheHits(): number {
+    return this.status.nativeStats.dnsCacheHits;
+  }
+
+  private displayCacheMisses(): number {
+    return this.status.nativeStats.dnsCacheMisses;
+  }
+
   private displayLastDomain(): string {
     if (this.status.nativeStats.lastQueryDomain.length > 0) {
       return this.status.nativeStats.lastQueryDomain;
@@ -2668,6 +2823,8 @@ struct Index {
 
   private sectionGlyph(section: string): string {
     switch (section) {
+      case 'settings':
+        return '⚙';
       case 'dnsPackets':
         return '◎';
       case 'allowed':
@@ -3002,10 +3159,22 @@ struct Index {
                     .border({ width: 1, color: this.queryActionBadgeBorderTone(item.action) })
                     .borderRadius(10)
                     .shadow({ radius: 10, color: this.queryActionBadgeShadowTone(item.action), offsetX: 0, offsetY: 3 })
+                  Text(this.querySourceText(item.source))
+                    .fontSize(10)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor(this.selectedChipTextTone())
+                    .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                    .backgroundColor(this.coolNeutralChipSurfaceTone())
+                    .border({ width: 1, color: this.sheetBorderTone() })
+                    .borderRadius(10)
                 }
                 .width('100%')
 
                 Text(`${this.t('rulePrefix')}: ${item.rule || this.t('none')}`)
+                  .fontSize(12)
+                  .fontColor(this.secondaryTextColor())
+                  .width('100%')
+                Text(`${this.t('sourcePrefix')}: ${this.querySourceText(item.source)}`)
                   .fontSize(12)
                   .fontColor(this.secondaryTextColor())
                   .width('100%')
@@ -3174,6 +3343,10 @@ struct Index {
                   .fontSize(12)
                   .fontColor(this.secondaryTextColor())
                   .width('100%')
+                Text(`${this.t('domainCacheHits')}: ${item.cacheHits} · ${this.t('domainUpstreamQueries')}: ${item.upstreamQueries}`)
+                  .fontSize(12)
+                  .fontColor(this.secondaryTextColor())
+                  .width('100%')
                 if (item.lastAction === 'blocked') {
                   Text(`${this.t('rulePrefix')}: ${item.lastRule || this.t('none')}`)
                     .fontSize(12)
@@ -3337,6 +3510,7 @@ struct Index {
         return;
       }
       this.currentTab = index;
+      this.showSettingsPage = false;
       this.savePersistState();
     })
   }
@@ -3583,6 +3757,10 @@ struct Index {
               .fontSize(13)
               .fontColor(this.secondaryTextColor())
               .width('100%')
+            Text(`${this.t('cacheHits')}: ${this.displayCacheHits()}   ${this.t('cacheMisses')}: ${this.displayCacheMisses()}`)
+              .fontSize(13)
+              .fontColor(this.secondaryTextColor())
+              .width('100%')
             Text(`${this.t('matchedRule')}: ${this.displayLastRule() || this.t('none')}`)
               .fontSize(13)
               .fontColor(this.mutedTextColor())
@@ -3675,6 +3853,10 @@ struct Index {
                   .width('100%')
 
                   Text(`${this.t('queryCount')}: ${item.total}`)
+                    .fontSize(12)
+                    .fontColor(this.secondaryTextColor())
+                    .width('100%')
+                  Text(`${this.t('domainCacheHits')}: ${item.cacheHits} · ${this.t('domainUpstreamQueries')}: ${item.upstreamQueries}`)
                     .fontSize(12)
                     .fontColor(this.secondaryTextColor())
                     .width('100%')
@@ -3895,67 +4077,6 @@ struct Index {
             : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
         })
 
-        Column({ space: 12 }) {
-          Row({ space: 8 }) {
-            this.IconBubble(this.sectionGlyph('dnsPackets'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
-            Text(this.t('dnsCacheTitle'))
-              .fontSize(20)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.primaryTextColor())
-          }
-          Text(this.t('dnsCacheHint'))
-            .fontSize(13)
-            .lineHeight(20)
-            .fontColor(this.secondaryTextColor())
-            .width('100%')
-
-          Row({ space: 12 }) {
-            Column({ space: 4 }) {
-              Text(this.t('dnsCacheTtlLabel'))
-                .fontSize(15)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.primaryTextColor())
-              Text('s')
-                .fontSize(12)
-                .fontColor(this.secondaryTextColor())
-            }
-            .alignItems(HorizontalAlign.Start)
-
-            TextInput({ text: this.dnsCacheTtlInput, placeholder: `${DEFAULT_DNS_CACHE_TTL_SECONDS}` })
-              .layoutWeight(1)
-              .height(44)
-              .fontSize(15)
-              .backgroundColor(this.sheetInputSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .borderRadius(14)
-              .border({ width: 1, color: this.sheetBorderTone() })
-              .padding({ left: 12, right: 12 })
-              .onChange((value: string) => {
-                this.updateDnsCacheTtl(value);
-              })
-          }
-          .width('100%')
-          .padding(14)
-          .backgroundColor(this.sheetSecondarySurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(18)
-          .border({ width: 1, color: this.sheetBorderTone() })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding(18)
-        .backgroundColor(this.elevatedSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(24)
-        .border({ width: 1, color: this.cardBorderTone() })
-        .shadow({ radius: 12, color: this.cardShadowTone() })
-        .linearGradient({
-          angle: 145,
-          colors: this.isDarkModeActive()
-            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
-        })
-
         if (this.ruleProfiles.length === 0) {
           Column({ space: 12 }) {
             Text(this.t('noRuleProfiles'))
@@ -4104,8 +4225,11 @@ struct Index {
 
   @Builder
   private MeTab() {
-    Scroll() {
-      Column({ space: 16 }) {
+    if (this.showSettingsPage) {
+      this.SettingsSubPage();
+    } else {
+      Scroll() {
+        Column({ space: 16 }) {
         Column({ space: 12 }) {
           Row({ space: 8 }) {
             this.IconBubble(this.sectionGlyph('keepAlive'), this.isDarkModeActive() ? '#22324A' : '#EEF8F2', '#179160', 24, 12)
@@ -4150,6 +4274,55 @@ struct Index {
           colors: this.isDarkModeActive()
             ? [['#1A2435D8', 0.0], ['#1D2A3EDC', 0.5], ['#22334AD8', 1.0]]
             : [['#F8FCFF', 0.0], ['#EFF7FF', 0.52], ['#EAF4FF', 1.0]]
+        })
+
+        Column({ space: 12 }) {
+          Row({ space: 8 }) {
+            this.IconBubble(this.sectionGlyph('settings'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
+            Text(this.t('settingsEntry'))
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+          }
+          Text(this.t('settingsEntryHint'))
+            .fontSize(13)
+            .lineHeight(20)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+
+          Row({ space: 10 }) {
+            Text(this.t('settingsTitle'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Blank()
+            Text('›')
+              .fontSize(20)
+              .fontColor(this.secondaryTextColor())
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .onClick(() => {
+            this.showSettingsPage = true;
+          })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(18)
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(24)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
         })
 
         Column({ space: 12 }) {
@@ -4487,6 +4660,285 @@ struct Index {
             .onClick(() => {
               this.openLicensePage();
             })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(18)
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(24)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
+        })
+        }
+        .width('100%')
+        .constraintSize({ minHeight: '100%' })
+        .justifyContent(FlexAlign.Start)
+        .alignItems(HorizontalAlign.Start)
+        .margin({ top: 0 })
+        .padding({ bottom: this.contentBottomInset() })
+      }
+      .width('100%')
+      .height('100%')
+      .scrollBar(BarState.Off)
+    }
+  }
+
+  @Builder
+  private SettingsSubPage() {
+    Scroll() {
+      Column({ space: 16 }) {
+        Column({ space: 12 }) {
+          Row({ space: 12 }) {
+            Button(this.t('back'))
+              .height(40)
+              .padding({ left: 16, right: 16 })
+              .backgroundColor(this.coolNeutralChipSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .fontColor(this.primaryTextColor())
+              .borderRadius(14)
+              .border({ width: 1, color: this.cardBorderTone() })
+              .onClick(() => {
+                this.showSettingsPage = false;
+              })
+
+            Column({ space: 4 }) {
+              Text(this.t('settingsTitle'))
+                .fontSize(24)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(this.primaryTextColor())
+              Text(this.t('settingsSubtitle'))
+                .fontSize(14)
+                .lineHeight(22)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(20)
+        .backgroundColor(this.cardSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(26)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 14, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1A2435D8', 0.0], ['#1D2A3EDC', 0.5], ['#22334AD8', 1.0]]
+            : [['#F8FCFF', 0.0], ['#EFF7FF', 0.52], ['#EAF4FF', 1.0]]
+        })
+
+        Column({ space: 12 }) {
+          Row({ space: 8 }) {
+            this.IconBubble(this.sectionGlyph('dnsPackets'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
+            Text(this.t('dnsCacheTitle'))
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+          }
+          Text(this.t('dnsCacheHint'))
+            .fontSize(13)
+            .lineHeight(20)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+
+          Row({ space: 12 }) {
+            Column({ space: 4 }) {
+              Text(this.t('dnsCacheTtlLabel'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text('s')
+                .fontSize(12)
+                .fontColor(this.secondaryTextColor())
+            }
+            .alignItems(HorizontalAlign.Start)
+
+            TextInput({ text: this.dnsCacheTtlInput, placeholder: `${DEFAULT_DNS_CACHE_TTL_SECONDS}` })
+              .layoutWeight(1)
+              .height(44)
+              .fontSize(15)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12 })
+              .onChange((value: string) => {
+                this.updateDnsCacheTtl(value);
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(18)
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(24)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
+        })
+
+        Column({ space: 12 }) {
+          Row({ space: 8 }) {
+            this.IconBubble(this.sectionGlyph('debugLog'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
+            Text(this.t('logRetentionTitle'))
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+          }
+          Text(this.t('logRetentionHint'))
+            .fontSize(13)
+            .lineHeight(20)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+
+          Row({ space: 12 }) {
+            Column({ space: 4 }) {
+              Text(this.t('logRetentionDaysLabel'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.t('logRetentionDaysHint'))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            TextInput({ text: this.logRetentionDaysInput, placeholder: `${DEFAULT_LOG_RETENTION_DAYS}` })
+              .width(96)
+              .height(44)
+              .fontSize(15)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12 })
+              .onChange((value: string) => {
+                this.updateLogRetentionDays(value);
+              })
+
+            Text(this.language === 'en' ? 'days' : '天')
+              .fontSize(12)
+              .fontColor(this.secondaryTextColor())
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+
+          Row({ space: 12 }) {
+            Column({ space: 4 }) {
+              Text(this.t('logMaxSizeMbLabel'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.t('logMaxSizeMbHint'))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            TextInput({ text: this.logMaxSizeMbInput, placeholder: `${DEFAULT_LOG_MAX_SIZE_MB}` })
+              .width(96)
+              .height(44)
+              .fontSize(15)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12 })
+              .onChange((value: string) => {
+                this.updateLogMaxSizeMb(value);
+              })
+
+            Text('MB')
+              .fontSize(12)
+              .fontColor(this.secondaryTextColor())
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+
+          Row() {
+            Column({ space: 4 }) {
+              Text(this.t('clearDnsLogOnStart'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.t('clearDnsLogOnStartHint'))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Toggle({ type: ToggleType.Switch, isOn: this.clearDnsLogOnStart })
+              .onChange((value: boolean) => {
+                this.updateClearDnsLogOnStart(value);
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+
+          Row() {
+            Column({ space: 4 }) {
+              Text(this.t('clearDebugLogOnStart'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.t('clearDebugLogOnStartHint'))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Toggle({ type: ToggleType.Switch, isOn: this.clearDebugLogOnStart })
+              .onChange((value: boolean) => {
+                this.updateClearDebugLogOnStart(value);
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)
