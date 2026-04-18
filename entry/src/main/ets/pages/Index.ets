@@ -4346,27 +4346,12 @@ struct Index {
     } else {
       Scroll() {
         Column({ space: 16 }) {
-        Column({ space: 12 }) {
-          Row() {
-            Row({ space: 8 }) {
-              this.IconBubble(this.sectionGlyph('keepAlive'), this.isDarkModeActive() ? '#22324A' : '#EEF8F2', '#179160', 24, 12)
-              Text(this.t('tabMe'))
-                .fontSize(11)
-                .fontColor(this.selectedChipTextTone())
-                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-                .backgroundColor(this.coolNeutralChipSurfaceTone())
-                .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .borderRadius(12)
-              Text(this.keepAliveRunning ? this.t('keepAliveOn') : this.t('keepAliveOff'))
-                .fontSize(11)
-                .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.accentAmberTone())
-                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-                .backgroundColor(this.keepAliveRunning ? this.softGreenTone() : this.coolNeutralChipSurfaceTone())
-                .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .borderRadius(12)
-            }
+        Column({ space: 14 }) {
+          Row({ space: 12 }) {
+            Text(this.t('tabMe'))
+              .fontSize(28)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.primaryTextColor())
 
             Blank()
 
@@ -4430,11 +4415,8 @@ struct Index {
             .borderRadius(22)
           }
           .width('100%')
+          .alignItems(VerticalAlign.Top)
 
-          Text(this.t('myDevice'))
-            .fontSize(24)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.primaryTextColor())
           Text(this.t('myDeviceHint'))
             .fontSize(14)
             .lineHeight(22)
@@ -4507,12 +4489,21 @@ struct Index {
         Column({ space: 12 }) {
           Row({ space: 8 }) {
             this.IconBubble(this.sectionGlyph('keepAlive'), this.isDarkModeActive() ? '#22324A' : '#EEF8F2', '#179160', 26, 12)
-          Text(this.t('backgroundKeepAlive'))
-            .fontSize(18)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.primaryTextColor())
-            .width('100%')
+            Text(this.t('backgroundKeepAlive'))
+              .fontSize(18)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Blank()
+            Text(this.keepAliveRunning ? this.t('keepAliveOn') : this.t('keepAliveOff'))
+              .fontSize(11)
+              .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.accentAmberTone())
+              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+              .backgroundColor(this.keepAliveRunning ? this.softGreenTone() : this.coolNeutralChipSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .border({ width: 1, color: this.cardBorderTone() })
+              .borderRadius(12)
           }
+          .width('100%')
           Text(this.t('keepAliveSummary'))
             .fontSize(13)
             .lineHeight(20)
