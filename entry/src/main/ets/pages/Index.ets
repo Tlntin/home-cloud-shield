@@ -86,7 +86,7 @@ type LanguageKey =
   | 'customBlockRules' | 'customAllowRules' | 'builtInRuleProfileLocked' | 'addRuleActionTitle'
   | 'addAllowRuleAction' | 'addBlockRuleAction' | 'ruleAddedNeedsRestart' | 'ruleAlreadyExists'
   | 'tapDomainToCreateRule' | 'addRuleLine' | 'customBlockRulePlaceholder' | 'customAllowRulePlaceholder'
-  | 'confirmDeleteRuleLine' | 'noCustomRulesHint';
+  | 'confirmDeleteRuleLine' | 'noCustomRulesHint' | 'swipeAgainToExit';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -312,6 +312,7 @@ function resolveStringResource(key: LanguageKey): number {
     case 'customAllowRulePlaceholder': return $r('app.string.customAllowRulePlaceholder').id;
     case 'confirmDeleteRuleLine': return $r('app.string.confirmDeleteRuleLine').id;
     case 'noCustomRulesHint': return $r('app.string.noCustomRulesHint').id;
+    case 'swipeAgainToExit': return $r('app.string.swipeAgainToExit').id;
   }
 }
 
@@ -553,13 +554,23 @@ struct Index {
   private suppressRuntimeArtifacts: boolean = false;
   private promptAction?: PromptAction;
   private autoStartAttempted: boolean = false;
+  private lastBackPressAt: number = 0;
 
   onBackPress(): boolean {
     if (this.showSettingsPage) {
       this.showSettingsPage = false;
       return true;
     }
-    return false;
+    const now: number = Date.now();
+    if (now - this.lastBackPressAt < 2000) {
+      return false;
+    }
+    this.lastBackPressAt = now;
+    try {
+      this.ensurePromptAction()?.showToast({ message: this.t('swipeAgainToExit') });
+    } catch (_) {
+    }
+    return true;
   }
 
   private async copyText(text: string): Promise<void> {

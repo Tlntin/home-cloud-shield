@@ -225,6 +225,7 @@
     { "name": "customBlockRulePlaceholder", "value": "输入域名或完整规则，域名会自动转成 ||domain^" },
     { "name": "customAllowRulePlaceholder", "value": "输入域名或完整规则，域名会自动转成 @@||domain^" },
     { "name": "confirmDeleteRuleLine", "value": "确定清理这条规则吗？" },
-    { "name": "noCustomRulesHint", "value": "暂无规则，输入域名后点击添加。右侧按钮可删除单条规则。" }
+    { "name": "noCustomRulesHint", "value": "暂无规则，输入域名后点击添加。右侧按钮可删除单条规则。" },
+    { "name": "swipeAgainToExit", "value": "再按一次退出应用" }
   ]
 }

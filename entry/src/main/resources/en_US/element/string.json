@@ -225,6 +225,7 @@
     { "name": "customBlockRulePlaceholder", "value": "Enter a domain or full rule. Domains become ||domain^ automatically." },
     { "name": "customAllowRulePlaceholder", "value": "Enter a domain or full rule. Domains become @@||domain^ automatically." },
     { "name": "confirmDeleteRuleLine", "value": "Remove this rule?" },
-    { "name": "noCustomRulesHint", "value": "No rules yet. Enter a domain and tap Add. Use the button on the right to remove a single rule." }
+    { "name": "noCustomRulesHint", "value": "No rules yet. Enter a domain and tap Add. Use the button on the right to remove a single rule." },
+    { "name": "swipeAgainToExit", "value": "Swipe again to exit" }
   ]
 }
