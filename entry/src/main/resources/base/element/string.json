@@ -150,6 +150,7 @@
     { "name": "locationPermissionRequired", "value": "开启定位保活需要定位权限。" },
     { "name": "dnsFilterNotStarted", "value": "DNS 过滤器尚未启动。" },
     { "name": "startRequested", "value": "已请求启动 DNS 过滤，如果系统弹窗请允许继续。" },
+    { "name": "restartRequested", "value": "已请求重启 DNS 过滤，请稍候查看状态是否恢复运行。" },
     { "name": "stopping", "value": "正在停止 DNS 过滤..." },
     { "name": "licenseTitle", "value": "开源授权说明" },
     { "name": "licenseSubtitle", "value": "查看当前构建包含的许可证与致谢信息。" },
@@ -219,6 +220,11 @@
     { "name": "addBlockRuleAction", "value": "拦截" },
     { "name": "ruleAddedNeedsRestart", "value": "已添加规则：%s。重启过滤后生效。" },
     { "name": "ruleAlreadyExists", "value": "规则已存在：%s" },
-    { "name": "tapDomainToCreateRule", "value": "点击域名可快速添加放行或拦截规则" }
+    { "name": "tapDomainToCreateRule", "value": "点击域名可快速添加放行或拦截规则" },
+    { "name": "addRuleLine", "value": "添加" },
+    { "name": "customBlockRulePlaceholder", "value": "输入域名或完整规则，域名会自动转成 ||domain^" },
+    { "name": "customAllowRulePlaceholder", "value": "输入域名或完整规则，域名会自动转成 @@||domain^" },
+    { "name": "confirmDeleteRuleLine", "value": "确定清理这条规则吗？" },
+    { "name": "noCustomRulesHint", "value": "暂无规则，输入域名后点击添加。右侧按钮可删除单条规则。" }
   ]
 }

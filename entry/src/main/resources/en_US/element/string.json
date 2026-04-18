@@ -150,6 +150,7 @@
     { "name": "locationPermissionRequired", "value": "Location permission is required for location keep alive." },
     { "name": "dnsFilterNotStarted", "value": "DNS filter has not been started yet." },
     { "name": "startRequested", "value": "DNS filter authorization requested. If prompted, trust this app to continue." },
+    { "name": "restartRequested", "value": "DNS filter restart requested. Please wait a moment and check that it returns to running." },
     { "name": "stopping", "value": "Stopping DNS filter..." },
     { "name": "licenseTitle", "value": "Open Source Notices" },
     { "name": "licenseSubtitle", "value": "Review bundled licenses and acknowledgements used by this build." },
@@ -219,6 +220,11 @@
     { "name": "addBlockRuleAction", "value": "Block" },
     { "name": "ruleAddedNeedsRestart", "value": "Rule added: %s. Restart filtering for it to take effect." },
     { "name": "ruleAlreadyExists", "value": "Rule already exists: %s" },
-    { "name": "tapDomainToCreateRule", "value": "Tap a domain to quickly add an allow or block rule" }
+    { "name": "tapDomainToCreateRule", "value": "Tap a domain to quickly add an allow or block rule" },
+    { "name": "addRuleLine", "value": "Add" },
+    { "name": "customBlockRulePlaceholder", "value": "Enter a domain or full rule. Domains become ||domain^ automatically." },
+    { "name": "customAllowRulePlaceholder", "value": "Enter a domain or full rule. Domains become @@||domain^ automatically." },
+    { "name": "confirmDeleteRuleLine", "value": "Remove this rule?" },
+    { "name": "noCustomRulesHint", "value": "No rules yet. Enter a domain and tap Add. Use the button on the right to remove a single rule." }
   ]
 }

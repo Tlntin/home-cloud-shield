@@ -68,6 +68,7 @@ type LanguageKey =
   | 'saveRulesFailed' | 'audioMode' | 'locationMode' | 'keepAliveActivePrefix' | 'keepAliveArmedPrefix'
   | 'keepAliveErrorPrefix' | 'keepAliveOffStatus' | 'keepAliveWaitStatus' | 'keepAliveStartFailed'
   | 'locationPermissionRequired' | 'dnsFilterNotStarted' | 'startRequested' | 'stopping' | 'licenseTitle'
+  | 'restartRequested'
   | 'licenseSubtitle' | 'back' | 'loadingLicense' | 'licenseUnavailable' | 'enabledRuleProfileSummary'
   | 'rulesImportedMessage' | 'exportSuccessMessage' | 'exportCanceledMessage' | 'noRulesToExportMessage'
   | 'confirmDeleteRuleProfile' | 'noDnsRequestsToCopy' | 'dnsRequestsCopied' | 'noDebugLogsToCopy' | 'debugLogsCopied'
@@ -84,7 +85,8 @@ type LanguageKey =
   | 'importedRules'
   | 'customBlockRules' | 'customAllowRules' | 'builtInRuleProfileLocked' | 'addRuleActionTitle'
   | 'addAllowRuleAction' | 'addBlockRuleAction' | 'ruleAddedNeedsRestart' | 'ruleAlreadyExists'
-  | 'tapDomainToCreateRule';
+  | 'tapDomainToCreateRule' | 'addRuleLine' | 'customBlockRulePlaceholder' | 'customAllowRulePlaceholder'
+  | 'confirmDeleteRuleLine' | 'noCustomRulesHint';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -234,6 +236,7 @@ function resolveStringResource(key: LanguageKey): number {
     case 'locationPermissionRequired': return $r('app.string.locationPermissionRequired').id;
     case 'dnsFilterNotStarted': return $r('app.string.dnsFilterNotStarted').id;
     case 'startRequested': return $r('app.string.startRequested').id;
+    case 'restartRequested': return $r('app.string.restartRequested').id;
     case 'stopping': return $r('app.string.stopping').id;
     case 'licenseTitle': return $r('app.string.licenseTitle').id;
     case 'licenseSubtitle': return $r('app.string.licenseSubtitle').id;
@@ -304,6 +307,11 @@ function resolveStringResource(key: LanguageKey): number {
     case 'ruleAddedNeedsRestart': return $r('app.string.ruleAddedNeedsRestart').id;
     case 'ruleAlreadyExists': return $r('app.string.ruleAlreadyExists').id;
     case 'tapDomainToCreateRule': return $r('app.string.tapDomainToCreateRule').id;
+    case 'addRuleLine': return $r('app.string.addRuleLine').id;
+    case 'customBlockRulePlaceholder': return $r('app.string.customBlockRulePlaceholder').id;
+    case 'customAllowRulePlaceholder': return $r('app.string.customAllowRulePlaceholder').id;
+    case 'confirmDeleteRuleLine': return $r('app.string.confirmDeleteRuleLine').id;
+    case 'noCustomRulesHint': return $r('app.string.noCustomRulesHint').id;
   }
 }
 
@@ -395,6 +403,12 @@ interface RuleProfile {
   enabled: boolean;
   updatedAt: number;
   builtIn?: boolean;
+}
+
+interface RuleLineItem {
+  key: string;
+  line: string;
+  index: number;
 }
 
 type QueryActionFilter = 'all' | 'allowed' | 'blocked';
@@ -503,6 +517,7 @@ struct Index {
   @State showRuleEditorSheet: boolean = false;
   @State editingRuleProfileId: string = '';
   @State editingRuleNameText: string = '';
+  @State ruleLineInputText: string = '';
   @State domainSortDescending: boolean = true;
   @State domainActionFilter: QueryActionFilter = 'all';
   @State dnsSearchText: string = '';
@@ -538,6 +553,14 @@ struct Index {
   private suppressRuntimeArtifacts: boolean = false;
   private promptAction?: PromptAction;
   private autoStartAttempted: boolean = false;
+
+  onBackPress(): boolean {
+    if (this.showSettingsPage) {
+      this.showSettingsPage = false;
+      return true;
+    }
+    return false;
+  }
 
   private async copyText(text: string): Promise<void> {
     if (text.trim().length === 0) {
@@ -876,6 +899,7 @@ struct Index {
     }
     this.editingRuleProfileId = profileId;
     this.editingRuleNameText = profile.name;
+    this.ruleLineInputText = '';
     this.rulesText = profile.content;
     this.showRuleEditorSheet = true;
   }
@@ -884,7 +908,102 @@ struct Index {
     this.showRuleEditorSheet = false;
     this.editingRuleProfileId = '';
     this.editingRuleNameText = '';
+    this.ruleLineInputText = '';
     this.loadRulesText();
+  }
+
+  private editingRuleProfile(): RuleProfile | undefined {
+    return this.ruleProfiles.find((item: RuleProfile) => item.id === this.editingRuleProfileId);
+  }
+
+  private builtInRuleEditorActive(): boolean {
+    return this.isBuiltInRuleProfile(this.editingRuleProfileId);
+  }
+
+  private builtInRuleInputPlaceholder(): string {
+    if (this.editingRuleProfileId === CUSTOM_ALLOW_RULE_PROFILE_ID) {
+      return this.t('customAllowRulePlaceholder');
+    }
+    return this.t('customBlockRulePlaceholder');
+  }
+
+  private editingRuleLineItems(): RuleLineItem[] {
+    return this.ruleProfileLines(this.rulesText).map((line: string, index: number) => {
+      const item: RuleLineItem = {
+        key: `${index}_${line}`,
+        line,
+        index,
+      };
+      return item;
+    });
+  }
+
+  private formatBuiltInRuleLine(value: string): string {
+    const trimmed: string = value.trim();
+    if (trimmed.length === 0) {
+      return '';
+    }
+    if (trimmed.startsWith('@@') || trimmed.startsWith('||') || trimmed.startsWith('!')) {
+      return trimmed;
+    }
+    return this.buildRuleLineForDomain(trimmed, this.editingRuleProfileId === CUSTOM_ALLOW_RULE_PROFILE_ID);
+  }
+
+  private addRuleLineToEditor(): void {
+    const currentLines: string[] = this.ruleProfileLines(this.rulesText);
+    const pendingLines: string[] = this.normalizeRuleContent(this.ruleLineInputText)
+      .split('\n')
+      .map((line: string) => this.formatBuiltInRuleLine(line))
+      .filter((line: string) => line.length > 0);
+    if (pendingLines.length === 0) {
+      return;
+    }
+    let changed = false;
+    pendingLines.forEach((line: string) => {
+      if (!currentLines.includes(line)) {
+        currentLines.push(line);
+        changed = true;
+      }
+    });
+    if (!changed) {
+      return;
+    }
+    this.rulesText = currentLines.join('\n');
+    this.ruleLineInputText = '';
+  }
+
+  private confirmDeleteRuleLine(lineIndex: number): void {
+    const lines: string[] = this.ruleProfileLines(this.rulesText);
+    if (lineIndex < 0 || lineIndex >= lines.length) {
+      return;
+    }
+    const lineText: string = lines[lineIndex];
+    this.getUIContext().showAlertDialog({
+      message: `${this.t('confirmDeleteRuleLine')}\n${lineText}`,
+      buttons: [
+        {
+          value: this.t('cancel'),
+          action: () => {
+            try {
+              this.promptAction?.showToast({ message: this.t('operationCanceled') });
+            } catch (_) {
+            }
+          }
+        },
+        {
+          value: this.t('confirm'),
+          action: () => {
+            try {
+              const nextLines: string[] = this.ruleProfileLines(this.rulesText);
+              nextLines.splice(lineIndex, 1);
+              this.rulesText = nextLines.join('\n');
+            } catch (err) {
+              this.errorText = this.errorMessage(err);
+            }
+          }
+        }
+      ]
+    });
   }
 
   private parseDnsCacheTtlInput(value: string): number {
@@ -969,16 +1088,17 @@ struct Index {
     }
     const allowRule: string = this.buildRuleLineForDomain(normalizedDomain, true);
     const blockRule: string = this.buildRuleLineForDomain(normalizedDomain, false);
+    let hasBlockRule: boolean = false;
     for (const profile of this.normalizeRuleProfiles(this.ruleProfiles)) {
       const lines: string[] = this.ruleProfileLines(profile.content);
-      if (profile.id === CUSTOM_ALLOW_RULE_PROFILE_ID && lines.includes(allowRule)) {
+      if (lines.includes(allowRule)) {
         return 'allow';
       }
-      if (profile.id === CUSTOM_BLOCK_RULE_PROFILE_ID && lines.includes(blockRule)) {
-        return 'block';
+      if (lines.includes(blockRule)) {
+        hasBlockRule = true;
       }
     }
-    return 'none';
+    return hasBlockRule ? 'block' : 'none';
   }
 
   private updateRuleProfileContent(profile: RuleProfile, nextLines: string[], originalLines: string[]): RuleProfile {
@@ -1017,6 +1137,9 @@ struct Index {
     let targetExistsBefore: boolean = false;
     let oppositeExistsBefore: boolean = false;
     const nextProfiles: RuleProfile[] = this.normalizeRuleProfiles(this.ruleProfiles).map((profile: RuleProfile) => {
+      if (!profile.builtIn) {
+        return profile;
+      }
       const originalLines: string[] = this.ruleProfileLines(profile.content);
       let nextLines: string[] = originalLines.slice();
       if (profile.id === oppositeProfileId) {
@@ -1088,16 +1211,17 @@ struct Index {
   }
 
   private applyRuleEditorChanges(): void {
+    if (this.builtInRuleEditorActive()) {
+      this.addRuleLineToEditor();
+    }
     const next: RuleProfile[] = [];
     let changed = false;
     this.ruleProfiles.forEach((profile: RuleProfile) => {
       if (profile.id === this.editingRuleProfileId) {
-        const trimmedName: string = this.editingRuleNameText.trim();
-        const nextName: string = trimmedName.length > 0 ? trimmedName : profile.name;
         const nextContent: string = this.normalizeRuleContent(this.rulesText);
         next.push({
           id: profile.id,
-          name: nextName,
+          name: profile.name,
           content: nextContent,
           enabled: profile.enabled,
           updatedAt: Date.now(),
@@ -1591,7 +1715,8 @@ struct Index {
       this.setConfigFeedback(this.noRulesToExportMessage());
       return;
     }
-    const baseName: string = this.sanitizeExportBaseName(this.editingRuleNameText, 'filters');
+    const baseName: string = this.sanitizeExportBaseName(this.editingRuleProfile()?.name ?? this.editingRuleNameText,
+      'filters');
     const fileName = await this.exportTextToDownloadDirectory(baseName, 'txt', content, `${baseName}.txt`);
     if (fileName === undefined) {
       this.setConfigFeedback(this.exportCanceledMessage());
@@ -2142,6 +2267,7 @@ struct Index {
 
     this.busy = true;
     this.errorText = '';
+    const wasRunning: boolean = this.status.running;
     try {
       if (!this.writeTextFile(this.rulesFilePath, this.rulesText)) {
         throw new Error('Failed to write rules file');
@@ -2158,10 +2284,15 @@ struct Index {
       await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
       hilog.info(DOMAIN, TAG, '%{public}s', '==/vpn_ui/start_resolved/');
       this.appendDebugLog('==/vpn_ui/start_resolved/');
+      const requestMessage: string = wasRunning ? this.t('restartRequested') : this.t('startRequested');
       this.status = this.updatedStatus(
         'starting',
-        this.t('startRequested')
+        requestMessage
       );
+      try {
+        this.ensurePromptAction()?.showToast({ message: requestMessage });
+      } catch (_) {
+      }
       if (this.keepAliveModeList().length > 0) {
         await this.startLongTaskKeepAlive();
       }
@@ -4140,34 +4271,6 @@ struct Index {
                   .width('100%')
 
                   Row({ space: 8 }) {
-                    Button(this.t('moveUp'))
-                      .enabled(this.canMoveRuleProfileUp(profile.id))
-                      .height(34)
-                      .layoutWeight(1)
-                      .backgroundColor(this.coolNeutralChipSurfaceTone())
-                      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                      .fontColor(this.primaryTextColor())
-                      .borderRadius(12)
-                      .border({ width: 1, color: this.cardBorderTone() })
-                      .onClick(() => {
-                        this.moveRuleProfileUp(profile.id);
-                      })
-                    Button(this.t('moveDown'))
-                      .enabled(this.canMoveRuleProfileDown(profile.id))
-                      .height(34)
-                      .layoutWeight(1)
-                      .backgroundColor(this.coolNeutralChipSurfaceTone())
-                      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                      .fontColor(this.primaryTextColor())
-                      .borderRadius(12)
-                      .border({ width: 1, color: this.cardBorderTone() })
-                      .onClick(() => {
-                        this.moveRuleProfileDown(profile.id);
-                      })
-                  }
-                  .width('100%')
-
-                  Row({ space: 8 }) {
                     Button(this.t('editRule'))
                       .height(34)
                       .layoutWeight(1)
@@ -4231,24 +4334,87 @@ struct Index {
       Scroll() {
         Column({ space: 16 }) {
         Column({ space: 12 }) {
-          Row({ space: 8 }) {
-            this.IconBubble(this.sectionGlyph('keepAlive'), this.isDarkModeActive() ? '#22324A' : '#EEF8F2', '#179160', 24, 12)
-            Text(this.t('tabMe'))
-              .fontSize(11)
-              .fontColor(this.selectedChipTextTone())
-              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-              .backgroundColor(this.coolNeutralChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .border({ width: 1, color: this.cardBorderTone() })
-              .borderRadius(12)
-            Text(this.keepAliveRunning ? this.t('keepAliveOn') : this.t('keepAliveOff'))
-              .fontSize(11)
-              .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.accentAmberTone())
-              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-              .backgroundColor(this.keepAliveRunning ? this.softGreenTone() : this.coolNeutralChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .border({ width: 1, color: this.cardBorderTone() })
-              .borderRadius(12)
+          Row() {
+            Row({ space: 8 }) {
+              this.IconBubble(this.sectionGlyph('keepAlive'), this.isDarkModeActive() ? '#22324A' : '#EEF8F2', '#179160', 24, 12)
+              Text(this.t('tabMe'))
+                .fontSize(11)
+                .fontColor(this.selectedChipTextTone())
+                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                .backgroundColor(this.coolNeutralChipSurfaceTone())
+                .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                .border({ width: 1, color: this.cardBorderTone() })
+                .borderRadius(12)
+              Text(this.keepAliveRunning ? this.t('keepAliveOn') : this.t('keepAliveOff'))
+                .fontSize(11)
+                .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.accentAmberTone())
+                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                .backgroundColor(this.keepAliveRunning ? this.softGreenTone() : this.coolNeutralChipSurfaceTone())
+                .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                .border({ width: 1, color: this.cardBorderTone() })
+                .borderRadius(12)
+            }
+
+            Blank()
+
+            Row({ space: 8 }) {
+              Button(this.t('themeAuto'))
+                .backgroundColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET
+                  ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
+                .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                .fontColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET
+                  ? this.selectedChipTextTone() : this.primaryTextColor())
+                .fontSize(13)
+                .height(34)
+                .padding({ left: 14, right: 14 })
+                .borderRadius(17)
+                .border({ width: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET ? 1.5 : 1, color: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET ? this.selectedOutlineTone() : this.cardBorderTone() })
+                .shadow(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET
+                  ? { radius: 14, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
+                  : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
+                .onClick(() => {
+                  this.setTheme(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
+                })
+              Button(this.t('themeLight'))
+                .backgroundColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT
+                  ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
+                .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                .fontColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT
+                  ? this.selectedChipTextTone() : this.primaryTextColor())
+                .fontSize(13)
+                .height(34)
+                .padding({ left: 14, right: 14 })
+                .borderRadius(17)
+                .border({ width: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT ? 1.5 : 1, color: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT ? this.selectedOutlineTone() : this.cardBorderTone() })
+                .shadow(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT
+                  ? { radius: 14, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
+                  : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
+                .onClick(() => {
+                  this.setTheme(ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT);
+                })
+              Button(this.t('themeDark'))
+                .backgroundColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
+                  ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
+                .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                .fontColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
+                  ? this.selectedChipTextTone() : this.primaryTextColor())
+                .fontSize(13)
+                .height(34)
+                .padding({ left: 14, right: 14 })
+                .borderRadius(17)
+                .border({ width: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK ? 1.5 : 1, color: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK ? this.selectedOutlineTone() : this.cardBorderTone() })
+                .shadow(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
+                  ? { radius: 14, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
+                  : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
+                .onClick(() => {
+                  this.setTheme(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
+                })
+            }
+            .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+            .backgroundColor(this.coolNeutralChipSurfaceTone())
+            .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+            .border({ width: 1, color: this.cardBorderTone() })
+            .borderRadius(22)
           }
           .width('100%')
 
@@ -4468,144 +4634,6 @@ struct Index {
 
         Column({ space: 10 }) {
           Row({ space: 8 }) {
-            this.IconBubble(this.sectionGlyph('language'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#4B63D1', 26, 12)
-          Text(this.t('language'))
-            .fontSize(20)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.primaryTextColor())
-          }
-          Row({ space: 8 }) {
-            Button(this.t('langZhHans'))
-              .layoutWeight(1)
-              .backgroundColor(this.language === 'zhHans' ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .fontColor(this.language === 'zhHans' ? this.selectedChipTextTone() : this.primaryTextColor())
-              .borderRadius(14)
-              .border({ width: this.language === 'zhHans' ? 1.5 : 1, color: this.language === 'zhHans' ? this.selectedOutlineTone() : this.cardBorderTone() })
-              .shadow(this.language === 'zhHans'
-                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
-                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
-              .onClick(() => {
-                this.setLanguage('zhHans');
-              })
-            Button(this.t('langEn'))
-              .layoutWeight(1)
-              .backgroundColor(this.language === 'en' ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .fontColor(this.language === 'en' ? this.selectedChipTextTone() : this.primaryTextColor())
-              .borderRadius(14)
-              .border({ width: this.language === 'en' ? 1.5 : 1, color: this.language === 'en' ? this.selectedOutlineTone() : this.cardBorderTone() })
-              .shadow(this.language === 'en'
-                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
-                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
-              .onClick(() => {
-                this.setLanguage('en');
-              })
-            Button(this.t('langZhHant'))
-              .layoutWeight(1)
-              .backgroundColor(this.language === 'zhHant' ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .fontColor(this.language === 'zhHant' ? this.selectedChipTextTone() : this.primaryTextColor())
-              .borderRadius(14)
-              .border({ width: this.language === 'zhHant' ? 1.5 : 1, color: this.language === 'zhHant' ? this.selectedOutlineTone() : this.cardBorderTone() })
-              .shadow(this.language === 'zhHant'
-                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
-                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
-              .onClick(() => {
-                this.setLanguage('zhHant');
-              })
-          }
-          .width('100%')
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding(18)
-        .backgroundColor(this.elevatedSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(24)
-        .border({ width: 1, color: this.cardBorderTone() })
-        .shadow({ radius: 12, color: this.cardShadowTone() })
-        .linearGradient({
-          angle: 145,
-          colors: this.isDarkModeActive()
-            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
-        })
-
-        Column({ space: 10 }) {
-          Row({ space: 8 }) {
-            this.IconBubble(this.sectionGlyph('theme'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#6B7FA3', 26, 12)
-          Text(this.t('theme'))
-            .fontSize(20)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.primaryTextColor())
-          }
-          Row({ space: 8 }) {
-            Button(this.t('themeAuto'))
-              .layoutWeight(1)
-              .backgroundColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET
-                ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .fontColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET
-                ? this.selectedChipTextTone() : this.primaryTextColor())
-              .borderRadius(14)
-              .border({ width: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET ? 1.5 : 1, color: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET ? this.selectedOutlineTone() : this.cardBorderTone() })
-              .shadow(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET
-                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
-                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
-              .onClick(() => {
-                this.setTheme(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
-              })
-            Button(this.t('themeLight'))
-              .layoutWeight(1)
-              .backgroundColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT
-                ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .fontColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT
-                ? this.selectedChipTextTone() : this.primaryTextColor())
-              .borderRadius(14)
-              .border({ width: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT ? 1.5 : 1, color: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT ? this.selectedOutlineTone() : this.cardBorderTone() })
-              .shadow(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT
-                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
-                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
-              .onClick(() => {
-                this.setTheme(ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT);
-              })
-            Button(this.t('themeDark'))
-              .layoutWeight(1)
-              .backgroundColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .fontColor(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                ? this.selectedChipTextTone() : this.primaryTextColor())
-              .borderRadius(14)
-              .border({ width: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK ? 1.5 : 1, color: this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK ? this.selectedOutlineTone() : this.cardBorderTone() })
-              .shadow(this.themeMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
-                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
-              .onClick(() => {
-                this.setTheme(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
-              })
-          }
-          .width('100%')
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding(18)
-        .backgroundColor(this.elevatedSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(24)
-        .border({ width: 1, color: this.cardBorderTone() })
-        .shadow({ radius: 12, color: this.cardShadowTone() })
-        .linearGradient({
-          angle: 145,
-          colors: this.isDarkModeActive()
-            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
-        })
-
-        Column({ space: 10 }) {
-          Row({ space: 8 }) {
             this.IconBubble(this.sectionGlyph('version'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
           Text(this.t('versionBuild'))
             .fontSize(20)
@@ -4737,6 +4765,72 @@ struct Index {
             : [['#F8FCFF', 0.0], ['#EFF7FF', 0.52], ['#EAF4FF', 1.0]]
         })
 
+        Column({ space: 10 }) {
+          Row({ space: 8 }) {
+            this.IconBubble(this.sectionGlyph('language'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#4B63D1', 26, 12)
+            Text(this.t('language'))
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+          }
+          Row({ space: 8 }) {
+            Button(this.t('langZhHans'))
+              .layoutWeight(1)
+              .backgroundColor(this.language === 'zhHans' ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .fontColor(this.language === 'zhHans' ? this.selectedChipTextTone() : this.primaryTextColor())
+              .borderRadius(14)
+              .border({ width: this.language === 'zhHans' ? 1.5 : 1, color: this.language === 'zhHans' ? this.selectedOutlineTone() : this.cardBorderTone() })
+              .shadow(this.language === 'zhHans'
+                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
+                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
+              .onClick(() => {
+                this.setLanguage('zhHans');
+              })
+            Button(this.t('langEn'))
+              .layoutWeight(1)
+              .backgroundColor(this.language === 'en' ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .fontColor(this.language === 'en' ? this.selectedChipTextTone() : this.primaryTextColor())
+              .borderRadius(14)
+              .border({ width: this.language === 'en' ? 1.5 : 1, color: this.language === 'en' ? this.selectedOutlineTone() : this.cardBorderTone() })
+              .shadow(this.language === 'en'
+                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
+                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
+              .onClick(() => {
+                this.setLanguage('en');
+              })
+            Button(this.t('langZhHant'))
+              .layoutWeight(1)
+              .backgroundColor(this.language === 'zhHant' ? this.coolChipSurfaceTone() : this.coolNeutralChipSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .fontColor(this.language === 'zhHant' ? this.selectedChipTextTone() : this.primaryTextColor())
+              .borderRadius(14)
+              .border({ width: this.language === 'zhHant' ? 1.5 : 1, color: this.language === 'zhHant' ? this.selectedOutlineTone() : this.cardBorderTone() })
+              .shadow(this.language === 'zhHant'
+                ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 }
+                : { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 })
+              .onClick(() => {
+                this.setLanguage('zhHant');
+              })
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(18)
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(24)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
+        })
+
         Column({ space: 12 }) {
           Row({ space: 8 }) {
             this.IconBubble(this.sectionGlyph('dnsPackets'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
@@ -4752,19 +4846,17 @@ struct Index {
             .width('100%')
 
           Row({ space: 12 }) {
-            Column({ space: 4 }) {
-              Text(this.t('dnsCacheTtlLabel'))
+            Row({ space: 4 }) {
+              Text(this.language === 'en' ? `${this.t('dnsCacheTtlLabel')} (s)` : `${this.t('dnsCacheTtlLabel')}（秒）`)
                 .fontSize(15)
                 .fontWeight(FontWeight.Medium)
                 .fontColor(this.primaryTextColor())
-              Text('s')
-                .fontSize(12)
-                .fontColor(this.secondaryTextColor())
             }
-            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            .justifyContent(FlexAlign.Start)
 
             TextInput({ text: this.dnsCacheTtlInput, placeholder: `${DEFAULT_DNS_CACHE_TTL_SECONDS}` })
-              .layoutWeight(1)
+              .width(132)
               .height(44)
               .fontSize(15)
               .backgroundColor(this.sheetInputSurfaceTone())
@@ -4827,7 +4919,7 @@ struct Index {
             .alignItems(HorizontalAlign.Start)
 
             TextInput({ text: this.logRetentionDaysInput, placeholder: `${DEFAULT_LOG_RETENTION_DAYS}` })
-              .width(96)
+              .width(112)
               .height(44)
               .fontSize(15)
               .backgroundColor(this.sheetInputSurfaceTone())
@@ -4842,6 +4934,8 @@ struct Index {
             Text(this.language === 'en' ? 'days' : '天')
               .fontSize(12)
               .fontColor(this.secondaryTextColor())
+              .width(28)
+              .textAlign(TextAlign.End)
           }
           .width('100%')
           .padding(14)
@@ -4865,7 +4959,7 @@ struct Index {
             .alignItems(HorizontalAlign.Start)
 
             TextInput({ text: this.logMaxSizeMbInput, placeholder: `${DEFAULT_LOG_MAX_SIZE_MB}` })
-              .width(96)
+              .width(112)
               .height(44)
               .fontSize(15)
               .backgroundColor(this.sheetInputSurfaceTone())
@@ -4880,6 +4974,8 @@ struct Index {
             Text('MB')
               .fontSize(12)
               .fontColor(this.secondaryTextColor())
+              .width(28)
+              .textAlign(TextAlign.End)
           }
           .width('100%')
           .padding(14)
@@ -4983,18 +5079,22 @@ struct Index {
       }
       .width('100%')
 
-      TextInput({ text: this.editingRuleNameText, placeholder: this.t('defaultCustomRules') })
+      Row() {
+        Text(this.editingRuleProfile()?.name ?? this.editingRuleNameText)
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
         .width('100%')
         .height(44)
-        .fontSize(15)
+        .alignItems(VerticalAlign.Center)
         .backgroundColor(this.sheetInputSurfaceTone())
         .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
         .borderRadius(14)
         .border({ width: 1, color: this.sheetBorderTone() })
         .padding({ left: 12, right: 12 })
-        .onChange((value: string) => {
-          this.editingRuleNameText = value;
-        })
 
       Row({ space: 8 }) {
         Text('||domain^')
@@ -5024,19 +5124,111 @@ struct Index {
       }
       .width('100%')
 
-      TextArea({ text: this.rulesText, placeholder: this.t('writeRulesHere') })
+      if (this.builtInRuleEditorActive()) {
+        Column({ space: 10 }) {
+          Row({ space: 8 }) {
+            TextInput({ text: this.ruleLineInputText, placeholder: this.builtInRuleInputPlaceholder() })
+              .layoutWeight(1)
+              .height(44)
+              .fontSize(14)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12 })
+              .onChange((value: string) => {
+                this.ruleLineInputText = value;
+              })
+            Button(this.t('addRuleLine'))
+              .height(44)
+              .padding({ left: 16, right: 16 })
+              .backgroundColor(this.coolChipSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .fontColor(this.selectedChipTextTone())
+              .borderRadius(14)
+              .border({ width: 1, color: this.cardBorderTone() })
+              .onClick(() => {
+                this.addRuleLineToEditor();
+              })
+          }
+          .width('100%')
+
+          Column() {
+            if (this.editingRuleLineItems().length === 0) {
+              Text(this.t('noCustomRulesHint'))
+                .fontSize(13)
+                .lineHeight(20)
+                .textAlign(TextAlign.Center)
+                .fontColor(this.secondaryTextColor())
+            } else {
+              List({ space: 8 }) {
+                ForEach(this.editingRuleLineItems(), (item: RuleLineItem) => {
+                  ListItem() {
+                    Row({ space: 10 }) {
+                      Text(item.line)
+                        .layoutWeight(1)
+                        .fontSize(14)
+                        .fontColor(this.primaryTextColor())
+                        .maxLines(2)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+                      Button() {
+                        Text('×')
+                          .fontSize(18)
+                          .fontWeight(FontWeight.Medium)
+                          .fontColor('#B42318')
+                      }
+                      .width(32)
+                      .height(32)
+                      .backgroundColor(this.warmChipSurfaceTone())
+                      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                      .borderRadius(16)
+                      .border({ width: 1, color: this.cardBorderTone() })
+                      .onClick(() => {
+                        this.confirmDeleteRuleLine(item.index);
+                      })
+                    }
+                    .width('100%')
+                    .alignItems(VerticalAlign.Center)
+                    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+                    .backgroundColor(this.softPanelTone())
+                    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+                    .borderRadius(14)
+                    .border({ width: 1, color: this.cardBorderTone() })
+                  }
+                }, (item: RuleLineItem) => item.key)
+              }
+              .width('100%')
+              .height('100%')
+              .scrollBar(BarState.Auto)
+            }
+          }
+          .width('100%')
+          .height(306)
+          .justifyContent(FlexAlign.Center)
+          .padding(12)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .shadow({ radius: 10, color: this.sheetShadowTone() })
+        }
         .width('100%')
-        .height(360)
-        .backgroundColor(this.sheetInputSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(18)
-        .border({ width: 1, color: this.sheetBorderTone() })
-        .fontSize(13)
-        .padding(12)
-        .shadow({ radius: 10, color: this.sheetShadowTone() })
-        .onChange((value: string) => {
-          this.rulesText = value;
-        })
+      } else {
+        TextArea({ text: this.rulesText, placeholder: this.t('writeRulesHere') })
+          .width('100%')
+          .height(360)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .fontSize(13)
+          .padding(12)
+          .shadow({ radius: 10, color: this.sheetShadowTone() })
+          .onChange((value: string) => {
+            this.rulesText = value;
+          })
+      }
 
       Row({ space: 12 }) {
         Button(this.t('closeEditor'))
