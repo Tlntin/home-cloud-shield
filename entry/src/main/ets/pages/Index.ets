@@ -2300,9 +2300,11 @@ struct Index {
         'starting',
         requestMessage
       );
-      try {
-        this.ensurePromptAction()?.showToast({ message: requestMessage });
-      } catch (_) {
+      if (wasRunning) {
+        try {
+          this.ensurePromptAction()?.showToast({ message: requestMessage });
+        } catch (_) {
+        }
       }
       if (this.keepAliveModeList().length > 0) {
         await this.startLongTaskKeepAlive();
