@@ -27,11 +27,14 @@ const STATUS_FILE_NAME = 'status.json';
 const RULES_FILE_NAME = 'filters.txt';
 const QUERY_LOG_FILE_NAME = 'dns_queries.jsonl';
 const DEBUG_LOG_FILE_NAME = 'debug.log';
+const UPSTREAM_DNS_FILE_NAME = 'upstream.txt';
 const STATE_FILE_NAME = 'ui_state.json';
 const WANT_STATUS_FILE_PATH = 'statusFilePath';
 const WANT_RULES_FILE_PATH = 'rulesFilePath';
 const WANT_QUERY_LOG_FILE_PATH = 'queryLogFilePath';
 const WANT_DEBUG_LOG_FILE_PATH = 'debugLogFilePath';
+const WANT_UPSTREAM_DNS_FILE_PATH = 'upstreamDnsFilePath';
+const DEFAULT_UPSTREAM_DNS_IP = '119.29.29.29';
 const WANT_DNS_CACHE_TTL_SECONDS = 'dnsCacheTtlSeconds';
 const WANT_LOG_RETENTION_DAYS = 'logRetentionDays';
 const WANT_LOG_MAX_SIZE_MB = 'logMaxSizeMb';
@@ -77,6 +80,7 @@ type LanguageKey =
   | 'clearDnsRequestsFailed' | 'noDebugLogsToExport' | 'debugLogsExportedStatus' | 'copy' | 'export' | 'copyLog'
   | 'exportLog' | 'dnsSearchPlaceholder' | 'clickToExpand' | 'clickViewDebugAndCopy' | 'exportDebugLogsFailed'
   | 'exportRulesFailed' | 'exportFileFailed' | 'dnsCacheTitle' | 'dnsCacheHint' | 'dnsCacheTtlLabel'
+  | 'upstreamDnsTitle' | 'upstreamDnsHint' | 'upstreamDnsApply' | 'upstreamDnsApplied' | 'upstreamDnsInvalid'
   | 'logRetentionTitle' | 'logRetentionHint' | 'clearDnsLogOnStart' | 'clearDnsLogOnStartHint'
   | 'clearDebugLogOnStart' | 'clearDebugLogOnStartHint' | 'logRetentionDaysLabel' | 'logRetentionDaysHint'
   | 'logMaxSizeMbLabel' | 'logMaxSizeMbHint' | 'settingsEntry' | 'settingsEntryHint'
@@ -277,6 +281,11 @@ function resolveStringResource(key: LanguageKey): number {
     case 'exportFileFailed': return $r('app.string.exportFileFailed').id;
     case 'dnsCacheTitle': return $r('app.string.dnsCacheTitle').id;
     case 'dnsCacheHint': return $r('app.string.dnsCacheHint').id;
+    case 'upstreamDnsTitle': return $r('app.string.upstreamDnsTitle').id;
+    case 'upstreamDnsHint': return $r('app.string.upstreamDnsHint').id;
+    case 'upstreamDnsApply': return $r('app.string.upstreamDnsApply').id;
+    case 'upstreamDnsApplied': return $r('app.string.upstreamDnsApplied').id;
+    case 'upstreamDnsInvalid': return $r('app.string.upstreamDnsInvalid').id;
     case 'dnsCacheTtlLabel': return $r('app.string.dnsCacheTtlLabel').id;
     case 'logRetentionTitle': return $r('app.string.logRetentionTitle').id;
     case 'logRetentionHint': return $r('app.string.logRetentionHint').id;
@@ -430,6 +439,7 @@ interface PersistState {
   themeMode?: number;
   ruleProfiles?: RuleProfile[];
   dnsCacheTtlSeconds?: number;
+  upstreamDnsIp?: string;
   logRetentionDays?: number;
   logMaxSizeMb?: number;
   clearDnsLogOnStart?: boolean;
@@ -504,6 +514,7 @@ struct Index {
   @State rulesFilePath: string = '';
   @State queryLogFilePath: string = '';
   @State debugLogFilePath: string = '';
+  @State upstreamDnsFilePath: string = '';
   @State stateFilePath: string = '';
   @State rulesText: string = '';
   @State ruleProfiles: RuleProfile[] = [];
@@ -530,6 +541,7 @@ struct Index {
   @State debugSheetFeedbackText: string = '';
   @State dnsCacheTtlInput: string = `${DEFAULT_DNS_CACHE_TTL_SECONDS}`;
   @State dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
+  @State upstreamDnsInput: string = '';
   @State logRetentionDaysInput: string = `${DEFAULT_LOG_RETENTION_DAYS}`;
   @State logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   @State logMaxSizeMbInput: string = `${DEFAULT_LOG_MAX_SIZE_MB}`;
@@ -1034,6 +1046,76 @@ struct Index {
     this.dnsCacheTtlInput = value;
     this.dnsCacheTtlSeconds = this.parseDnsCacheTtlInput(value);
     this.savePersistState();
+  }
+
+  private isValidUpstreamIp(value: string): boolean {
+    const v: string = value.trim();
+    if (v.length === 0) {
+      return false;
+    }
+    if (v.includes(':')) {
+      return /^[0-9a-fA-F:.]+$/.test(v);
+    }
+    const parts: string[] = v.split('.');
+    if (parts.length !== 4) {
+      return false;
+    }
+    for (const part of parts) {
+      if (!/^\d{1,3}$/.test(part)) {
+        return false;
+      }
+      if (parseInt(part, 10) > 255) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private splitUpstreamEntries(value: string): string[] {
+    return value.split(/[\s,;]+/).map((s: string) => s.trim()).filter((s: string) => s.length > 0);
+  }
+
+  private onUpstreamDnsInputChange(value: string): void {
+    this.upstreamDnsInput = value;
+    this.savePersistState();
+  }
+
+  // Tap a preset to append it to the failover list (deduped), then apply.
+  private addUpstreamPreset(ip: string): void {
+    const entries: string[] = this.splitUpstreamEntries(this.upstreamDnsInput);
+    if (!entries.includes(ip)) {
+      entries.push(ip);
+    }
+    this.applyUpstreamDns(entries.join('\n'));
+  }
+
+  // Persist the upstream list and write the file the VPN extension watches.
+  // The list is tried in order with failover. While running it hot-applies
+  // within ~1s; otherwise it is read at next start. Empty restores the default.
+  private applyUpstreamDns(value: string): void {
+    const entries: string[] = this.splitUpstreamEntries(value);
+    for (const entry of entries) {
+      if (!this.isValidUpstreamIp(entry)) {
+        this.errorText = this.t('upstreamDnsInvalid');
+        return;
+      }
+    }
+    const cleaned: string[] = [];
+    for (const entry of entries) {
+      if (!cleaned.includes(entry)) {
+        cleaned.push(entry);
+      }
+    }
+    const text: string = cleaned.join('\n');
+    this.upstreamDnsInput = text;
+    this.savePersistState();
+    this.errorText = '';
+    this.writeTextFile(this.upstreamDnsFilePath, text);
+    this.appendDebugLog(`==/vpn_ui/upstream_set/ upstream=${text.length > 0 ? cleaned.join(',') : DEFAULT_UPSTREAM_DNS_IP}`);
+    try {
+      this.ensurePromptAction()?.showToast({ message: this.t('upstreamDnsApplied') });
+    } catch (_) {
+    }
   }
 
   private parseLogRetentionDaysInput(value: string): number {
@@ -1908,6 +1990,7 @@ struct Index {
     this.rulesFilePath = `${vpnDir}/${RULES_FILE_NAME}`;
     this.queryLogFilePath = `${vpnDir}/${QUERY_LOG_FILE_NAME}`;
     this.debugLogFilePath = `${vpnDir}/${DEBUG_LOG_FILE_NAME}`;
+    this.upstreamDnsFilePath = `${vpnDir}/${UPSTREAM_DNS_FILE_NAME}`;
     this.stateFilePath = `${vpnDir}/${STATE_FILE_NAME}`;
     try {
       fileIo.mkdirSync(vpnDir, true);
@@ -1944,6 +2027,7 @@ struct Index {
         rulesFilePath: this.rulesFilePath,
         queryLogFilePath: this.queryLogFilePath,
         debugLogFilePath: this.debugLogFilePath,
+        upstreamDnsFilePath: this.upstreamDnsFilePath,
         dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
         logRetentionDays: this.logRetentionDays,
         logMaxSizeMb: this.logMaxSizeMb,
@@ -1994,6 +2078,9 @@ struct Index {
       }
       if (typeof state.currentTab === 'number' && state.currentTab >= 0 && state.currentTab <= 2) {
         this.currentTab = state.currentTab;
+      }
+      if (typeof state.upstreamDnsIp === 'string') {
+        this.upstreamDnsInput = state.upstreamDnsIp.trim();
       }
       if (typeof state.dnsCacheTtlSeconds === 'number' && Number.isFinite(state.dnsCacheTtlSeconds)
         && state.dnsCacheTtlSeconds >= 0) {
@@ -2068,6 +2155,7 @@ struct Index {
       themeMode: this.themeMode,
       ruleProfiles: this.ruleProfiles,
       dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
+      upstreamDnsIp: this.upstreamDnsInput,
       logRetentionDays: this.logRetentionDays,
       logMaxSizeMb: this.logMaxSizeMb,
       clearDnsLogOnStart: this.clearDnsLogOnStart,
@@ -2284,6 +2372,7 @@ struct Index {
       if (!this.writeTextFile(this.rulesFilePath, this.rulesText)) {
         throw new Error('Failed to write rules file');
       }
+      this.writeTextFile(this.upstreamDnsFilePath, this.upstreamDnsInput.trim());
       this.rulesDirty = false;
       hilog.info(
         DOMAIN,
@@ -4820,6 +4909,120 @@ struct Index {
               })
           }
           .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(18)
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(24)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#F8FCFF', 0.0], ['#EBF5FF', 1.0]]
+        })
+
+        Column({ space: 12 }) {
+          Row({ space: 8 }) {
+            this.IconBubble(this.sectionGlyph('dnsPackets'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
+            Text(this.t('upstreamDnsTitle'))
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+          }
+          Text(this.t('upstreamDnsHint'))
+            .fontSize(13)
+            .lineHeight(20)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+
+          Column({ space: 10 }) {
+            TextArea({ text: this.upstreamDnsInput, placeholder: DEFAULT_UPSTREAM_DNS_IP })
+              .width('100%')
+              .height(88)
+              .fontSize(15)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+              .onChange((value: string) => {
+                this.onUpstreamDnsInputChange(value);
+              })
+
+            Flex({ wrap: FlexWrap.Wrap }) {
+              Button('AliDNS')
+                .type(ButtonType.Normal)
+                .fontSize(13)
+                .fontColor(this.primaryTextColor())
+                .backgroundColor(this.sheetInputSurfaceTone())
+                .borderRadius(12)
+                .border({ width: 1, color: this.sheetBorderTone() })
+                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                .margin({ right: 8, bottom: 8 })
+                .onClick(() => {
+                  this.addUpstreamPreset('223.5.5.5');
+                })
+              Button('DNSPod')
+                .type(ButtonType.Normal)
+                .fontSize(13)
+                .fontColor(this.primaryTextColor())
+                .backgroundColor(this.sheetInputSurfaceTone())
+                .borderRadius(12)
+                .border({ width: 1, color: this.sheetBorderTone() })
+                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                .margin({ right: 8, bottom: 8 })
+                .onClick(() => {
+                  this.addUpstreamPreset('119.29.29.29');
+                })
+              Button('Baidu')
+                .type(ButtonType.Normal)
+                .fontSize(13)
+                .fontColor(this.primaryTextColor())
+                .backgroundColor(this.sheetInputSurfaceTone())
+                .borderRadius(12)
+                .border({ width: 1, color: this.sheetBorderTone() })
+                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                .margin({ right: 8, bottom: 8 })
+                .onClick(() => {
+                  this.addUpstreamPreset('180.76.76.76');
+                })
+              Button('AdGuard')
+                .type(ButtonType.Normal)
+                .fontSize(13)
+                .fontColor(this.primaryTextColor())
+                .backgroundColor(this.sheetInputSurfaceTone())
+                .borderRadius(12)
+                .border({ width: 1, color: this.sheetBorderTone() })
+                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                .margin({ right: 8, bottom: 8 })
+                .onClick(() => {
+                  this.addUpstreamPreset('94.140.14.14');
+                })
+            }
+            .width('100%')
+
+            Button(this.t('upstreamDnsApply'))
+              .type(ButtonType.Normal)
+              .width('100%')
+              .height(44)
+              .fontSize(15)
+              .fontColor(Color.White)
+              .backgroundColor('#2B5B95')
+              .borderRadius(14)
+              .onClick(() => {
+                this.applyUpstreamDns(this.upstreamDnsInput);
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)

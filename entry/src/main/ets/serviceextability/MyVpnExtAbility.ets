@@ -13,10 +13,12 @@ const STATUS_FILE_NAME = 'status.json';
 const RULES_FILE_NAME = 'filters.txt';
 const QUERY_LOG_FILE_NAME = 'dns_queries.jsonl';
 const DEBUG_LOG_FILE_NAME = 'debug.log';
+const UPSTREAM_DNS_FILE_NAME = 'upstream.txt';
 const WANT_STATUS_FILE_PATH = 'statusFilePath';
 const WANT_RULES_FILE_PATH = 'rulesFilePath';
 const WANT_QUERY_LOG_FILE_PATH = 'queryLogFilePath';
 const WANT_DEBUG_LOG_FILE_PATH = 'debugLogFilePath';
+const WANT_UPSTREAM_DNS_FILE_PATH = 'upstreamDnsFilePath';
 const WANT_DNS_CACHE_TTL_SECONDS = 'dnsCacheTtlSeconds';
 const WANT_LOG_RETENTION_DAYS = 'logRetentionDays';
 const WANT_LOG_MAX_SIZE_MB = 'logMaxSizeMb';
@@ -33,7 +35,7 @@ const TUN_ADDRESS_IPV6 = 'fd00:ad00::2';
 const DNS_SERVER_IPV6 = 'fd00:ad00::1';
 const IPV6_ROUTE = 'fd00:ad00::';
 const IPV6_PREFIX_LENGTH = 64;
-const UPSTREAM_DNS_IP = '94.140.14.14';
+const UPSTREAM_DNS_IP = '119.29.29.29';
 const LEGACY_DEFAULT_RULES_TEXT = [
   '! AdGuard-style DNS rules',
   '! Supported examples:',
@@ -82,6 +84,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private rulesFilePath: string = '';
   private queryLogFilePath: string = '';
   private debugLogFilePath: string = '';
+  private upstreamDnsFilePath: string = '';
+  private upstreamDnsIp: string = UPSTREAM_DNS_IP;
   private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   private logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   private logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
@@ -92,6 +96,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private lastRunning: boolean = false;
   private lastNote: string = 'DNS filter has not been started yet.';
   private lastRulesSignature: string = '';
+  private lastUpstreamSignature: string = '';
 
   private isLegacyDefaultRulesText(content: string): boolean {
     return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim() === LEGACY_DEFAULT_RULES_TEXT;
@@ -124,11 +129,13 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     const rulesPath = this.wantStringParam(want, WANT_RULES_FILE_PATH);
     const queryLogPath = this.wantStringParam(want, WANT_QUERY_LOG_FILE_PATH);
     const debugLogPath = this.wantStringParam(want, WANT_DEBUG_LOG_FILE_PATH);
+    const upstreamDnsPath = this.wantStringParam(want, WANT_UPSTREAM_DNS_FILE_PATH);
 
     this.statusFilePath = statusPath.length > 0 ? statusPath : `${vpnDir}/${STATUS_FILE_NAME}`;
     this.rulesFilePath = rulesPath.length > 0 ? rulesPath : `${vpnDir}/${RULES_FILE_NAME}`;
     this.queryLogFilePath = queryLogPath.length > 0 ? queryLogPath : `${vpnDir}/${QUERY_LOG_FILE_NAME}`;
     this.debugLogFilePath = debugLogPath.length > 0 ? debugLogPath : `${vpnDir}/${DEBUG_LOG_FILE_NAME}`;
+    this.upstreamDnsFilePath = upstreamDnsPath.length > 0 ? upstreamDnsPath : `${vpnDir}/${UPSTREAM_DNS_FILE_NAME}`;
     this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
     this.logRetentionDays = this.wantNumberParam(want, WANT_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS);
     this.logMaxSizeMb = this.wantNumberParam(want, WANT_LOG_MAX_SIZE_MB, DEFAULT_LOG_MAX_SIZE_MB);
@@ -143,6 +150,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     if (this.isLegacyDefaultRulesText(existingRules)) {
       this.writeTextFile(this.rulesFilePath, '');
     }
+    this.upstreamDnsIp = this.readUpstreamDnsFromFile();
     this.prepareLogFile(this.queryLogFilePath, this.clearDnsLogOnStart, this.logRetentionDays, this.logMaxSizeMb, true);
     this.prepareLogFile(this.debugLogFilePath, this.clearDebugLogOnStart, this.logRetentionDays, this.logMaxSizeMb, false);
     hilog.info(
@@ -368,9 +376,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       DNS_SERVER_IPV6,
       IPV6_ROUTE,
       IPV6_PREFIX_LENGTH,
-      UPSTREAM_DNS_IP
+      this.upstreamDnsIp
     );
-    this.appendDebugLog(`==/vpn_ext/config/ tun4=${TUN_ADDRESS_IP} dns4=${DNS_SERVER_IP} route4=${IPV4_ROUTE}/${IPV4_PREFIX_LENGTH} tun6=${TUN_ADDRESS_IPV6} dns6=${DNS_SERVER_IPV6} route6=${IPV6_ROUTE}/${IPV6_PREFIX_LENGTH} upstream=${UPSTREAM_DNS_IP}`);
+    this.appendDebugLog(`==/vpn_ext/config/ tun4=${TUN_ADDRESS_IP} dns4=${DNS_SERVER_IP} route4=${IPV4_ROUTE}/${IPV4_PREFIX_LENGTH} tun6=${TUN_ADDRESS_IPV6} dns6=${DNS_SERVER_IPV6} route6=${IPV6_ROUTE}/${IPV6_PREFIX_LENGTH} upstream=${this.upstreamDnsIp}`);
   }
 
   private async setupVpn(): Promise<void> {
@@ -390,7 +398,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       const nativeError: string | undefined = vpnclientbridge.startDnsFilter(
         this.tunFd,
         DNS_SERVER_IP,
-        UPSTREAM_DNS_IP,
+        this.upstreamDnsIp,
         this.rulesFilePath,
         this.queryLogFilePath,
         this.dnsCacheTtlSeconds
@@ -401,12 +409,12 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
         '==/vpn_ext/native_start/ fd=%{public}d dns4=%{public}s upstream=%{public}s rules=%{public}s query=%{public}s cache_ttl=%{public}d',
         this.tunFd,
         DNS_SERVER_IP,
-        UPSTREAM_DNS_IP,
+        this.upstreamDnsIp,
         this.rulesFilePath,
         this.queryLogFilePath,
         this.dnsCacheTtlSeconds
       );
-      this.appendDebugLog(`==/vpn_ext/native_start/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} upstream=${UPSTREAM_DNS_IP} rules=${this.rulesFilePath} query=${this.queryLogFilePath} cache_ttl=${this.dnsCacheTtlSeconds}`);
+      this.appendDebugLog(`==/vpn_ext/native_start/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} upstream=${this.upstreamDnsIp} rules=${this.rulesFilePath} query=${this.queryLogFilePath} cache_ttl=${this.dnsCacheTtlSeconds}`);
       if (nativeError !== undefined) {
         throw new Error(nativeError);
       }
@@ -414,9 +422,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       throw new Error(this.errorMessage(err));
     }
 
-    // startDnsFilter already loaded the current rules, so seed the baseline to
-    // avoid a redundant reload on the first watch tick.
+    // startDnsFilter already loaded the current rules and upstream, so seed the
+    // baselines to avoid a redundant reload/apply on the first watch tick.
     this.lastRulesSignature = this.rulesFileSignature();
+    this.lastUpstreamSignature = this.upstreamFileSignature();
     this.startStatusPump();
     this.writeStatus(
       'running',
@@ -434,6 +443,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
 
     this.statusTimer = setInterval(() => {
       this.checkRulesReload();
+      this.checkUpstreamReload();
       this.writeStatus(
         'running',
         true,
@@ -442,12 +452,92 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     }, 1000);
   }
 
+  private isLikelyIpAddress(value: string): boolean {
+    const v: string = value.trim();
+    if (v.length === 0) {
+      return false;
+    }
+    if (v.includes(':')) {
+      return /^[0-9a-fA-F:.]+$/.test(v);
+    }
+    const parts: string[] = v.split('.');
+    if (parts.length !== 4) {
+      return false;
+    }
+    for (const part of parts) {
+      if (!/^\d{1,3}$/.test(part)) {
+        return false;
+      }
+      if (parseInt(part, 10) > 255) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Reads the upstream resolver from its file, falling back to the built-in
+  // default when the file is missing, empty, or not a valid IP address.
+  // Reads the upstream resolver list from its file (one or more IPs separated by
+  // newlines/commas), keeping only valid, de-duplicated entries. Falls back to
+  // the built-in default when nothing valid is found. The native layer applies
+  // them in order with failover.
+  private readUpstreamDnsFromFile(): string {
+    const content: string = this.readTextFile(this.upstreamDnsFilePath);
+    const valid: string[] = [];
+    for (const raw of content.split(/[\s,;]+/)) {
+      const ip: string = raw.trim();
+      if (ip.length > 0 && this.isLikelyIpAddress(ip) && !valid.includes(ip)) {
+        valid.push(ip);
+      }
+    }
+    return valid.length > 0 ? valid.join('\n') : UPSTREAM_DNS_IP;
+  }
+
   private rulesFileSignature(): string {
     try {
       const stat = fileIo.statSync(this.rulesFilePath);
       return `${stat.mtime}:${stat.size}`;
     } catch (_) {
       return '';
+    }
+  }
+
+  private upstreamFileSignature(): string {
+    try {
+      const stat = fileIo.statSync(this.upstreamDnsFilePath);
+      return `${stat.mtime}:${stat.size}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // Apply an upstream DNS change live: when the UI rewrites the upstream file,
+  // switch the running filter's resolver (and flush its cache) without a
+  // full VPN restart.
+  private checkUpstreamReload(): void {
+    const signature: string = this.upstreamFileSignature();
+    if (signature.length === 0 || signature === this.lastUpstreamSignature) {
+      return;
+    }
+    this.lastUpstreamSignature = signature;
+
+    const nextUpstream: string = this.readUpstreamDnsFromFile();
+    if (nextUpstream === this.upstreamDnsIp) {
+      return;
+    }
+    this.upstreamDnsIp = nextUpstream;
+
+    try {
+      const err: string | undefined = vpnclientbridge.setUpstreamDns(nextUpstream);
+      if (err !== undefined) {
+        hilog.error(DOMAIN, TAG, '==/vpn_ext/upstream_set_error/ %{public}s', err);
+        this.appendDebugLog(`==/vpn_ext/upstream_set_error/ ${err}`);
+      } else {
+        hilog.info(DOMAIN, TAG, '==/vpn_ext/upstream_set/ upstream=%{public}s', nextUpstream);
+        this.appendDebugLog(`==/vpn_ext/upstream_set/ upstream=${nextUpstream}`);
+      }
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ext/upstream_set_exception/ ${this.errorMessage(err)}`);
     }
   }
 

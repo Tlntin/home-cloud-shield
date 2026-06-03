@@ -9,5 +9,6 @@ declare module 'libvpnclientbridge.so' {
   ): string | undefined;
   export function stopDnsFilter(): string | undefined;
   export function reloadDnsRules(rulesPath: string): string | undefined;
+  export function setUpstreamDns(upstreamDnsIp: string): string | undefined;
   export function getStats(): string;
 }

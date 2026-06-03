@@ -108,7 +108,7 @@ struct StatsState {
     std::string lastError;
     std::string rulesPath;
     std::string queryLogPath;
-    std::string upstreamDnsIp;
+    std::vector<std::string> upstreamDnsIps;
     std::string dnsServerIp;
     std::shared_ptr<const std::vector<RuleEntry>> activeRules;
     uint32_t dnsCacheTtlSeconds = 3600;
@@ -138,7 +138,7 @@ struct ForwardTask {
     std::vector<uint8_t> query;
     DnsQuestion question;
     std::string matchedRule;
-    std::string upstreamDnsIp;
+    std::vector<std::string> upstreams;
     std::string queryLogPath;
 };
 
@@ -962,7 +962,37 @@ void StoreDnsResponseCache(const DnsQuestion &question, const std::vector<uint8_
         nowMs + static_cast<int64_t>(g_state.dnsCacheTtlSeconds) * 1000};
 }
 
-std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std::string &upstreamDnsIp, std::string &error)
+// Split a raw upstream string (comma / whitespace / newline separated) into an
+// ordered, de-duplicated list of upstream resolvers.
+std::vector<std::string> ParseUpstreamList(const std::string &raw)
+{
+    std::vector<std::string> entries;
+    std::string current;
+    for (char ch : raw) {
+        if (ch == ',' || ch == ';' || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+            if (!current.empty()) {
+                entries.push_back(current);
+                current.clear();
+            }
+        } else {
+            current.push_back(ch);
+        }
+    }
+    if (!current.empty()) {
+        entries.push_back(current);
+    }
+
+    std::vector<std::string> deduped;
+    for (const std::string &entry : entries) {
+        if (std::find(deduped.begin(), deduped.end(), entry) == deduped.end()) {
+            deduped.push_back(entry);
+        }
+    }
+    return deduped;
+}
+
+// Resolve a query against a single upstream over UDP.
+std::vector<uint8_t> ForwardDnsQueryOne(const uint8_t *query, size_t len, const std::string &upstreamDnsIp, std::string &error)
 {
     std::vector<uint8_t> response;
     if (upstreamDnsIp.empty()) {
@@ -1047,6 +1077,28 @@ std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std
     }
 
     close(sock);
+    return response;
+}
+
+// Resolve over UDP, failing over to each upstream in order until one answers.
+// Returns the first non-empty response, or empty if every upstream failed.
+std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std::vector<std::string> &upstreams,
+    std::string &error)
+{
+    if (upstreams.empty()) {
+        error = "no upstream DNS configured";
+        return {};
+    }
+    std::vector<uint8_t> response;
+    for (const std::string &upstream : upstreams) {
+        std::string attemptError;
+        response = ForwardDnsQueryOne(query, len, upstream, attemptError);
+        if (!response.empty()) {
+            error.clear();
+            return response;
+        }
+        error = attemptError;
+    }
     return response;
 }
 
@@ -1246,7 +1298,7 @@ void ProcessForwardTask(ForwardTask &task)
     if (cacheHit) {
         source = "cache";
     } else {
-        dnsResponse = ForwardDnsQuery(task.query.data(), task.query.size(), task.upstreamDnsIp, responseError);
+        dnsResponse = ForwardDnsQuery(task.query.data(), task.query.size(), task.upstreams, responseError);
         if (!dnsResponse.empty()) {
             StoreDnsResponseCache(task.question, dnsResponse);
         }
@@ -1696,7 +1748,8 @@ void SendTcpSeg(int tunFd, TcpConn &c, uint8_t flags, const uint8_t *payload, si
     c.sndNxt += advance;
 }
 
-std::vector<uint8_t> ForwardDnsQueryTcp(const uint8_t *query, size_t len, const std::string &upstreamDnsIp,
+// Resolve a query against a single upstream over TCP (full, untruncated answer).
+std::vector<uint8_t> ForwardDnsQueryTcpOne(const uint8_t *query, size_t len, const std::string &upstreamDnsIp,
     std::string &error)
 {
     std::vector<uint8_t> response;
@@ -1825,6 +1878,27 @@ std::vector<uint8_t> ForwardDnsQueryTcp(const uint8_t *query, size_t len, const 
     return response;
 }
 
+// Resolve over TCP, failing over to each upstream in order until one answers.
+std::vector<uint8_t> ForwardDnsQueryTcp(const uint8_t *query, size_t len, const std::vector<std::string> &upstreams,
+    std::string &error)
+{
+    if (upstreams.empty()) {
+        error = "no upstream DNS configured";
+        return {};
+    }
+    std::vector<uint8_t> response;
+    for (const std::string &upstream : upstreams) {
+        std::string attemptError;
+        response = ForwardDnsQueryTcpOne(query, len, upstream, attemptError);
+        if (!response.empty()) {
+            error.clear();
+            return response;
+        }
+        error = attemptError;
+    }
+    return response;
+}
+
 void SendTcpDnsResponse(int tunFd, TcpConn &c, const std::vector<uint8_t> &dnsResponse)
 {
     std::vector<uint8_t> stream;
@@ -1857,12 +1931,12 @@ void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &messag
 
     std::shared_ptr<const std::vector<RuleEntry>> rules;
     std::string queryLogPath;
-    std::string upstreamDnsIp;
+    std::vector<std::string> upstreams;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         rules = g_state.activeRules;
         queryLogPath = g_state.queryLogPath;
-        upstreamDnsIp = g_state.upstreamDnsIp;
+        upstreams = g_state.upstreamDnsIps;
     }
 
     const MatchResult match = rules ? MatchDomain(question.name, question.qtype, *rules) : MatchResult {};
@@ -1886,7 +1960,7 @@ void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &messag
         if (cacheHit) {
             source = "cache";
         } else {
-            dnsResponse = ForwardDnsQueryTcp(message.data(), message.size(), upstreamDnsIp, responseError);
+            dnsResponse = ForwardDnsQueryTcp(message.data(), message.size(), upstreams, responseError);
             if (!dnsResponse.empty()) {
                 StoreDnsResponseCache(question, dnsResponse);
             }
@@ -2044,12 +2118,12 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
 
     std::shared_ptr<const std::vector<RuleEntry>> rules;
     std::string queryLogPath;
-    std::string upstreamDnsIp;
+    std::vector<std::string> upstreams;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         rules = g_state.activeRules;
         queryLogPath = g_state.queryLogPath;
-        upstreamDnsIp = g_state.upstreamDnsIp;
+        upstreams = g_state.upstreamDnsIps;
     }
 
     const MatchResult match = rules ? MatchDomain(question.name, question.qtype, *rules) : MatchResult {};
@@ -2105,7 +2179,7 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
     task.query.assign(dnsPayload, dnsPayload + dnsLen);
     task.question = question;
     task.matchedRule = match.matchedRule;
-    task.upstreamDnsIp = upstreamDnsIp;
+    task.upstreams = upstreams;
     task.queryLogPath = queryLogPath;
     EnqueueForwardTask(std::move(task));
 }
@@ -2208,7 +2282,7 @@ void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp,
     state.lastMatchedRule.clear();
     state.lastError.clear();
     state.dnsServerIp = dnsServerIp;
-    state.upstreamDnsIp = upstreamDnsIp;
+    state.upstreamDnsIps = ParseUpstreamList(upstreamDnsIp);
     state.rulesPath = rulesPath;
     state.queryLogPath = queryLogPath;
     state.activeRules = std::make_shared<const std::vector<RuleEntry>>(LoadRulesSnapshot(rulesPath));
@@ -2313,6 +2387,24 @@ std::string ReloadDnsRules(const std::string &rulesPath)
     return {};
 }
 
+// Switch the upstream resolver live. The DNS cache is flushed because cached
+// answers may have been resolved by the previous (e.g. geographically distant)
+// upstream and could carry suboptimal CDN routing.
+std::string SetUpstreamDns(const std::string &upstreamDnsIp)
+{
+    std::vector<std::string> upstreams = ParseUpstreamList(upstreamDnsIp);
+    if (upstreams.empty()) {
+        return "upstream dns ip is required";
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.upstreamDnsIps = std::move(upstreams);
+        g_state.dnsResponseCache.clear();
+    }
+    LogInfo("==/vpn_native/upstream_set/ upstream=%{public}s", upstreamDnsIp.c_str());
+    return {};
+}
+
 std::string GetStatsJson()
 {
     std::lock_guard<std::mutex> lock(g_state.mu);
@@ -2401,6 +2493,22 @@ napi_value JsReloadDnsRules(napi_env env, napi_callback_info info)
     return ReturnErrOrUndefined(env, ReloadDnsRules(rulesPath));
 }
 
+napi_value JsSetUpstreamDns(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1) {
+        return MakeUtf8(env, "upstream dns ip is required");
+    }
+
+    std::string upstreamDnsIp;
+    if (!ReadArgString(env, argv[0], upstreamDnsIp) || upstreamDnsIp.empty()) {
+        return MakeUtf8(env, "invalid upstream dns ip");
+    }
+    return ReturnErrOrUndefined(env, SetUpstreamDns(upstreamDnsIp));
+}
+
 napi_value JsGetStats(napi_env env, napi_callback_info info)
 {
     (void)info;
@@ -2413,6 +2521,7 @@ napi_value Init(napi_env env, napi_value exports)
         {"startDnsFilter", nullptr, JsStartDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopDnsFilter", nullptr, JsStopDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reloadDnsRules", nullptr, JsReloadDnsRules, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setUpstreamDns", nullptr, JsSetUpstreamDns, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getStats", nullptr, JsGetStats, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
