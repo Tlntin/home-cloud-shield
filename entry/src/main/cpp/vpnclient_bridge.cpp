@@ -6,12 +6,17 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
+#include <memory>
 #include <mutex>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sstream>
 #include <string>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <thread>
 #include <unordered_map>
@@ -105,13 +110,48 @@ struct StatsState {
     std::string queryLogPath;
     std::string upstreamDnsIp;
     std::string dnsServerIp;
-    std::vector<RuleEntry> activeRules;
+    std::shared_ptr<const std::vector<RuleEntry>> activeRules;
     uint32_t dnsCacheTtlSeconds = 3600;
     std::unordered_map<std::string, DnsCacheEntry> dnsResponseCache;
     std::thread worker;
 };
 
 StatsState g_state;
+
+constexpr int kForwardWorkerCount = 8;
+constexpr size_t kMaxQueuedForwardTasks = 2048;
+constexpr int kUpstreamTimeoutSec = 2;
+constexpr int kUpstreamAttempts = 2;
+
+// Serializes writes back to the TUN fd across the reader thread (blocked
+// responses) and the forward worker threads (upstream responses).
+std::mutex g_tunWriteMu;
+
+// A DNS query that passed the filter and must be resolved upstream. Forwarding
+// is the slow part (a network round-trip), so it runs on a worker pool instead
+// of blocking the single reader thread that drains the TUN device.
+struct ForwardTask {
+    int tunFd = -1;
+    bool isIpv6 = false;
+    Ipv4UdpPacketView view4;
+    Ipv6UdpPacketView view6;
+    std::vector<uint8_t> query;
+    DnsQuestion question;
+    std::string matchedRule;
+    std::string upstreamDnsIp;
+    std::string queryLogPath;
+};
+
+struct ForwardPool {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<ForwardTask> tasks;
+    std::vector<std::thread> workers;
+    bool running = false;
+    bool stopRequested = false;
+};
+
+ForwardPool g_pool;
 
 void LogInfo(const char *fmt, ...)
 {
@@ -938,12 +978,14 @@ std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std
     }
 
     timeval timeout {};
-    timeout.tv_sec = 3;
+    timeout.tv_sec = kUpstreamTimeoutSec;
     timeout.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
-    ssize_t sent = -1;
+    // Connect the UDP socket so only datagrams from the chosen upstream are
+    // delivered; combined with the fresh ephemeral port this keeps responses
+    // from leaking across concurrent queries handled by other workers.
     if (isIpv6) {
         sockaddr_in6 addr {};
         addr.sin6_family = AF_INET6;
@@ -953,7 +995,11 @@ std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std
             error = "invalid upstream DNS ip";
             return response;
         }
-        sent = sendto(sock, query, len, 0, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
+        if (connect(sock, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+            error = std::string("connect upstream failed: ") + std::strerror(errno);
+            close(sock);
+            return response;
+        }
     } else {
         sockaddr_in addr {};
         addr.sin_family = AF_INET;
@@ -963,24 +1009,44 @@ std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std
             error = "invalid upstream DNS ip";
             return response;
         }
-        sent = sendto(sock, query, len, 0, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
-    }
-    if (sent < 0) {
-        error = std::string("sendto upstream failed: ") + std::strerror(errno);
-        close(sock);
-        return response;
+        if (connect(sock, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+            error = std::string("connect upstream failed: ") + std::strerror(errno);
+            close(sock);
+            return response;
+        }
     }
 
-    uint8_t buffer[2048];
-    const ssize_t received = recvfrom(sock, buffer, sizeof(buffer), 0, nullptr, nullptr);
-    if (received < 0) {
-        error = std::string("recvfrom upstream failed: ") + std::strerror(errno);
-        close(sock);
-        return response;
+    const uint16_t txnId = len >= 2 ? Load16(query) : 0;
+    for (int attempt = 0; attempt < kUpstreamAttempts; ++attempt) {
+        if (send(sock, query, len, 0) < 0) {
+            error = std::string("send upstream failed: ") + std::strerror(errno);
+            break;
+        }
+
+        uint8_t buffer[2048];
+        const ssize_t received = recv(sock, buffer, sizeof(buffer), 0);
+        if (received > 0) {
+            if (txnId != 0 && received >= 2 && Load16(buffer) != txnId) {
+                error = "upstream response id mismatch";
+                break;
+            }
+            error.clear();
+            response.assign(buffer, buffer + received);
+            break;
+        }
+        if (received == 0) {
+            error = "upstream closed connection";
+            break;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            error = "upstream timeout";
+            continue;  // retry once more
+        }
+        error = std::string("recv upstream failed: ") + std::strerror(errno);
+        break;
     }
 
     close(sock);
-    response.assign(buffer, buffer + received);
     return response;
 }
 
@@ -1159,8 +1225,801 @@ void LogDnsEvent(const std::string &path, const std::string &domain, uint16_t qt
         requestBytes, responseBytes);
 }
 
+// Resolve a filtered-through query upstream (or from cache) and write the
+// response back to the TUN device. Runs on a forward worker thread.
+void ProcessForwardTask(ForwardTask &task)
+{
+    std::vector<uint8_t> dnsResponse;
+    std::string source = "upstream";
+    std::string responseError;
+
+    const bool cacheHit = TryGetCachedDnsResponse(task.question, task.query.data(), task.query.size(), dnsResponse);
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        if (cacheHit) {
+            g_state.dnsCacheHits++;
+        } else {
+            g_state.dnsCacheMisses++;
+        }
+    }
+
+    if (cacheHit) {
+        source = "cache";
+    } else {
+        dnsResponse = ForwardDnsQuery(task.query.data(), task.query.size(), task.upstreamDnsIp, responseError);
+        if (!dnsResponse.empty()) {
+            StoreDnsResponseCache(task.question, dnsResponse);
+        }
+    }
+
+    if (dnsResponse.empty()) {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.lastError = responseError;
+        LogError("==/vpn_native/dns_error/ domain=%{public}s err=%{public}s", task.question.name.c_str(),
+            responseError.c_str());
+        return;
+    }
+
+    const std::vector<uint8_t> responsePacket = task.isIpv6
+        ? BuildIpv6UdpResponse(task.view6, dnsResponse)
+        : BuildIpv4UdpResponse(task.view4, dnsResponse);
+    std::string writeError;
+    bool written = false;
+    {
+        std::lock_guard<std::mutex> writeLock(g_tunWriteMu);
+        written = WriteAll(task.tunFd, responsePacket.data(), responsePacket.size(), writeError);
+    }
+    if (!written) {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.lastError = writeError;
+        LogError("==/vpn_native/write_error/ domain=%{public}s err=%{public}s", task.question.name.c_str(),
+            writeError.c_str());
+        return;
+    }
+
+    LogDnsEvent(task.queryLogPath, task.question.name, task.question.qtype, false, task.matchedRule, source,
+        task.query.size(), dnsResponse.size());
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.lastQueryDomain = task.question.name;
+        g_state.lastMatchedRule = task.matchedRule;
+        g_state.loggedQueries++;
+        g_state.allowedQueries++;
+    }
+}
+
+void ForwardWorkerLoop()
+{
+    for (;;) {
+        ForwardTask task;
+        {
+            std::unique_lock<std::mutex> lock(g_pool.mu);
+            g_pool.cv.wait(lock, [] { return g_pool.stopRequested || !g_pool.tasks.empty(); });
+            if (g_pool.stopRequested) {
+                break;
+            }
+            task = std::move(g_pool.tasks.front());
+            g_pool.tasks.pop_front();
+        }
+        ProcessForwardTask(task);
+    }
+}
+
+void EnqueueForwardTask(ForwardTask &&task)
+{
+    std::lock_guard<std::mutex> lock(g_pool.mu);
+    if (!g_pool.running) {
+        return;
+    }
+    if (g_pool.tasks.size() >= kMaxQueuedForwardTasks) {
+        // Bound memory under a flood: drop the oldest pending query (the client
+        // will retry) rather than grow without limit.
+        g_pool.tasks.pop_front();
+    }
+    g_pool.tasks.push_back(std::move(task));
+    g_pool.cv.notify_one();
+}
+
+void StartForwardPool()
+{
+    std::lock_guard<std::mutex> lock(g_pool.mu);
+    g_pool.stopRequested = false;
+    g_pool.running = true;
+    g_pool.tasks.clear();
+    g_pool.workers.clear();
+    for (int i = 0; i < kForwardWorkerCount; ++i) {
+        g_pool.workers.emplace_back(ForwardWorkerLoop);
+    }
+}
+
+void StopForwardPool()
+{
+    std::vector<std::thread> workers;
+    {
+        std::lock_guard<std::mutex> lock(g_pool.mu);
+        g_pool.stopRequested = true;
+        g_pool.running = false;
+        g_pool.tasks.clear();
+        workers = std::move(g_pool.workers);
+        g_pool.workers.clear();
+    }
+    g_pool.cv.notify_all();
+    for (std::thread &worker : workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DNS-over-TCP (RFC 7766) support.
+//
+// The TUN hands us raw IP packets, so to answer a client that opens a TCP
+// connection to our DNS server we have to terminate a minimal TCP endpoint
+// ourselves: complete the handshake, acknowledge data, reassemble the
+// length-prefixed DNS message, resolve it (upstream over TCP for a full,
+// untruncated answer), stream the response back, and tear the connection down.
+//
+// All of this runs on the single reader thread, so the connection table needs
+// no locking. TCP DNS is an uncommon fallback (resolvers prefer UDP), so the
+// brief synchronous upstream round-trip here is an acceptable trade for the
+// large reduction in concurrency complexity. If TCP volume ever grows enough to
+// stall UDP, the upstream fetch can be moved onto the forward worker pool.
+// ---------------------------------------------------------------------------
+
+constexpr int64_t kTcpConnIdleMs = 30000;
+constexpr size_t kMaxTcpConns = 256;
+constexpr uint8_t kTcpFin = 0x01;
+constexpr uint8_t kTcpSyn = 0x02;
+constexpr uint8_t kTcpRst = 0x04;
+constexpr uint8_t kTcpPsh = 0x08;
+constexpr uint8_t kTcpAck = 0x10;
+
+uint32_t Load32(const uint8_t *p)
+{
+    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16)
+        | (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+}
+
+// 32-bit serial-number comparison (RFC 1982): true if a is "before" b.
+bool SeqLt(uint32_t a, uint32_t b)
+{
+    return static_cast<int32_t>(a - b) < 0;
+}
+
+uint16_t ParseTcpMss(const uint8_t *tcp, size_t dataOffset)
+{
+    size_t i = 20;
+    while (i + 1 < dataOffset) {
+        const uint8_t kind = tcp[i];
+        if (kind == 0) {
+            break;
+        }
+        if (kind == 1) {
+            i += 1;
+            continue;
+        }
+        const uint8_t optLen = tcp[i + 1];
+        if (optLen < 2 || i + optLen > dataOffset) {
+            break;
+        }
+        if (kind == 2 && optLen == 4) {
+            return Load16(tcp + i + 2);
+        }
+        i += optLen;
+    }
+    return 0;
+}
+
+struct TcpSegmentView {
+    bool valid = false;
+    bool isIpv6 = false;
+    uint32_t srcAddr4 = 0;
+    uint32_t dstAddr4 = 0;
+    std::array<uint8_t, 16> srcAddr6 {};
+    std::array<uint8_t, 16> dstAddr6 {};
+    uint16_t srcPort = 0;
+    uint16_t dstPort = 0;
+    uint32_t seq = 0;
+    uint32_t ack = 0;
+    uint8_t flags = 0;
+    uint16_t mss = 0;
+    const uint8_t *payload = nullptr;
+    size_t payloadLen = 0;
+};
+
+TcpSegmentView ParseTcpSegment(const uint8_t *packet, size_t len)
+{
+    TcpSegmentView view;
+    if (len < 1) {
+        return view;
+    }
+    const uint8_t version = packet[0] >> 4;
+    if (version == 4) {
+        if (len < 20) {
+            return view;
+        }
+        const size_t ipHeaderLen = static_cast<size_t>(packet[0] & 0x0FU) * 4;
+        if (ipHeaderLen < 20 || len < ipHeaderLen + 20 || packet[9] != 6) {
+            return view;
+        }
+        const uint16_t totalLen = Load16(packet + 2);
+        const size_t packetLen = totalLen > 0 && totalLen <= len ? totalLen : len;
+        const uint8_t *tcp = packet + ipHeaderLen;
+        const size_t dataOffset = static_cast<size_t>(tcp[12] >> 4) * 4;
+        if (dataOffset < 20 || ipHeaderLen + dataOffset > packetLen) {
+            return view;
+        }
+        view.valid = true;
+        view.srcAddr4 = Load32(packet + 12);
+        view.dstAddr4 = Load32(packet + 16);
+        view.srcPort = Load16(tcp);
+        view.dstPort = Load16(tcp + 2);
+        view.seq = Load32(tcp + 4);
+        view.ack = Load32(tcp + 8);
+        view.flags = tcp[13];
+        view.payload = tcp + dataOffset;
+        view.payloadLen = packetLen - ipHeaderLen - dataOffset;
+        if (view.flags & kTcpSyn) {
+            view.mss = ParseTcpMss(tcp, dataOffset);
+        }
+        return view;
+    }
+    if (version == 6) {
+        if (len < 60 || packet[6] != 6) {
+            return view;
+        }
+        const uint16_t payloadLen = Load16(packet + 4);
+        if (payloadLen < 20 || len < static_cast<size_t>(40) + payloadLen) {
+            return view;
+        }
+        const uint8_t *tcp = packet + 40;
+        const size_t dataOffset = static_cast<size_t>(tcp[12] >> 4) * 4;
+        if (dataOffset < 20 || dataOffset > payloadLen) {
+            return view;
+        }
+        view.valid = true;
+        view.isIpv6 = true;
+        std::memcpy(view.srcAddr6.data(), packet + 8, 16);
+        std::memcpy(view.dstAddr6.data(), packet + 24, 16);
+        view.srcPort = Load16(tcp);
+        view.dstPort = Load16(tcp + 2);
+        view.seq = Load32(tcp + 4);
+        view.ack = Load32(tcp + 8);
+        view.flags = tcp[13];
+        view.payload = tcp + dataOffset;
+        view.payloadLen = payloadLen - dataOffset;
+        if (view.flags & kTcpSyn) {
+            view.mss = ParseTcpMss(tcp, dataOffset);
+        }
+        return view;
+    }
+    return view;
+}
+
+struct TcpConn {
+    bool isIpv6 = false;
+    uint32_t cliAddr4 = 0;
+    uint32_t srvAddr4 = 0;
+    std::array<uint8_t, 16> cliAddr6 {};
+    std::array<uint8_t, 16> srvAddr6 {};
+    uint16_t cliPort = 0;
+    uint16_t srvPort = 0;
+    uint32_t sndNxt = 0;
+    uint32_t rcvNxt = 0;
+    uint16_t cliMss = 536;
+    bool established = false;
+    bool clientFin = false;
+    bool ourFin = false;
+    std::vector<uint8_t> inbound;
+    int64_t lastActiveMs = 0;
+};
+
+// Reader-thread-only; no mutex required.
+std::unordered_map<std::string, TcpConn> g_tcpConns;
+
+std::string BuildTcpKey(const TcpSegmentView &v)
+{
+    std::string key;
+    key.reserve(24);
+    key.push_back(v.isIpv6 ? '6' : '4');
+    if (v.isIpv6) {
+        key.append(reinterpret_cast<const char *>(v.srcAddr6.data()), 16);
+    } else {
+        uint8_t addr[4];
+        Store32(addr, v.srcAddr4);
+        key.append(reinterpret_cast<const char *>(addr), 4);
+    }
+    uint8_t ports[4];
+    Store16(ports, v.srcPort);
+    Store16(ports + 2, v.dstPort);
+    key.append(reinterpret_cast<const char *>(ports), 4);
+    return key;
+}
+
+uint32_t NextTcpIsn()
+{
+    static uint32_t counter = 0;
+    counter += 0x9E3779B9U;
+    return static_cast<uint32_t>(NowMs()) + counter;
+}
+
+void PruneIdleTcpConns(int64_t nowMs)
+{
+    for (auto it = g_tcpConns.begin(); it != g_tcpConns.end();) {
+        if (nowMs - it->second.lastActiveMs > kTcpConnIdleMs) {
+            it = g_tcpConns.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (g_tcpConns.size() > kMaxTcpConns) {
+        auto oldest = g_tcpConns.begin();
+        for (auto it = g_tcpConns.begin(); it != g_tcpConns.end(); ++it) {
+            if (it->second.lastActiveMs < oldest->second.lastActiveMs) {
+                oldest = it;
+            }
+        }
+        g_tcpConns.erase(oldest);
+    }
+}
+
+uint16_t TcpChecksum4(uint32_t src, uint32_t dst, const uint8_t *tcp, size_t tcpLen)
+{
+    uint32_t sum = 0;
+    sum += (src >> 16) & 0xFFFFU;
+    sum += src & 0xFFFFU;
+    sum += (dst >> 16) & 0xFFFFU;
+    sum += dst & 0xFFFFU;
+    sum += 6U;
+    sum += static_cast<uint16_t>(tcpLen);
+    size_t i = 0;
+    while (i + 1 < tcpLen) {
+        sum += static_cast<uint16_t>((tcp[i] << 8) | tcp[i + 1]);
+        i += 2;
+    }
+    if (i < tcpLen) {
+        sum += static_cast<uint16_t>(tcp[i] << 8);
+    }
+    return ChecksumFold(sum);
+}
+
+uint16_t TcpChecksum6(const std::array<uint8_t, 16> &src, const std::array<uint8_t, 16> &dst,
+    const uint8_t *tcp, size_t tcpLen)
+{
+    uint32_t sum = 0;
+    for (size_t i = 0; i < 16; i += 2) {
+        sum += static_cast<uint16_t>((src[i] << 8) | src[i + 1]);
+        sum += static_cast<uint16_t>((dst[i] << 8) | dst[i + 1]);
+    }
+    sum += static_cast<uint16_t>((tcpLen >> 16) & 0xFFFFU);
+    sum += static_cast<uint16_t>(tcpLen & 0xFFFFU);
+    sum += 6U;
+    size_t i = 0;
+    while (i + 1 < tcpLen) {
+        sum += static_cast<uint16_t>((tcp[i] << 8) | tcp[i + 1]);
+        i += 2;
+    }
+    if (i < tcpLen) {
+        sum += static_cast<uint16_t>(tcp[i] << 8);
+    }
+    return ChecksumFold(sum);
+}
+
+std::vector<uint8_t> BuildIpv4TcpSeg(const TcpConn &c, uint8_t flags, uint32_t seq, uint32_t ack,
+    const uint8_t *payload, size_t payloadLen, bool withMss)
+{
+    const size_t tcpHeaderLen = withMss ? 24 : 20;
+    const size_t tcpLen = tcpHeaderLen + payloadLen;
+    const size_t totalLen = 20 + tcpLen;
+    std::vector<uint8_t> out(totalLen, 0);
+    out[0] = 0x45;
+    Store16(&out[2], static_cast<uint16_t>(totalLen));
+    Store16(&out[6], 0x4000);
+    out[8] = 64;
+    out[9] = 6;
+    Store32(&out[12], c.srvAddr4);
+    Store32(&out[16], c.cliAddr4);
+    Store16(&out[10], InternetChecksum(out.data(), 20));
+
+    uint8_t *t = out.data() + 20;
+    Store16(t, c.srvPort);
+    Store16(t + 2, c.cliPort);
+    Store32(t + 4, seq);
+    Store32(t + 8, ack);
+    t[12] = static_cast<uint8_t>((tcpHeaderLen / 4) << 4);
+    t[13] = flags;
+    Store16(t + 14, 65535);
+    if (withMss) {
+        t[20] = 2;
+        t[21] = 4;
+        Store16(t + 22, 1400 - 40);
+    }
+    if (payloadLen > 0) {
+        std::memcpy(t + tcpHeaderLen, payload, payloadLen);
+    }
+    Store16(t + 16, TcpChecksum4(c.srvAddr4, c.cliAddr4, t, tcpLen));
+    return out;
+}
+
+std::vector<uint8_t> BuildIpv6TcpSeg(const TcpConn &c, uint8_t flags, uint32_t seq, uint32_t ack,
+    const uint8_t *payload, size_t payloadLen, bool withMss)
+{
+    const size_t tcpHeaderLen = withMss ? 24 : 20;
+    const size_t tcpLen = tcpHeaderLen + payloadLen;
+    const size_t totalLen = 40 + tcpLen;
+    std::vector<uint8_t> out(totalLen, 0);
+    out[0] = 0x60;
+    Store16(&out[4], static_cast<uint16_t>(tcpLen));
+    out[6] = 6;
+    out[7] = 64;
+    std::memcpy(out.data() + 8, c.srvAddr6.data(), 16);
+    std::memcpy(out.data() + 24, c.cliAddr6.data(), 16);
+
+    uint8_t *t = out.data() + 40;
+    Store16(t, c.srvPort);
+    Store16(t + 2, c.cliPort);
+    Store32(t + 4, seq);
+    Store32(t + 8, ack);
+    t[12] = static_cast<uint8_t>((tcpHeaderLen / 4) << 4);
+    t[13] = flags;
+    Store16(t + 14, 65535);
+    if (withMss) {
+        t[20] = 2;
+        t[21] = 4;
+        Store16(t + 22, 1400 - 60);
+    }
+    if (payloadLen > 0) {
+        std::memcpy(t + tcpHeaderLen, payload, payloadLen);
+    }
+    Store16(t + 16, TcpChecksum6(c.srvAddr6, c.cliAddr6, t, tcpLen));
+    return out;
+}
+
+void SendTcpSeg(int tunFd, TcpConn &c, uint8_t flags, const uint8_t *payload, size_t payloadLen, bool withMss)
+{
+    const std::vector<uint8_t> pkt = c.isIpv6
+        ? BuildIpv6TcpSeg(c, flags, c.sndNxt, c.rcvNxt, payload, payloadLen, withMss)
+        : BuildIpv4TcpSeg(c, flags, c.sndNxt, c.rcvNxt, payload, payloadLen, withMss);
+    std::string writeError;
+    {
+        std::lock_guard<std::mutex> writeLock(g_tunWriteMu);
+        WriteAll(tunFd, pkt.data(), pkt.size(), writeError);
+    }
+    uint32_t advance = static_cast<uint32_t>(payloadLen);
+    if (flags & kTcpSyn) {
+        advance += 1;
+    }
+    if (flags & kTcpFin) {
+        advance += 1;
+    }
+    c.sndNxt += advance;
+}
+
+std::vector<uint8_t> ForwardDnsQueryTcp(const uint8_t *query, size_t len, const std::string &upstreamDnsIp,
+    std::string &error)
+{
+    std::vector<uint8_t> response;
+    if (upstreamDnsIp.empty()) {
+        error = "upstream DNS is empty";
+        return response;
+    }
+
+    const bool isIpv6 = upstreamDnsIp.find(':') != std::string::npos;
+    int sock = socket(isIpv6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        error = std::string("create upstream tcp socket failed: ") + std::strerror(errno);
+        return response;
+    }
+
+    sockaddr_in addr4 {};
+    sockaddr_in6 addr6 {};
+    sockaddr *addr = nullptr;
+    socklen_t addrLen = 0;
+    if (isIpv6) {
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_port = htons(53);
+        if (inet_pton(AF_INET6, upstreamDnsIp.c_str(), &addr6.sin6_addr) != 1) {
+            close(sock);
+            error = "invalid upstream DNS ip";
+            return response;
+        }
+        addr = reinterpret_cast<sockaddr *>(&addr6);
+        addrLen = sizeof(addr6);
+    } else {
+        addr4.sin_family = AF_INET;
+        addr4.sin_port = htons(53);
+        if (inet_pton(AF_INET, upstreamDnsIp.c_str(), &addr4.sin_addr) != 1) {
+            close(sock);
+            error = "invalid upstream DNS ip";
+            return response;
+        }
+        addr = reinterpret_cast<sockaddr *>(&addr4);
+        addrLen = sizeof(addr4);
+    }
+
+    // Non-blocking connect with a bounded timeout so a dead upstream can't hang
+    // the reader thread beyond kUpstreamTimeoutSec.
+    const int origFlags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, origFlags | O_NONBLOCK);
+    const int rc = connect(sock, addr, addrLen);
+    if (rc < 0 && errno == EINPROGRESS) {
+        pollfd pfd {};
+        pfd.fd = sock;
+        pfd.events = POLLOUT;
+        const int pr = poll(&pfd, 1, kUpstreamTimeoutSec * 1000);
+        if (pr <= 0) {
+            error = "upstream tcp connect timeout";
+            close(sock);
+            return response;
+        }
+        int soErr = 0;
+        socklen_t soLen = sizeof(soErr);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &soErr, &soLen);
+        if (soErr != 0) {
+            error = std::string("upstream tcp connect failed: ") + std::strerror(soErr);
+            close(sock);
+            return response;
+        }
+    } else if (rc < 0) {
+        error = std::string("upstream tcp connect failed: ") + std::strerror(errno);
+        close(sock);
+        return response;
+    }
+    fcntl(sock, F_SETFL, origFlags);
+
+    timeval timeout {};
+    timeout.tv_sec = kUpstreamTimeoutSec;
+    timeout.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    std::vector<uint8_t> framed;
+    framed.reserve(len + 2);
+    framed.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
+    framed.push_back(static_cast<uint8_t>(len & 0xFF));
+    framed.insert(framed.end(), query, query + len);
+    size_t sentOff = 0;
+    while (sentOff < framed.size()) {
+        const ssize_t n = send(sock, framed.data() + sentOff, framed.size() - sentOff, 0);
+        if (n <= 0) {
+            error = std::string("send tcp upstream failed: ") + std::strerror(errno);
+            close(sock);
+            return response;
+        }
+        sentOff += static_cast<size_t>(n);
+    }
+
+    uint8_t lenBuf[2];
+    size_t got = 0;
+    while (got < 2) {
+        const ssize_t n = recv(sock, lenBuf + got, 2 - got, 0);
+        if (n <= 0) {
+            error = "recv tcp upstream length failed";
+            close(sock);
+            return response;
+        }
+        got += static_cast<size_t>(n);
+    }
+    const uint16_t respLen = static_cast<uint16_t>((lenBuf[0] << 8) | lenBuf[1]);
+    if (respLen == 0) {
+        error = "empty tcp upstream response";
+        close(sock);
+        return response;
+    }
+
+    response.resize(respLen);
+    got = 0;
+    while (got < respLen) {
+        const ssize_t n = recv(sock, response.data() + got, respLen - got, 0);
+        if (n <= 0) {
+            error = "recv tcp upstream body failed";
+            close(sock);
+            response.clear();
+            return response;
+        }
+        got += static_cast<size_t>(n);
+    }
+    close(sock);
+    error.clear();
+    return response;
+}
+
+void SendTcpDnsResponse(int tunFd, TcpConn &c, const std::vector<uint8_t> &dnsResponse)
+{
+    std::vector<uint8_t> stream;
+    stream.reserve(dnsResponse.size() + 2);
+    stream.push_back(static_cast<uint8_t>((dnsResponse.size() >> 8) & 0xFF));
+    stream.push_back(static_cast<uint8_t>(dnsResponse.size() & 0xFF));
+    stream.insert(stream.end(), dnsResponse.begin(), dnsResponse.end());
+
+    const size_t pathMax = c.isIpv6 ? static_cast<size_t>(1400 - 60) : static_cast<size_t>(1400 - 40);
+    size_t maxSeg = c.cliMss > 0 ? std::min<size_t>(c.cliMss, pathMax) : pathMax;
+    if (maxSeg == 0) {
+        maxSeg = 536;
+    }
+    size_t off = 0;
+    while (off < stream.size()) {
+        const size_t chunk = std::min(maxSeg, stream.size() - off);
+        const bool last = off + chunk >= stream.size();
+        const uint8_t flags = static_cast<uint8_t>(kTcpAck | (last ? kTcpPsh : 0));
+        SendTcpSeg(tunFd, c, flags, stream.data() + off, chunk, false);
+        off += chunk;
+    }
+}
+
+void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &message)
+{
+    const DnsQuestion question = ParseDnsQuestion(message.data(), message.size());
+    if (!question.valid) {
+        return;
+    }
+
+    std::shared_ptr<const std::vector<RuleEntry>> rules;
+    std::string queryLogPath;
+    std::string upstreamDnsIp;
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        rules = g_state.activeRules;
+        queryLogPath = g_state.queryLogPath;
+        upstreamDnsIp = g_state.upstreamDnsIp;
+    }
+
+    const MatchResult match = rules ? MatchDomain(question.name, question.qtype, *rules) : MatchResult {};
+
+    std::vector<uint8_t> dnsResponse;
+    std::string source = "upstream";
+    std::string responseError;
+    if (match.blocked) {
+        source = "blocked";
+        dnsResponse = BuildBlockedDnsResponse(message.data(), message.size(), question);
+    } else {
+        const bool cacheHit = TryGetCachedDnsResponse(question, message.data(), message.size(), dnsResponse);
+        {
+            std::lock_guard<std::mutex> lock(g_state.mu);
+            if (cacheHit) {
+                g_state.dnsCacheHits++;
+            } else {
+                g_state.dnsCacheMisses++;
+            }
+        }
+        if (cacheHit) {
+            source = "cache";
+        } else {
+            dnsResponse = ForwardDnsQueryTcp(message.data(), message.size(), upstreamDnsIp, responseError);
+            if (!dnsResponse.empty()) {
+                StoreDnsResponseCache(question, dnsResponse);
+            }
+        }
+    }
+
+    if (dnsResponse.empty()) {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.lastError = responseError;
+        LogError("==/vpn_native/tcp_dns_error/ domain=%{public}s err=%{public}s", question.name.c_str(),
+            responseError.c_str());
+        return;
+    }
+
+    SendTcpDnsResponse(tunFd, c, dnsResponse);
+    LogDnsEvent(queryLogPath, question.name, question.qtype, match.blocked, match.matchedRule, source,
+        message.size(), dnsResponse.size());
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.lastQueryDomain = question.name;
+        g_state.lastMatchedRule = match.matchedRule;
+        g_state.loggedQueries++;
+        if (match.blocked) {
+            g_state.blockedQueries++;
+        } else {
+            g_state.allowedQueries++;
+        }
+    }
+}
+
+void ProcessTcpInbound(int tunFd, TcpConn &c)
+{
+    for (;;) {
+        if (c.inbound.size() < 2) {
+            return;
+        }
+        const uint16_t msgLen = static_cast<uint16_t>((c.inbound[0] << 8) | c.inbound[1]);
+        if (msgLen == 0) {
+            c.inbound.erase(c.inbound.begin(), c.inbound.begin() + 2);
+            continue;
+        }
+        if (c.inbound.size() < static_cast<size_t>(msgLen) + 2) {
+            return;
+        }
+        const std::vector<uint8_t> message(c.inbound.begin() + 2, c.inbound.begin() + 2 + msgLen);
+        c.inbound.erase(c.inbound.begin(), c.inbound.begin() + 2 + msgLen);
+        HandleTcpDnsQuery(tunFd, c, message);
+    }
+}
+
+void HandleTcpPacket(int tunFd, const TcpSegmentView &v)
+{
+    const int64_t nowMs = NowMs();
+    PruneIdleTcpConns(nowMs);
+
+    const std::string key = BuildTcpKey(v);
+    auto it = g_tcpConns.find(key);
+
+    if (v.flags & kTcpRst) {
+        if (it != g_tcpConns.end()) {
+            g_tcpConns.erase(it);
+        }
+        return;
+    }
+
+    // New connection: reply to the SYN with SYN-ACK (advertising our MSS).
+    if ((v.flags & kTcpSyn) && !(v.flags & kTcpAck)) {
+        TcpConn conn;
+        conn.isIpv6 = v.isIpv6;
+        conn.cliAddr4 = v.srcAddr4;
+        conn.srvAddr4 = v.dstAddr4;
+        conn.cliAddr6 = v.srcAddr6;
+        conn.srvAddr6 = v.dstAddr6;
+        conn.cliPort = v.srcPort;
+        conn.srvPort = v.dstPort;
+        conn.rcvNxt = v.seq + 1;
+        conn.sndNxt = NextTcpIsn();
+        conn.cliMss = v.mss > 0 ? v.mss : 536;
+        conn.lastActiveMs = nowMs;
+        g_tcpConns[key] = std::move(conn);
+        SendTcpSeg(tunFd, g_tcpConns[key], static_cast<uint8_t>(kTcpSyn | kTcpAck), nullptr, 0, true);
+        return;
+    }
+
+    if (it == g_tcpConns.end()) {
+        return;  // unknown, non-SYN segment: ignore
+    }
+    TcpConn &c = it->second;
+    c.lastActiveMs = nowMs;
+
+    if (v.flags & kTcpAck) {
+        if (!c.established && v.ack == c.sndNxt) {
+            c.established = true;
+        }
+        if (c.ourFin && c.clientFin && v.ack == c.sndNxt) {
+            g_tcpConns.erase(it);
+            return;
+        }
+    }
+
+    if (v.payloadLen > 0) {
+        if (v.seq == c.rcvNxt) {
+            c.inbound.insert(c.inbound.end(), v.payload, v.payload + v.payloadLen);
+            c.rcvNxt += static_cast<uint32_t>(v.payloadLen);
+            SendTcpSeg(tunFd, c, kTcpAck, nullptr, 0, false);
+            ProcessTcpInbound(tunFd, c);
+        } else {
+            // Duplicate or out-of-order (no loss on a local TUN): just re-ACK.
+            SendTcpSeg(tunFd, c, kTcpAck, nullptr, 0, false);
+        }
+    }
+
+    // Client half-close. The query was processed synchronously above, so any
+    // response has already been sent and it is safe to close our side too.
+    if ((v.flags & kTcpFin) && (v.seq + static_cast<uint32_t>(v.payloadLen) == c.rcvNxt)) {
+        c.rcvNxt += 1;
+        c.clientFin = true;
+        SendTcpSeg(tunFd, c, kTcpAck, nullptr, 0, false);
+        if (!c.ourFin) {
+            SendTcpSeg(tunFd, c, static_cast<uint8_t>(kTcpFin | kTcpAck), nullptr, 0, false);
+            c.ourFin = true;
+        }
+    }
+}
+
 void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
 {
+    const TcpSegmentView tcp = ParseTcpSegment(packet, len);
+    if (tcp.valid && tcp.dstPort == 53) {
+        HandleTcpPacket(tunFd, tcp);
+        return;
+    }
+
     const Ipv4UdpPacketView view4 = ParseIpv4UdpPacket(packet, len);
     const Ipv6UdpPacketView view6 = ParseIpv6UdpPacket(packet, len);
 
@@ -1183,94 +2042,105 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
         return;
     }
 
-    std::string rulesPath;
+    std::shared_ptr<const std::vector<RuleEntry>> rules;
     std::string queryLogPath;
     std::string upstreamDnsIp;
-    std::vector<RuleEntry> activeRules;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
-        rulesPath = g_state.rulesPath;
+        rules = g_state.activeRules;
         queryLogPath = g_state.queryLogPath;
         upstreamDnsIp = g_state.upstreamDnsIp;
-        activeRules = g_state.activeRules;
     }
 
-    const MatchResult match = MatchDomain(question.name, question.qtype, activeRules);
+    const MatchResult match = rules ? MatchDomain(question.name, question.qtype, *rules) : MatchResult {};
 
-    std::vector<uint8_t> dnsResponse;
-    std::string source = "upstream";
-    std::string responseError;
     if (match.blocked) {
-        source = "blocked";
-        dnsResponse = BuildBlockedDnsResponse(dnsPayload, dnsLen, question);
-    } else {
-        const bool cacheHit = TryGetCachedDnsResponse(question, dnsPayload, dnsLen, dnsResponse);
-        {
+        // Blocked responses are synthesized locally (no network), so answer them
+        // inline on the reader thread instead of paying a queue hop.
+        const std::vector<uint8_t> dnsResponse = BuildBlockedDnsResponse(dnsPayload, dnsLen, question);
+        if (dnsResponse.empty()) {
             std::lock_guard<std::mutex> lock(g_state.mu);
-            if (cacheHit) {
-                g_state.dnsCacheHits++;
-            } else {
-                g_state.dnsCacheMisses++;
-            }
+            g_state.lastError = "failed to synthesize blocked DNS response";
+            LogError("==/vpn_native/dns_error/ domain=%{public}s err=%{public}s", question.name.c_str(),
+                g_state.lastError.c_str());
+            return;
         }
-        if (cacheHit) {
-            source = "cache";
-        } else {
-            dnsResponse = ForwardDnsQuery(dnsPayload, dnsLen, upstreamDnsIp, responseError);
-            if (!dnsResponse.empty()) {
-                StoreDnsResponseCache(question, dnsResponse);
-            }
+
+        const std::vector<uint8_t> responsePacket = isIpv6
+            ? BuildIpv6UdpResponse(view6, dnsResponse)
+            : BuildIpv4UdpResponse(view4, dnsResponse);
+        std::string writeError;
+        bool written = false;
+        {
+            std::lock_guard<std::mutex> writeLock(g_tunWriteMu);
+            written = WriteAll(tunFd, responsePacket.data(), responsePacket.size(), writeError);
         }
-    }
-
-    if (dnsResponse.empty()) {
-        if (match.blocked) {
-            responseError = "failed to synthesize blocked DNS response";
+        if (!written) {
+            std::lock_guard<std::mutex> lock(g_state.mu);
+            g_state.lastError = writeError;
+            LogError("==/vpn_native/write_error/ domain=%{public}s err=%{public}s", question.name.c_str(),
+                writeError.c_str());
+            return;
         }
-        std::lock_guard<std::mutex> lock(g_state.mu);
-        g_state.lastError = responseError;
-        LogError("==/vpn_native/dns_error/ domain=%{public}s err=%{public}s", question.name.c_str(), responseError.c_str());
-        return;
-    }
 
-    const std::vector<uint8_t> responsePacket = isIpv6
-        ? BuildIpv6UdpResponse(view6, dnsResponse)
-        : BuildIpv4UdpResponse(view4, dnsResponse);
-    std::string writeError;
-    if (!WriteAll(tunFd, responsePacket.data(), responsePacket.size(), writeError)) {
-        std::lock_guard<std::mutex> lock(g_state.mu);
-        g_state.lastError = writeError;
-        LogError("==/vpn_native/write_error/ domain=%{public}s err=%{public}s", question.name.c_str(), writeError.c_str());
-        return;
-    }
-
-    LogDnsEvent(queryLogPath, question.name, question.qtype, match.blocked, match.matchedRule, source, dnsLen,
-        dnsResponse.size());
-    {
+        LogDnsEvent(queryLogPath, question.name, question.qtype, true, match.matchedRule, "blocked", dnsLen,
+            dnsResponse.size());
         std::lock_guard<std::mutex> lock(g_state.mu);
         g_state.lastQueryDomain = question.name;
         g_state.lastMatchedRule = match.matchedRule;
         g_state.loggedQueries++;
-        if (match.blocked) {
-            g_state.blockedQueries++;
-        } else {
-            g_state.allowedQueries++;
-        }
-        if (!responseError.empty()) {
-            g_state.lastError = responseError;
-        }
+        g_state.blockedQueries++;
+        return;
     }
+
+    // Not blocked: hand the upstream round-trip to the worker pool so the reader
+    // thread can immediately drain the next packet instead of stalling here.
+    ForwardTask task;
+    task.tunFd = tunFd;
+    task.isIpv6 = isIpv6;
+    task.view4 = view4;
+    task.view4.dnsPayload = nullptr;  // points into the reusable reader buffer
+    task.view6 = view6;
+    task.view6.dnsPayload = nullptr;
+    task.query.assign(dnsPayload, dnsPayload + dnsLen);
+    task.question = question;
+    task.matchedRule = match.matchedRule;
+    task.upstreamDnsIp = upstreamDnsIp;
+    task.queryLogPath = queryLogPath;
+    EnqueueForwardTask(std::move(task));
 }
 
 void ReaderLoop(int tunFd)
 {
     uint8_t buffer[65536];
+    pollfd pfd {};
+    pfd.fd = tunFd;
+    pfd.events = POLLIN;
+
     for (;;) {
         {
             std::lock_guard<std::mutex> lock(g_state.mu);
             if (g_state.stopRequested) {
                 break;
             }
+        }
+
+        // Wake immediately when a packet arrives; the timeout only bounds how
+        // often we re-check the stop flag.
+        const int ready = poll(&pfd, 1, 200);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::lock_guard<std::mutex> lock(g_state.mu);
+            if (!g_state.stopRequested) {
+                g_state.lastError = std::string("tun poll failed: ") + std::strerror(errno);
+                LogError("==/vpn_native/poll_error/ %{public}s", g_state.lastError.c_str());
+            }
+            break;
+        }
+        if (ready == 0) {
+            continue;
         }
 
         const ssize_t readBytes = read(tunFd, buffer, sizeof(buffer));
@@ -1296,12 +2166,7 @@ void ReaderLoop(int tunFd)
             break;
         }
 
-        if (errno == EINTR) {
-            continue;
-        }
-
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
             continue;
         }
 
@@ -1313,13 +2178,11 @@ void ReaderLoop(int tunFd)
         break;
     }
 
-    close(tunFd);
+    // Ownership of tunFd stays with Stop/StartDnsFilter so the forward workers
+    // can keep writing to it until they are joined and the fd is closed once.
     LogInfo("==/vpn_native/reader_exit/ fd=%{public}d", tunFd);
     std::lock_guard<std::mutex> lock(g_state.mu);
     g_state.running = false;
-    if (g_state.tunFd == tunFd) {
-        g_state.tunFd = -1;
-    }
 }
 
 void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp, const std::string &upstreamDnsIp,
@@ -1348,30 +2211,40 @@ void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp,
     state.upstreamDnsIp = upstreamDnsIp;
     state.rulesPath = rulesPath;
     state.queryLogPath = queryLogPath;
-    state.activeRules = LoadRulesSnapshot(rulesPath);
+    state.activeRules = std::make_shared<const std::vector<RuleEntry>>(LoadRulesSnapshot(rulesPath));
     state.dnsCacheTtlSeconds = dnsCacheTtlSeconds;
     state.dnsResponseCache.clear();
-}
-
-void StopUnlocked(StatsState &state, std::thread &worker)
-{
-    std::lock_guard<std::mutex> lock(state.mu);
-    state.stopRequested = true;
-    state.running = false;
-    worker = std::move(state.worker);
+    g_tcpConns.clear();
 }
 
 std::string StopDnsFilter()
 {
-    std::thread worker;
-    StopUnlocked(g_state, worker);
-    if (worker.joinable()) {
-        worker.join();
-    }
+    std::thread reader;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
-        g_state.activeRules.clear();
+        g_state.stopRequested = true;
+        g_state.running = false;
+        reader = std::move(g_state.worker);
+    }
+    if (reader.joinable()) {
+        reader.join();
+    }
+
+    // Join the forward workers before touching the TUN fd: one of them may still
+    // be writing an upstream response back to it.
+    StopForwardPool();
+
+    int fdToClose = -1;
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        fdToClose = g_state.tunFd;
+        g_state.tunFd = -1;
+        g_state.activeRules.reset();
         g_state.dnsResponseCache.clear();
+        g_tcpConns.clear();
+    }
+    if (fdToClose >= 0) {
+        close(fdToClose);
     }
     LogInfo("%{public}s", "==/vpn_native/stop/");
     return {};
@@ -1409,6 +2282,7 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
         return std::string("set tun fd nonblocking failed: ") + std::strerror(errno);
     }
 
+    StartForwardPool();
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         ResetStatsLocked(g_state, dupFd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds);
@@ -1416,6 +2290,26 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
     }
 
     LogInfo("==/vpn_native/reader_started/ dup_fd=%{public}d", dupFd);
+    return {};
+}
+
+// Hot-swap the active rule set without tearing down the VPN or the reader
+// thread. The fresh snapshot is parsed off-lock and then published atomically,
+// so in-flight queries keep matching against a consistent rule list.
+std::string ReloadDnsRules(const std::string &rulesPath)
+{
+    if (rulesPath.empty()) {
+        return "rules path is required";
+    }
+
+    auto fresh = std::make_shared<const std::vector<RuleEntry>>(LoadRulesSnapshot(rulesPath));
+    const size_t count = fresh->size();
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.rulesPath = rulesPath;
+        g_state.activeRules = std::move(fresh);
+    }
+    LogInfo("==/vpn_native/rules_reloaded/ rules=%{public}s count=%{public}zu", rulesPath.c_str(), count);
     return {};
 }
 
@@ -1491,6 +2385,22 @@ napi_value JsStopDnsFilter(napi_env env, napi_callback_info info)
     return ReturnErrOrUndefined(env, StopDnsFilter());
 }
 
+napi_value JsReloadDnsRules(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1) {
+        return MakeUtf8(env, "rules path is required");
+    }
+
+    std::string rulesPath;
+    if (!ReadArgString(env, argv[0], rulesPath) || rulesPath.empty()) {
+        return MakeUtf8(env, "invalid rules path");
+    }
+    return ReturnErrOrUndefined(env, ReloadDnsRules(rulesPath));
+}
+
 napi_value JsGetStats(napi_env env, napi_callback_info info)
 {
     (void)info;
@@ -1502,6 +2412,7 @@ napi_value Init(napi_env env, napi_value exports)
     napi_property_descriptor desc[] = {
         {"startDnsFilter", nullptr, JsStartDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopDnsFilter", nullptr, JsStopDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"reloadDnsRules", nullptr, JsReloadDnsRules, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getStats", nullptr, JsGetStats, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

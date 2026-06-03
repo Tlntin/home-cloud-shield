@@ -8,5 +8,6 @@ declare module 'libvpnclientbridge.so' {
     dnsCacheTtlSeconds: number
   ): string | undefined;
   export function stopDnsFilter(): string | undefined;
+  export function reloadDnsRules(rulesPath: string): string | undefined;
   export function getStats(): string;
 }

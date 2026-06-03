@@ -91,6 +91,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private lastPhase: string = 'idle';
   private lastRunning: boolean = false;
   private lastNote: string = 'DNS filter has not been started yet.';
+  private lastRulesSignature: string = '';
 
   private isLegacyDefaultRulesText(content: string): boolean {
     return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim() === LEGACY_DEFAULT_RULES_TEXT;
@@ -413,6 +414,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       throw new Error(this.errorMessage(err));
     }
 
+    // startDnsFilter already loaded the current rules, so seed the baseline to
+    // avoid a redundant reload on the first watch tick.
+    this.lastRulesSignature = this.rulesFileSignature();
     this.startStatusPump();
     this.writeStatus(
       'running',
@@ -429,12 +433,45 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     }
 
     this.statusTimer = setInterval(() => {
+      this.checkRulesReload();
       this.writeStatus(
         'running',
         true,
         'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.'
       );
     }, 1000);
+  }
+
+  private rulesFileSignature(): string {
+    try {
+      const stat = fileIo.statSync(this.rulesFilePath);
+      return `${stat.mtime}:${stat.size}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // Apply rule edits live: when the UI rewrites the rules file, hot-swap the
+  // running filter's rule set instead of forcing a full VPN restart.
+  private checkRulesReload(): void {
+    const signature: string = this.rulesFileSignature();
+    if (signature.length === 0 || signature === this.lastRulesSignature) {
+      return;
+    }
+    this.lastRulesSignature = signature;
+
+    try {
+      const err: string | undefined = vpnclientbridge.reloadDnsRules(this.rulesFilePath);
+      if (err !== undefined) {
+        hilog.error(DOMAIN, TAG, '==/vpn_ext/rules_reload_error/ %{public}s', err);
+        this.appendDebugLog(`==/vpn_ext/rules_reload_error/ ${err}`);
+      } else {
+        hilog.info(DOMAIN, TAG, '==/vpn_ext/rules_reloaded/ rules=%{public}s', this.rulesFilePath);
+        this.appendDebugLog(`==/vpn_ext/rules_reloaded/ rules=${this.rulesFilePath}`);
+      }
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ext/rules_reload_exception/ ${this.errorMessage(err)}`);
+    }
   }
 
   private async destroyVpn(): Promise<void> {

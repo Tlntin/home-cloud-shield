@@ -58,7 +58,7 @@ type LanguageKey =
   | 'debugLog' | 'debugHint' | 'noDebugLogs' | 'configStudio' | 'configCardHint' | 'activeFile' | 'importFile'
   | 'resetDefaults' | 'rulesEditor' | 'saveRules' | 'reloadFile' | 'writeRulesHere' | 'ruleFiles' | 'ruleFilesHint'
   | 'noRuleProfiles' | 'noRuleProfilesHint'
-  | 'editRule' | 'renameRule' | 'deleteRule' | 'exportRules' | 'rulesSavedSuccess' | 'disabled' | 'defaultCustomRules'
+  | 'editRule' | 'renameRule' | 'deleteRule' | 'exportRules' | 'rulesSavedSuccess' | 'rulesSavedApplied' | 'disabled' | 'defaultCustomRules'
   | 'moveUp' | 'moveDown' | 'closeEditor' | 'rulesFile' | 'myDevice' | 'myDeviceHint' | 'keepAliveOn' | 'keepAliveOff'
   | 'backgroundKeepAlive' | 'keepAliveSummary' | 'audioKeepAlive' | 'audioKeepAliveHint' | 'locationKeepAlive'
   | 'locationKeepAliveHint' | 'autoStartFilter' | 'autoStartFilterHint' | 'autoStartFilterPermissionDenied'
@@ -183,6 +183,7 @@ function resolveStringResource(key: LanguageKey): number {
     case 'deleteRule': return $r('app.string.deleteRule').id;
     case 'exportRules': return $r('app.string.exportRules').id;
     case 'rulesSavedSuccess': return $r('app.string.rulesSavedSuccess').id;
+    case 'rulesSavedApplied': return $r('app.string.rulesSavedApplied').id;
     case 'disabled': return $r('app.string.disabled').id;
     case 'defaultCustomRules': return $r('app.string.defaultCustomRules').id;
     case 'moveUp': return $r('app.string.moveUp').id;
@@ -2458,7 +2459,7 @@ struct Index {
     hilog.info(DOMAIN, TAG, '==/vpn_ui/rules_saved/ path=%{public}s bytes=%{public}d', this.rulesFilePath,
       this.rulesText.length);
     this.appendDebugLog(`==/vpn_ui/rules_saved/ path=${this.rulesFilePath} bytes=${this.rulesText.length}`);
-    this.setConfigFeedback(this.t('ruleAddedNeedsRestart', this.t('rulesSavedSuccess')));
+    this.setConfigFeedback(this.status.running ? this.t('rulesSavedApplied') : this.t('rulesSavedSuccess'));
   }
 
   private resetRulesToDefault(): void {
