@@ -36,6 +36,16 @@ const DNS_SERVER_IPV6 = 'fd00:ad00::1';
 const IPV6_ROUTE = 'fd00:ad00::';
 const IPV6_PREFIX_LENGTH = 64;
 const UPSTREAM_DNS_IP = '119.29.29.29';
+// Full-mode (embedded AdGuardHome) runtime files and fixed loopback ports.
+const AGH_CONFIG_FILE_NAME = 'AdGuardHome.yaml';
+const AGH_WORK_DIR_NAME = 'agh';
+const AGH_LOG_FILE_NAME = 'agh.log';
+const AGH_DNS_PORT = 5354;
+const AGH_HTTP_ADDR = '127.0.0.1:3000';
+const AGH_SCHEMA_VERSION = 29;
+const WANT_FILTER_MODE = 'filterMode';
+const FILTER_MODE_FULL = 'full';
+const FILTER_MODE_LIGHTWEIGHT = 'lightweight';
 const LEGACY_DEFAULT_RULES_TEXT = [
   '! AdGuard-style DNS rules',
   '! Supported examples:',
@@ -86,6 +96,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private debugLogFilePath: string = '';
   private upstreamDnsFilePath: string = '';
   private upstreamDnsIp: string = UPSTREAM_DNS_IP;
+  private filterMode: string = FILTER_MODE_LIGHTWEIGHT;
+  private aghConfigFilePath: string = '';
+  private aghWorkDirPath: string = '';
+  private aghLogFilePath: string = '';
   private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   private logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   private logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
@@ -105,6 +119,16 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, '==/vpn_ext/onCreate/ ability=%{public}s', want.abilityName ?? '');
     this.ensureRuntimeFiles(want);
+    // Smoke test (increment 1): prove the prebuilt AdGuardHome full-mode .so
+    // links and loads inside the native module. Does not affect the lightweight
+    // DNS path.
+    try {
+      const aghVer: string = vpnclientbridge.aghVersion();
+      hilog.info(DOMAIN, TAG, '==/vpn_ext/agh_version/ %{public}s', aghVer);
+      this.appendDebugLog(`==/vpn_ext/agh_version/ ${aghVer}`);
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, '==/vpn_ext/agh_version_error/ %{public}s', this.errorMessage(err));
+    }
     this.writeStatus('starting', false, 'Preparing DNS filter runtime.');
     this.vpnConnection = vpnExtension.createVpnConnection(this.context);
     this.setupVpn().catch((err: BusinessError) => {
@@ -136,6 +160,12 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.queryLogFilePath = queryLogPath.length > 0 ? queryLogPath : `${vpnDir}/${QUERY_LOG_FILE_NAME}`;
     this.debugLogFilePath = debugLogPath.length > 0 ? debugLogPath : `${vpnDir}/${DEBUG_LOG_FILE_NAME}`;
     this.upstreamDnsFilePath = upstreamDnsPath.length > 0 ? upstreamDnsPath : `${vpnDir}/${UPSTREAM_DNS_FILE_NAME}`;
+    this.filterMode = this.wantStringParam(want, WANT_FILTER_MODE) === FILTER_MODE_FULL
+      ? FILTER_MODE_FULL
+      : FILTER_MODE_LIGHTWEIGHT;
+    this.aghConfigFilePath = `${vpnDir}/${AGH_CONFIG_FILE_NAME}`;
+    this.aghWorkDirPath = `${vpnDir}/${AGH_WORK_DIR_NAME}`;
+    this.aghLogFilePath = `${vpnDir}/${AGH_LOG_FILE_NAME}`;
     this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
     this.logRetentionDays = this.wantNumberParam(want, WANT_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS);
     this.logMaxSizeMb = this.wantNumberParam(want, WANT_LOG_MAX_SIZE_MB, DEFAULT_LOG_MAX_SIZE_MB);
@@ -395,26 +425,59 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       if (this.tunFd < 0) {
         throw new Error('VPN create returned an invalid tun fd (-1). Please check system VPN authorization state.');
       }
-      const nativeError: string | undefined = vpnclientbridge.startDnsFilter(
-        this.tunFd,
-        DNS_SERVER_IP,
-        this.upstreamDnsIp,
-        this.rulesFilePath,
-        this.queryLogFilePath,
-        this.dnsCacheTtlSeconds
-      );
-      hilog.info(
-        DOMAIN,
-        TAG,
-        '==/vpn_ext/native_start/ fd=%{public}d dns4=%{public}s upstream=%{public}s rules=%{public}s query=%{public}s cache_ttl=%{public}d',
-        this.tunFd,
-        DNS_SERVER_IP,
-        this.upstreamDnsIp,
-        this.rulesFilePath,
-        this.queryLogFilePath,
-        this.dnsCacheTtlSeconds
-      );
-      this.appendDebugLog(`==/vpn_ext/native_start/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} upstream=${this.upstreamDnsIp} rules=${this.rulesFilePath} query=${this.queryLogFilePath} cache_ttl=${this.dnsCacheTtlSeconds}`);
+      let nativeError: string | undefined;
+      if (this.filterMode === FILTER_MODE_FULL) {
+        // Full mode: hand all filtering to the embedded AdGuardHome engine.
+        // Generate its config from the current rules/upstream, then start it and
+        // relay TUN DNS to its loopback listener.
+        this.writeAghConfig();
+        try {
+          fileIo.mkdirSync(this.aghWorkDirPath, true);
+        } catch (_) {
+        }
+        nativeError = vpnclientbridge.startFullDnsFilter(
+          this.tunFd,
+          DNS_SERVER_IP,
+          this.aghConfigFilePath,
+          this.aghWorkDirPath,
+          this.aghLogFilePath,
+          AGH_DNS_PORT,
+          this.queryLogFilePath
+        );
+        hilog.info(
+          DOMAIN,
+          TAG,
+          '==/vpn_ext/native_start_full/ fd=%{public}d dns4=%{public}s agh_cfg=%{public}s agh_dir=%{public}s agh_port=%{public}d query=%{public}s',
+          this.tunFd,
+          DNS_SERVER_IP,
+          this.aghConfigFilePath,
+          this.aghWorkDirPath,
+          AGH_DNS_PORT,
+          this.queryLogFilePath
+        );
+        this.appendDebugLog(`==/vpn_ext/native_start_full/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} agh_cfg=${this.aghConfigFilePath} agh_dir=${this.aghWorkDirPath} agh_port=${AGH_DNS_PORT} query=${this.queryLogFilePath}`);
+      } else {
+        nativeError = vpnclientbridge.startDnsFilter(
+          this.tunFd,
+          DNS_SERVER_IP,
+          this.upstreamDnsIp,
+          this.rulesFilePath,
+          this.queryLogFilePath,
+          this.dnsCacheTtlSeconds
+        );
+        hilog.info(
+          DOMAIN,
+          TAG,
+          '==/vpn_ext/native_start/ fd=%{public}d dns4=%{public}s upstream=%{public}s rules=%{public}s query=%{public}s cache_ttl=%{public}d',
+          this.tunFd,
+          DNS_SERVER_IP,
+          this.upstreamDnsIp,
+          this.rulesFilePath,
+          this.queryLogFilePath,
+          this.dnsCacheTtlSeconds
+        );
+        this.appendDebugLog(`==/vpn_ext/native_start/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} upstream=${this.upstreamDnsIp} rules=${this.rulesFilePath} query=${this.queryLogFilePath} cache_ttl=${this.dnsCacheTtlSeconds}`);
+      }
       if (nativeError !== undefined) {
         throw new Error(nativeError);
       }
@@ -493,6 +556,66 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     return valid.length > 0 ? valid.join('\n') : UPSTREAM_DNS_IP;
   }
 
+  // Full mode: (re)generate AdGuardHome.yaml from the current upstream resolvers
+  // and rule set. AdGuardHome unmarshals this onto its built-in defaults, so we
+  // only emit the mobile-specific overrides (loopback binds, our upstreams, the
+  // user rules, and no remote filter lists).
+  private writeAghConfig(): void {
+    const upstreams: string[] = [];
+    for (const raw of this.upstreamDnsIp.split(/[\s,;\n]+/)) {
+      const ip: string = raw.trim();
+      if (ip.length > 0 && !upstreams.includes(ip)) {
+        upstreams.push(ip);
+      }
+    }
+    if (upstreams.length === 0) {
+      upstreams.push(UPSTREAM_DNS_IP);
+    }
+
+    const rules: string[] = [];
+    for (const rawLine of this.readTextFile(this.rulesFilePath).split('\n')) {
+      const line: string = rawLine.trim();
+      if (line.length > 0) {
+        rules.push(line);
+      }
+    }
+
+    const yaml: string = this.buildAghConfigYaml(upstreams, rules);
+    this.writeTextFile(this.aghConfigFilePath, yaml);
+    hilog.info(DOMAIN, TAG, '==/vpn_ext/agh_config_written/ upstreams=%{public}d rules=%{public}d', upstreams.length,
+      rules.length);
+    this.appendDebugLog(`==/vpn_ext/agh_config_written/ upstreams=${upstreams.length} rules=${rules.length}`);
+  }
+
+  private yamlQuote(value: string): string {
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+
+  private buildAghConfigYaml(upstreams: string[], rules: string[]): string {
+    const upstreamLines: string = upstreams.map((u: string) => `    - ${this.yamlQuote(u)}`).join('\n');
+    const bootstrapLines: string = upstreams.map((u: string) => `    - ${this.yamlQuote(u)}`).join('\n');
+    const userRulesBlock: string = rules.length > 0
+      ? `user_rules:\n${rules.map((r: string) => `  - ${this.yamlQuote(r)}`).join('\n')}`
+      : 'user_rules: []';
+    const lines: string[] = [
+      `schema_version: ${AGH_SCHEMA_VERSION}`,
+      'http:',
+      `  address: ${AGH_HTTP_ADDR}`,
+      'dns:',
+      '  bind_hosts:',
+      '    - 127.0.0.1',
+      `  port: ${AGH_DNS_PORT}`,
+      '  upstream_dns:',
+      upstreamLines,
+      '  bootstrap_dns:',
+      bootstrapLines,
+      'filters: []',
+      userRulesBlock,
+      '',
+    ];
+    return lines.join('\n');
+  }
+
   private rulesFileSignature(): string {
     try {
       const stat = fileIo.statSync(this.rulesFilePath);
@@ -515,6 +638,12 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   // switch the running filter's resolver (and flush its cache) without a
   // full VPN restart.
   private checkUpstreamReload(): void {
+    // In full mode the embedded AdGuardHome owns the upstream; applying it to
+    // the lightweight engine would corrupt the loopback relay. Upstream changes
+    // take effect on the next filter restart.
+    if (this.filterMode === FILTER_MODE_FULL) {
+      return;
+    }
     const signature: string = this.upstreamFileSignature();
     if (signature.length === 0 || signature === this.lastUpstreamSignature) {
       return;
@@ -544,6 +673,11 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   // Apply rule edits live: when the UI rewrites the rules file, hot-swap the
   // running filter's rule set instead of forcing a full VPN restart.
   private checkRulesReload(): void {
+    // In full mode rules are baked into AdGuardHome.yaml at start; AdGuardHome
+    // is not hot-reloaded here. Rule changes take effect on the next restart.
+    if (this.filterMode === FILTER_MODE_FULL) {
+      return;
+    }
     const signature: string = this.rulesFileSignature();
     if (signature.length === 0 || signature === this.lastRulesSignature) {
       return;

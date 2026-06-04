@@ -11,3 +11,4 @@
 **/.test
 /.appanalyzer
 .agents
+entry/src/main/libs/arm64-v8a/libadguardhome_ohos.so

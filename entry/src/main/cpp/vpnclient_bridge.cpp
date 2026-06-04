@@ -25,12 +25,52 @@
 
 #include <hilog/log.h>
 
+// Prebuilt AdGuardHome c-shared engine (full mode).  Declares the extern "C"
+// entry points AdGuardHomeVersion/Start/Stop/FreeCString.
+#include "libadguardhome_ohos.h"
+
 #undef LOG_DOMAIN
 #undef LOG_TAG
 #define LOG_DOMAIN 0x0000
 #define LOG_TAG "vpnbridge"
 
 namespace {
+
+// Returns the embedded AdGuardHome version, freeing the C string returned by
+// the Go layer.  Used as a smoke test that the prebuilt .so links and loads.
+std::string AdGuardHomeVersionString()
+{
+    char *raw = AdGuardHomeVersion();
+    std::string out = (raw != nullptr) ? raw : "";
+    if (raw != nullptr) {
+        AdGuardHomeFreeCString(raw);
+    }
+    return out;
+}
+
+// Starts the embedded AdGuardHome engine (full mode) with the given config
+// file, working dir, and log path. Returns the Go layer's error string (empty
+// on success).
+std::string StartAdGuardHome(const std::string &configPath, const std::string &workDir, const std::string &logPath)
+{
+    char *raw = AdGuardHomeStart(const_cast<char *>(configPath.c_str()),
+        const_cast<char *>(workDir.c_str()), const_cast<char *>(logPath.c_str()));
+    std::string out = (raw != nullptr) ? raw : "";
+    if (raw != nullptr) {
+        AdGuardHomeFreeCString(raw);
+    }
+    return out;
+}
+
+// Stops the embedded AdGuardHome engine. Safe to call when nothing is running.
+void StopAdGuardHome()
+{
+    char *raw = AdGuardHomeStop();
+    if (raw != nullptr) {
+        AdGuardHomeFreeCString(raw);
+    }
+}
+
 
 struct RuleEntry {
     bool allow = false;
@@ -110,6 +150,11 @@ struct StatsState {
     std::string queryLogPath;
     std::vector<std::string> upstreamDnsIps;
     std::string dnsServerIp;
+    // Full mode: forward every query to the embedded AdGuardHome engine on
+    // 127.0.0.1:aghDnsPort (which performs all filtering/upstream/caching)
+    // instead of matching rules locally. aghDnsPort == 0 means lightweight mode.
+    bool fullMode = false;
+    uint16_t aghDnsPort = 0;
     std::shared_ptr<const std::vector<RuleEntry>> activeRules;
     uint32_t dnsCacheTtlSeconds = 3600;
     std::unordered_map<std::string, DnsCacheEntry> dnsResponseCache;
@@ -139,6 +184,8 @@ struct ForwardTask {
     DnsQuestion question;
     std::string matchedRule;
     std::vector<std::string> upstreams;
+    uint16_t upstreamPort = 53;
+    bool useCache = true;
     std::string queryLogPath;
 };
 
@@ -992,7 +1039,8 @@ std::vector<std::string> ParseUpstreamList(const std::string &raw)
 }
 
 // Resolve a query against a single upstream over UDP.
-std::vector<uint8_t> ForwardDnsQueryOne(const uint8_t *query, size_t len, const std::string &upstreamDnsIp, std::string &error)
+std::vector<uint8_t> ForwardDnsQueryOne(const uint8_t *query, size_t len, const std::string &upstreamDnsIp,
+    uint16_t port, std::string &error)
 {
     std::vector<uint8_t> response;
     if (upstreamDnsIp.empty()) {
@@ -1019,7 +1067,7 @@ std::vector<uint8_t> ForwardDnsQueryOne(const uint8_t *query, size_t len, const 
     if (isIpv6) {
         sockaddr_in6 addr {};
         addr.sin6_family = AF_INET6;
-        addr.sin6_port = htons(53);
+        addr.sin6_port = htons(port);
         if (inet_pton(AF_INET6, upstreamDnsIp.c_str(), &addr.sin6_addr) != 1) {
             close(sock);
             error = "invalid upstream DNS ip";
@@ -1033,7 +1081,7 @@ std::vector<uint8_t> ForwardDnsQueryOne(const uint8_t *query, size_t len, const 
     } else {
         sockaddr_in addr {};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(53);
+        addr.sin_port = htons(port);
         if (inet_pton(AF_INET, upstreamDnsIp.c_str(), &addr.sin_addr) != 1) {
             close(sock);
             error = "invalid upstream DNS ip";
@@ -1083,7 +1131,7 @@ std::vector<uint8_t> ForwardDnsQueryOne(const uint8_t *query, size_t len, const 
 // Resolve over UDP, failing over to each upstream in order until one answers.
 // Returns the first non-empty response, or empty if every upstream failed.
 std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std::vector<std::string> &upstreams,
-    std::string &error)
+    uint16_t port, std::string &error)
 {
     if (upstreams.empty()) {
         error = "no upstream DNS configured";
@@ -1092,7 +1140,7 @@ std::vector<uint8_t> ForwardDnsQuery(const uint8_t *query, size_t len, const std
     std::vector<uint8_t> response;
     for (const std::string &upstream : upstreams) {
         std::string attemptError;
-        response = ForwardDnsQueryOne(query, len, upstream, attemptError);
+        response = ForwardDnsQueryOne(query, len, upstream, port, attemptError);
         if (!response.empty()) {
             error.clear();
             return response;
@@ -1285,8 +1333,11 @@ void ProcessForwardTask(ForwardTask &task)
     std::string source = "upstream";
     std::string responseError;
 
-    const bool cacheHit = TryGetCachedDnsResponse(task.question, task.query.data(), task.query.size(), dnsResponse);
-    {
+    // In full mode the embedded AdGuardHome owns caching, so the C++ cache is
+    // bypassed to keep every query visible to AGH (accurate filtering/stats).
+    const bool cacheHit = task.useCache &&
+        TryGetCachedDnsResponse(task.question, task.query.data(), task.query.size(), dnsResponse);
+    if (task.useCache) {
         std::lock_guard<std::mutex> lock(g_state.mu);
         if (cacheHit) {
             g_state.dnsCacheHits++;
@@ -1298,8 +1349,9 @@ void ProcessForwardTask(ForwardTask &task)
     if (cacheHit) {
         source = "cache";
     } else {
-        dnsResponse = ForwardDnsQuery(task.query.data(), task.query.size(), task.upstreams, responseError);
-        if (!dnsResponse.empty()) {
+        dnsResponse = ForwardDnsQuery(task.query.data(), task.query.size(), task.upstreams, task.upstreamPort,
+            responseError);
+        if (task.useCache && !dnsResponse.empty()) {
             StoreDnsResponseCache(task.question, dnsResponse);
         }
     }
@@ -1750,7 +1802,7 @@ void SendTcpSeg(int tunFd, TcpConn &c, uint8_t flags, const uint8_t *payload, si
 
 // Resolve a query against a single upstream over TCP (full, untruncated answer).
 std::vector<uint8_t> ForwardDnsQueryTcpOne(const uint8_t *query, size_t len, const std::string &upstreamDnsIp,
-    std::string &error)
+    uint16_t port, std::string &error)
 {
     std::vector<uint8_t> response;
     if (upstreamDnsIp.empty()) {
@@ -1771,7 +1823,7 @@ std::vector<uint8_t> ForwardDnsQueryTcpOne(const uint8_t *query, size_t len, con
     socklen_t addrLen = 0;
     if (isIpv6) {
         addr6.sin6_family = AF_INET6;
-        addr6.sin6_port = htons(53);
+        addr6.sin6_port = htons(port);
         if (inet_pton(AF_INET6, upstreamDnsIp.c_str(), &addr6.sin6_addr) != 1) {
             close(sock);
             error = "invalid upstream DNS ip";
@@ -1781,7 +1833,7 @@ std::vector<uint8_t> ForwardDnsQueryTcpOne(const uint8_t *query, size_t len, con
         addrLen = sizeof(addr6);
     } else {
         addr4.sin_family = AF_INET;
-        addr4.sin_port = htons(53);
+        addr4.sin_port = htons(port);
         if (inet_pton(AF_INET, upstreamDnsIp.c_str(), &addr4.sin_addr) != 1) {
             close(sock);
             error = "invalid upstream DNS ip";
@@ -1880,7 +1932,7 @@ std::vector<uint8_t> ForwardDnsQueryTcpOne(const uint8_t *query, size_t len, con
 
 // Resolve over TCP, failing over to each upstream in order until one answers.
 std::vector<uint8_t> ForwardDnsQueryTcp(const uint8_t *query, size_t len, const std::vector<std::string> &upstreams,
-    std::string &error)
+    uint16_t port, std::string &error)
 {
     if (upstreams.empty()) {
         error = "no upstream DNS configured";
@@ -1889,7 +1941,7 @@ std::vector<uint8_t> ForwardDnsQueryTcp(const uint8_t *query, size_t len, const 
     std::vector<uint8_t> response;
     for (const std::string &upstream : upstreams) {
         std::string attemptError;
-        response = ForwardDnsQueryTcpOne(query, len, upstream, attemptError);
+        response = ForwardDnsQueryTcpOne(query, len, upstream, port, attemptError);
         if (!response.empty()) {
             error.clear();
             return response;
@@ -1932,14 +1984,25 @@ void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &messag
     std::shared_ptr<const std::vector<RuleEntry>> rules;
     std::string queryLogPath;
     std::vector<std::string> upstreams;
+    bool fullMode = false;
+    uint16_t aghDnsPort = 0;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         rules = g_state.activeRules;
         queryLogPath = g_state.queryLogPath;
         upstreams = g_state.upstreamDnsIps;
+        fullMode = g_state.fullMode;
+        aghDnsPort = g_state.aghDnsPort;
     }
 
-    const MatchResult match = rules ? MatchDomain(question.name, question.qtype, *rules) : MatchResult {};
+    // Full mode forwards everything to the embedded AdGuardHome engine (which
+    // performs all matching); lightweight mode matches locally and may block.
+    const MatchResult match = (!fullMode && rules)
+        ? MatchDomain(question.name, question.qtype, *rules)
+        : MatchResult {};
+    const std::vector<std::string> tcpUpstreams = fullMode ? std::vector<std::string>{"127.0.0.1"} : upstreams;
+    const uint16_t tcpPort = fullMode ? aghDnsPort : static_cast<uint16_t>(53);
+    const bool useCache = !fullMode;
 
     std::vector<uint8_t> dnsResponse;
     std::string source = "upstream";
@@ -1948,8 +2011,9 @@ void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &messag
         source = "blocked";
         dnsResponse = BuildBlockedDnsResponse(message.data(), message.size(), question);
     } else {
-        const bool cacheHit = TryGetCachedDnsResponse(question, message.data(), message.size(), dnsResponse);
-        {
+        const bool cacheHit = useCache &&
+            TryGetCachedDnsResponse(question, message.data(), message.size(), dnsResponse);
+        if (useCache) {
             std::lock_guard<std::mutex> lock(g_state.mu);
             if (cacheHit) {
                 g_state.dnsCacheHits++;
@@ -1960,8 +2024,8 @@ void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &messag
         if (cacheHit) {
             source = "cache";
         } else {
-            dnsResponse = ForwardDnsQueryTcp(message.data(), message.size(), upstreams, responseError);
-            if (!dnsResponse.empty()) {
+            dnsResponse = ForwardDnsQueryTcp(message.data(), message.size(), tcpUpstreams, tcpPort, responseError);
+            if (useCache && !dnsResponse.empty()) {
                 StoreDnsResponseCache(question, dnsResponse);
             }
         }
@@ -2119,14 +2183,22 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
     std::shared_ptr<const std::vector<RuleEntry>> rules;
     std::string queryLogPath;
     std::vector<std::string> upstreams;
+    bool fullMode = false;
+    uint16_t aghDnsPort = 0;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         rules = g_state.activeRules;
         queryLogPath = g_state.queryLogPath;
         upstreams = g_state.upstreamDnsIps;
+        fullMode = g_state.fullMode;
+        aghDnsPort = g_state.aghDnsPort;
     }
 
-    const MatchResult match = rules ? MatchDomain(question.name, question.qtype, *rules) : MatchResult {};
+    // Full mode forwards every query to the embedded AdGuardHome engine, which
+    // performs all matching; lightweight mode matches locally and may block.
+    const MatchResult match = (!fullMode && rules)
+        ? MatchDomain(question.name, question.qtype, *rules)
+        : MatchResult {};
 
     if (match.blocked) {
         // Blocked responses are synthesized locally (no network), so answer them
@@ -2178,8 +2250,10 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
     task.view6.dnsPayload = nullptr;
     task.query.assign(dnsPayload, dnsPayload + dnsLen);
     task.question = question;
-    task.matchedRule = match.matchedRule;
-    task.upstreams = upstreams;
+    task.matchedRule = fullMode ? "full-mode" : match.matchedRule;
+    task.upstreams = fullMode ? std::vector<std::string>{"127.0.0.1"} : upstreams;
+    task.upstreamPort = fullMode ? aghDnsPort : static_cast<uint16_t>(53);
+    task.useCache = !fullMode;
     task.queryLogPath = queryLogPath;
     EnqueueForwardTask(std::move(task));
 }
@@ -2309,6 +2383,7 @@ std::string StopDnsFilter()
     StopForwardPool();
 
     int fdToClose = -1;
+    bool wasFullMode = false;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         fdToClose = g_state.tunFd;
@@ -2316,9 +2391,18 @@ std::string StopDnsFilter()
         g_state.activeRules.reset();
         g_state.dnsResponseCache.clear();
         g_tcpConns.clear();
+        wasFullMode = g_state.fullMode;
+        g_state.fullMode = false;
+        g_state.aghDnsPort = 0;
     }
     if (fdToClose >= 0) {
         close(fdToClose);
+    }
+    // Stop the embedded AdGuardHome engine only after the reader and forward
+    // workers have been joined, so no in-flight query is still forwarding to it.
+    if (wasFullMode) {
+        StopAdGuardHome();
+        LogInfo("%{public}s", "==/vpn_native/agh_stopped/");
     }
     LogInfo("%{public}s", "==/vpn_native/stop/");
     return {};
@@ -2364,6 +2448,74 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
     }
 
     LogInfo("==/vpn_native/reader_started/ dup_fd=%{public}d", dupFd);
+    return {};
+}
+
+// Start full mode: boot the embedded AdGuardHome engine (which binds a loopback
+// DNS listener on aghDnsPort and performs all filtering/upstream/caching), then
+// run the TUN reader as a thin relay that forwards every DNS query to it.
+std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std::string &aghConfigPath,
+    const std::string &aghWorkDir, const std::string &aghLogPath, uint16_t aghDnsPort,
+    const std::string &queryLogPath)
+{
+    if (fd < 0) {
+        return "invalid tun fd";
+    }
+    if (dnsServerIp.empty()) {
+        return "dns server ip is required";
+    }
+    if (aghConfigPath.empty()) {
+        return "adguardhome config path is required";
+    }
+    if (aghWorkDir.empty()) {
+        return "adguardhome work dir is required";
+    }
+    if (aghDnsPort == 0) {
+        return "adguardhome dns port is required";
+    }
+    if (queryLogPath.empty()) {
+        return "query log path is required";
+    }
+
+    LogInfo("==/vpn_native/start_full/ fd=%{public}d dns=%{public}s agh_cfg=%{public}s agh_dir=%{public}s agh_port=%{public}u query=%{public}s",
+        fd, dnsServerIp.c_str(), aghConfigPath.c_str(), aghWorkDir.c_str(), static_cast<unsigned>(aghDnsPort),
+        queryLogPath.c_str());
+
+    StopDnsFilter();
+
+    // Start AdGuardHome before taking over the TUN; StartEmbedded binds the DNS
+    // listener synchronously, so once this returns the loopback port is ready.
+    // A bad config is surfaced here instead of leaving a half-started filter.
+    const std::string aghErr = StartAdGuardHome(aghConfigPath, aghWorkDir, aghLogPath);
+    if (!aghErr.empty()) {
+        LogError("==/vpn_native/agh_start_error/ %{public}s", aghErr.c_str());
+        return std::string("adguardhome start failed: ") + aghErr;
+    }
+    LogInfo("==/vpn_native/agh_started/ port=%{public}u", static_cast<unsigned>(aghDnsPort));
+
+    const int dupFd = dup(fd);
+    if (dupFd < 0) {
+        StopAdGuardHome();
+        return std::string("dup tun fd failed: ") + std::strerror(errno);
+    }
+    if (fcntl(dupFd, F_SETFL, O_NONBLOCK) < 0) {
+        close(dupFd);
+        StopAdGuardHome();
+        return std::string("set tun fd nonblocking failed: ") + std::strerror(errno);
+    }
+
+    StartForwardPool();
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        // No local rules in full mode (AGH owns filtering); upstream points at
+        // the loopback AGH DNS listener and the C++ cache is disabled per-query.
+        ResetStatsLocked(g_state, dupFd, dnsServerIp, "127.0.0.1", "", queryLogPath, 0);
+        g_state.fullMode = true;
+        g_state.aghDnsPort = aghDnsPort;
+        g_state.worker = std::thread(ReaderLoop, dupFd);
+    }
+
+    LogInfo("==/vpn_native/reader_started_full/ dup_fd=%{public}d", dupFd);
     return {};
 }
 
@@ -2471,6 +2623,50 @@ napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
             static_cast<uint32_t>(dnsCacheTtlSeconds)));
 }
 
+napi_value JsStartFullDnsFilter(napi_env env, napi_callback_info info)
+{
+    size_t argc = 7;
+    napi_value argv[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 7) {
+        return MakeUtf8(env,
+            "tun fd, dns server ip, agh config path, agh work dir, agh log path, agh dns port, and query log path are required");
+    }
+
+    int32_t fd = -1;
+    std::string dnsServerIp;
+    std::string aghConfigPath;
+    std::string aghWorkDir;
+    std::string aghLogPath;
+    int32_t aghDnsPort = 0;
+    std::string queryLogPath;
+    if (!ReadArgInt32(env, argv[0], fd)) {
+        return MakeUtf8(env, "invalid tun fd");
+    }
+    if (!ReadArgString(env, argv[1], dnsServerIp) || dnsServerIp.empty()) {
+        return MakeUtf8(env, "invalid dns server ip");
+    }
+    if (!ReadArgString(env, argv[2], aghConfigPath) || aghConfigPath.empty()) {
+        return MakeUtf8(env, "invalid agh config path");
+    }
+    if (!ReadArgString(env, argv[3], aghWorkDir) || aghWorkDir.empty()) {
+        return MakeUtf8(env, "invalid agh work dir");
+    }
+    if (!ReadArgString(env, argv[4], aghLogPath)) {
+        return MakeUtf8(env, "invalid agh log path");
+    }
+    if (!ReadArgInt32(env, argv[5], aghDnsPort) || aghDnsPort <= 0 || aghDnsPort > 65535) {
+        return MakeUtf8(env, "invalid agh dns port");
+    }
+    if (!ReadArgString(env, argv[6], queryLogPath) || queryLogPath.empty()) {
+        return MakeUtf8(env, "invalid query log path");
+    }
+
+    return ReturnErrOrUndefined(env,
+        StartFullDnsFilter(fd, dnsServerIp, aghConfigPath, aghWorkDir, aghLogPath,
+            static_cast<uint16_t>(aghDnsPort), queryLogPath));
+}
+
 napi_value JsStopDnsFilter(napi_env env, napi_callback_info info)
 {
     (void)info;
@@ -2515,14 +2711,24 @@ napi_value JsGetStats(napi_env env, napi_callback_info info)
     return MakeUtf8(env, GetStatsJson());
 }
 
+// Smoke test for full mode: confirms the prebuilt AdGuardHome .so links and
+// loads inside this NAPI module by returning its version string.
+napi_value JsAghVersion(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeUtf8(env, AdGuardHomeVersionString());
+}
+
 napi_value Init(napi_env env, napi_value exports)
 {
     napi_property_descriptor desc[] = {
         {"startDnsFilter", nullptr, JsStartDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startFullDnsFilter", nullptr, JsStartFullDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopDnsFilter", nullptr, JsStopDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reloadDnsRules", nullptr, JsReloadDnsRules, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setUpstreamDns", nullptr, JsSetUpstreamDns, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getStats", nullptr, JsGetStats, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"aghVersion", nullptr, JsAghVersion, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

@@ -444,6 +444,7 @@ interface PersistState {
   logMaxSizeMb?: number;
   clearDnsLogOnStart?: boolean;
   clearDebugLogOnStart?: boolean;
+  fullModeEnabled?: boolean;
   currentTab: number;
 }
 
@@ -548,6 +549,7 @@ struct Index {
   @State logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
   @State clearDnsLogOnStart: boolean = false;
   @State clearDebugLogOnStart: boolean = false;
+  @State fullModeEnabled: boolean = false;
   @State showSettingsPage: boolean = false;
   @State appVersionName: string = 'loading';
   @State appVersionCode: number = 0;
@@ -1161,6 +1163,14 @@ struct Index {
 
   private updateClearDebugLogOnStart(value: boolean): void {
     this.clearDebugLogOnStart = value;
+    this.savePersistState();
+  }
+
+  // Toggle between the lightweight C++ engine and the full embedded AdGuardHome
+  // engine. The mode is read by the VPN extension at start, so a change only
+  // takes effect the next time the filter is started.
+  private updateFullModeEnabled(value: boolean): void {
+    this.fullModeEnabled = value;
     this.savePersistState();
   }
 
@@ -2033,6 +2043,7 @@ struct Index {
         logMaxSizeMb: this.logMaxSizeMb,
         clearDnsLogOnStart: this.clearDnsLogOnStart,
         clearDebugLogOnStart: this.clearDebugLogOnStart,
+        filterMode: this.fullModeEnabled ? 'full' : 'lightweight',
       },
     };
   }
@@ -2112,6 +2123,9 @@ struct Index {
       if (typeof state.clearDebugLogOnStart === 'boolean') {
         this.clearDebugLogOnStart = state.clearDebugLogOnStart;
       }
+      if (typeof state.fullModeEnabled === 'boolean') {
+        this.fullModeEnabled = state.fullModeEnabled;
+      }
       if (Array.isArray(state.ruleProfiles)) {
         const nextProfiles: RuleProfile[] = [];
         state.ruleProfiles.forEach((item: RuleProfile, index: number) => {
@@ -2160,6 +2174,7 @@ struct Index {
       logMaxSizeMb: this.logMaxSizeMb,
       clearDnsLogOnStart: this.clearDnsLogOnStart,
       clearDebugLogOnStart: this.clearDebugLogOnStart,
+      fullModeEnabled: this.fullModeEnabled,
       currentTab: this.currentTab,
     };
     this.writeTextFile(this.stateFilePath, JSON.stringify(state));
@@ -4858,6 +4873,47 @@ struct Index {
             ? [['#1A2435D8', 0.0], ['#1D2A3EDC', 0.5], ['#22334AD8', 1.0]]
             : [['#F8FCFF', 0.0], ['#EFF7FF', 0.52], ['#EAF4FF', 1.0]]
         })
+
+        Column({ space: 10 }) {
+          Text(this.language === 'en' ? 'Filter engine' : (this.language === 'zhHant' ? '過濾引擎' : '过滤引擎'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Row() {
+            Column({ space: 4 }) {
+              Text(this.language === 'en'
+                ? 'Full engine (AdGuardHome)'
+                : (this.language === 'zhHant' ? '完整引擎（AdGuardHome）' : '完整引擎（AdGuardHome）'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.language === 'en'
+                ? 'Use the embedded AdGuardHome engine for fuller rule compatibility (heavier). Off = lightweight engine. Applies on the next filter start.'
+                : (this.language === 'zhHant'
+                  ? '使用內建 AdGuardHome 引擎以獲得更完整的規則相容性（較耗資源）。關閉＝輕量引擎。下次啟動過濾時生效。'
+                  : '使用内置 AdGuardHome 引擎以获得更完整的规则兼容性（更耗资源）。关闭＝轻量引擎。下次启动过滤时生效。'))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Toggle({ type: ToggleType.Switch, isOn: this.fullModeEnabled })
+              .onChange((value: boolean) => {
+                this.updateFullModeEnabled(value);
+              })
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(20)
+        .backgroundColor(this.cardSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(26)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 14, color: this.cardShadowTone() })
 
         Column({ space: 10 }) {
           Row({ space: 8 }) {
