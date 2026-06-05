@@ -88,6 +88,15 @@ git submodule update --init --recursive
 
 ## 5. 构建 .so 并安装到应用工程
 
+> **可选：内置 AdGuardHome web 管理面板。** 完整模式的 web 管理端从 `build/static` 提供（main.go 的 `//go:embed build`）。这是生成产物,需先用 Node 编一次前端(产物落到 submodule 的 `build/static`,会被 so 嵌入,so 体积约 +9.5MB):
+>
+> ```bash
+> cd native/adguardhome-ohos-lib/third_party/AdGuardHome/client
+> npm ci && npm run build-prod
+> ```
+>
+> 不编也能构建出可用的 DNS 过滤 so,只是 `127.0.0.1:3000` 管理面板会 404。Node 可用 Windows 版(前端是跨平台 JS 工具链);Go 的 so 仍在 WSL 编。
+
 ```bash
 ./native/adguardhome-ohos-lib/scripts/build_ohos_shared.sh --app-root /path/to/home-cloud-shield
 ```

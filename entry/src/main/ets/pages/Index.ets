@@ -10,6 +10,7 @@ import { audio } from '@kit.AudioKit';
 import { hdsMaterial, HdsTabs } from '@kit.UIDesignKit';
 import { SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { geoLocationManager } from '@kit.LocationKit';
+import { webview } from '@kit.ArkWeb';
 import type { PromptAction } from '@ohos.arkui.UIContext';
 import abilityAccessCtrl, { Permissions } from '@ohos.abilityAccessCtrl';
 import bundleManager from '@ohos.bundle.bundleManager';
@@ -23,6 +24,8 @@ const VPN_MODULE_NAME = 'entry';
 const VPN_ABILITY_NAME = 'MyVpnExtAbility';
 const ENTRY_ABILITY_NAME = `${VPN_BUNDLE_NAME}.EntryAbility`;
 const VPN_DIR_NAME = 'vpn';
+// AdGuardHome (full mode) web admin port; must match AGH_HTTP_ADDR in MyVpnExtAbility.
+const AGH_HTTP_PORT = 3000;
 const STATUS_FILE_NAME = 'status.json';
 const RULES_FILE_NAME = 'filters.txt';
 const QUERY_LOG_FILE_NAME = 'dns_queries.jsonl';
@@ -550,6 +553,8 @@ struct Index {
   @State clearDnsLogOnStart: boolean = false;
   @State clearDebugLogOnStart: boolean = false;
   @State fullModeEnabled: boolean = false;
+  @State showAghWebSheet: boolean = false;
+  private aghWebController: webview.WebviewController = new webview.WebviewController();
   @State showSettingsPage: boolean = false;
   @State appVersionName: string = 'loading';
   @State appVersionCode: number = 0;
@@ -1167,11 +1172,14 @@ struct Index {
   }
 
   // Toggle between the lightweight C++ engine and the full embedded AdGuardHome
-  // engine. The mode is read by the VPN extension at start, so a change only
-  // takes effect the next time the filter is started.
+  // engine. The mode is read by the VPN extension at start. If the filter is
+  // already running, restart it so the new mode applies immediately.
   private updateFullModeEnabled(value: boolean): void {
     this.fullModeEnabled = value;
     this.savePersistState();
+    if (this.status.running && !this.busy) {
+      this.startVpn();
+    }
   }
 
   private buildRuleLineForDomain(domain: string, allow: boolean): string {
@@ -3639,6 +3647,60 @@ struct Index {
   }
 
   @Builder
+  private AghWebSheet() {
+    Column({ space: 12 }) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text(this.language === 'en'
+            ? 'AdGuardHome dashboard'
+            : (this.language === 'zhHant' ? 'AdGuardHome 管理面板' : 'AdGuardHome 管理面板'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Text('http://127.0.0.1:3000')
+            .fontSize(12)
+            .fontColor(this.mutedTextColor())
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Button(this.language === 'en' ? 'Refresh' : (this.language === 'zhHant' ? '重新整理' : '刷新'))
+          .fontSize(13)
+          .height(36)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(12)
+          .onClick(() => {
+            try {
+              this.aghWebController.refresh();
+            } catch (_) {
+            }
+          })
+        Button(this.language === 'en' ? 'Close' : (this.language === 'zhHant' ? '關閉' : '关闭'))
+          .fontSize(13)
+          .height(36)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(12)
+          .onClick(() => {
+            this.showAghWebSheet = false;
+          })
+      }
+      .width('100%')
+
+      Web({ src: `http://127.0.0.1:${AGH_HTTP_PORT}`, controller: this.aghWebController })
+        .width('100%')
+        .layoutWeight(1)
+        .borderRadius(14)
+        .backgroundColor(Color.White)
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ left: 14, right: 14, top: 18, bottom: Math.max(18, this.avoidPaddingBottom + 12) })
+    .backgroundColor(this.sheetSurfaceTone())
+  }
+
+  @Builder
   private DebugLogSheet() {
     Column({ space: 14 }) {
       Row({ space: 12 }) {
@@ -4905,6 +4967,32 @@ struct Index {
               })
           }
           .width('100%')
+
+          Button(this.language === 'en'
+            ? 'Open AdGuardHome dashboard'
+            : (this.language === 'zhHant' ? '開啟 AdGuardHome 管理面板' : '打开 AdGuardHome 管理面板'))
+            .width('100%')
+            .height(44)
+            .fontSize(15)
+            .enabled(this.fullModeEnabled && this.status.running)
+            .opacity(this.fullModeEnabled && this.status.running ? 1 : 0.4)
+            .backgroundColor(this.coolChipSurfaceTone())
+            .fontColor(this.primaryTextColor())
+            .borderRadius(14)
+            .border({ width: 1, color: this.cardBorderTone() })
+            .onClick(() => {
+              if (this.fullModeEnabled && this.status.running) {
+                this.showAghWebSheet = true;
+              }
+            })
+            .bindSheet(this.showAghWebSheet, this.AghWebSheet(), {
+              height: '90%',
+              backgroundColor: this.sheetSurfaceTone(),
+              showClose: false,
+              onDisappear: () => {
+                this.showAghWebSheet = false;
+              }
+            })
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)

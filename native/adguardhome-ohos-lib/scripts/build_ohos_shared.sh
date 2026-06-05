@@ -68,6 +68,17 @@ trap cleanup_injected EXIT
 cp "$EMBED_DIR/main_ohos_c_shared.go" "$INJECTED_EXPORT"
 cp "$EMBED_DIR/embed_ohos.go" "$INJECTED_EMBED"
 
+# The full-mode web admin (AdGuardHome dashboard) is served from the embedded
+# frontend at build/static (//go:embed build in main.go). It is a generated
+# artifact; build it once with Node before building the .so:
+#   cd "$AGH_DIR/client" && npm ci && npm run build-prod
+# If absent, the .so still works for DNS filtering but the web dashboard 404s.
+if [[ ! -f "$AGH_DIR/build/static/index.html" ]]; then
+  echo "[build] WARNING: $AGH_DIR/build/static/index.html missing" >&2
+  echo "[build] WARNING: the AdGuardHome web dashboard will NOT be available." >&2
+  echo "[build] WARNING: build it with: (cd $AGH_DIR/client && npm ci && npm run build-prod)" >&2
+fi
+
 # Derive the OHOS C cross-compiler from OHOS_NDK when CC is not set explicitly.
 if [[ -z "${CC:-}" && -n "${OHOS_NDK:-}" ]]; then
   export CC="$OHOS_NDK/llvm/bin/aarch64-unknown-linux-ohos-clang"
