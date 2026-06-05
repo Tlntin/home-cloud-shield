@@ -46,6 +46,12 @@ const AGH_SCHEMA_VERSION = 29;
 const WANT_FILTER_MODE = 'filterMode';
 const FILTER_MODE_FULL = 'full';
 const FILTER_MODE_LIGHTWEIGHT = 'lightweight';
+// Full-mode-only AdGuardHome extras, passed from the UI as JSON strings and
+// baked into AdGuardHome.yaml at start (online filter subscriptions, DNS
+// rewrites, and advanced DNS settings). They are ignored in lightweight mode.
+const WANT_AGH_FILTERS_JSON = 'aghFiltersJson';
+const WANT_AGH_REWRITES_JSON = 'aghRewritesJson';
+const WANT_AGH_ADVANCED_JSON = 'aghAdvancedJson';
 const LEGACY_DEFAULT_RULES_TEXT = [
   '! AdGuard-style DNS rules',
   '! Supported examples:',
@@ -87,6 +93,29 @@ interface StatusSnapshot {
   nativeStats: NativeStats;
 }
 
+// Full-mode AdGuardHome extras decoded from the Want JSON params.
+interface AghFilterEntry {
+  id: number;
+  name: string;
+  url: string;
+  enabled: boolean;
+}
+
+interface AghRewriteEntry {
+  domain: string;
+  answer: string;
+}
+
+interface AghAdvancedConfig {
+  blockingMode: string;
+  upstreamMode: string;
+  enableDnssec: boolean;
+  cacheEnabled: boolean;
+  cacheSizeMb: number;
+  cacheOptimistic: boolean;
+  ratelimit: number;
+}
+
 export default class MyVpnExtAbility extends VpnExtensionAbility {
   private vpnConnection?: vpnExtension.VpnConnection;
   private tunFd: number = -1;
@@ -100,6 +129,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private aghConfigFilePath: string = '';
   private aghWorkDirPath: string = '';
   private aghLogFilePath: string = '';
+  private aghFiltersJson: string = '[]';
+  private aghRewritesJson: string = '[]';
+  private aghAdvancedJson: string = '';
   private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   private logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   private logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
@@ -166,6 +198,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.aghConfigFilePath = `${vpnDir}/${AGH_CONFIG_FILE_NAME}`;
     this.aghWorkDirPath = `${vpnDir}/${AGH_WORK_DIR_NAME}`;
     this.aghLogFilePath = `${vpnDir}/${AGH_LOG_FILE_NAME}`;
+    this.aghFiltersJson = this.wantStringParam(want, WANT_AGH_FILTERS_JSON);
+    this.aghRewritesJson = this.wantStringParam(want, WANT_AGH_REWRITES_JSON);
+    this.aghAdvancedJson = this.wantStringParam(want, WANT_AGH_ADVANCED_JSON);
     this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
     this.logRetentionDays = this.wantNumberParam(want, WANT_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS);
     this.logMaxSizeMb = this.wantNumberParam(want, WANT_LOG_MAX_SIZE_MB, DEFAULT_LOG_MAX_SIZE_MB);
@@ -582,9 +617,14 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
 
     const yaml: string = this.buildAghConfigYaml(upstreams, rules);
     this.writeTextFile(this.aghConfigFilePath, yaml);
-    hilog.info(DOMAIN, TAG, '==/vpn_ext/agh_config_written/ upstreams=%{public}d rules=%{public}d', upstreams.length,
-      rules.length);
-    this.appendDebugLog(`==/vpn_ext/agh_config_written/ upstreams=${upstreams.length} rules=${rules.length}`);
+    const filterCount: number = this.parseAghFilters().length;
+    const rewriteCount: number = this.parseAghRewrites().length;
+    const adv: AghAdvancedConfig = this.parseAghAdvanced();
+    hilog.info(DOMAIN, TAG,
+      '==/vpn_ext/agh_config_written/ upstreams=%{public}d rules=%{public}d filters=%{public}d rewrites=%{public}d blocking=%{public}s upstream_mode=%{public}s',
+      upstreams.length, rules.length, filterCount, rewriteCount, this.normalizeBlockingMode(adv.blockingMode),
+      this.normalizeUpstreamMode(adv.upstreamMode));
+    this.appendDebugLog(`==/vpn_ext/agh_config_written/ upstreams=${upstreams.length} rules=${rules.length} filters=${filterCount} rewrites=${rewriteCount} blocking=${this.normalizeBlockingMode(adv.blockingMode)} upstream_mode=${this.normalizeUpstreamMode(adv.upstreamMode)} dnssec=${adv.enableDnssec} cache=${adv.cacheEnabled} ratelimit=${Math.max(0, Math.floor(adv.ratelimit))}`);
   }
 
   private yamlQuote(value: string): string {
@@ -597,6 +637,53 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     const userRulesBlock: string = rules.length > 0
       ? `user_rules:\n${rules.map((r: string) => `  - ${this.yamlQuote(r)}`).join('\n')}`
       : 'user_rules: []';
+
+    const filters: AghFilterEntry[] = this.parseAghFilters();
+    const rewrites: AghRewriteEntry[] = this.parseAghRewrites();
+    const adv: AghAdvancedConfig = this.parseAghAdvanced();
+
+    // Advanced DNS settings (inline into the dns: block). Ratelimit defaults to
+    // 0 (unlimited): the C++ relay funnels every query through the single
+    // 127.0.0.1 source, so AdGuardHome's per-client rate limit would otherwise
+    // throttle the whole device.
+    const upstreamMode: string = this.normalizeUpstreamMode(adv.upstreamMode);
+    const cacheSize: number = adv.cacheEnabled ? Math.max(0, Math.floor(adv.cacheSizeMb)) * 1024 * 1024 : 0;
+    const cacheOptimistic: boolean = adv.cacheEnabled && adv.cacheOptimistic;
+    const ratelimit: number = Math.max(0, Math.floor(adv.ratelimit));
+
+    // Online filter subscriptions -> AdGuardHome remote filter lists. Empty list
+    // keeps the device on user_rules only; AdGuardHome downloads enabled lists a
+    // few seconds after start (default filters_update_interval).
+    let filtersBlock: string;
+    if (filters.length === 0) {
+      filtersBlock = 'filters: []';
+    } else {
+      const entries: string[] = [];
+      filters.forEach((f: AghFilterEntry) => {
+        entries.push(`  - enabled: ${f.enabled ? 'true' : 'false'}`);
+        entries.push(`    url: ${this.yamlQuote(f.url)}`);
+        entries.push(`    name: ${this.yamlQuote(f.name)}`);
+        entries.push(`    id: ${Math.max(1, Math.floor(f.id))}`);
+      });
+      filtersBlock = `filters:\n${entries.join('\n')}`;
+    }
+
+    // filtering: block carries the blocking mode and the DNS rewrites. Only the
+    // keys we emit override AdGuardHome's defaults; the rest stay default.
+    const blockingMode: string = this.normalizeBlockingMode(adv.blockingMode);
+    let rewritesBlock: string;
+    if (rewrites.length === 0) {
+      rewritesBlock = '  rewrites: []';
+    } else {
+      const rw: string[] = [];
+      rewrites.forEach((r: AghRewriteEntry) => {
+        rw.push(`    - domain: ${this.yamlQuote(r.domain)}`);
+        rw.push(`      answer: ${this.yamlQuote(r.answer)}`);
+      });
+      rewritesBlock = `  rewrites:\n${rw.join('\n')}`;
+    }
+    const filteringBlock: string = `filtering:\n  blocking_mode: ${this.yamlQuote(blockingMode)}\n${rewritesBlock}`;
+
     const lines: string[] = [
       `schema_version: ${AGH_SCHEMA_VERSION}`,
       'http:',
@@ -609,11 +696,103 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       upstreamLines,
       '  bootstrap_dns:',
       bootstrapLines,
-      'filters: []',
+      `  upstream_mode: ${this.yamlQuote(upstreamMode)}`,
+      `  enable_dnssec: ${adv.enableDnssec ? 'true' : 'false'}`,
+      `  cache_size: ${cacheSize}`,
+      `  cache_optimistic: ${cacheOptimistic ? 'true' : 'false'}`,
+      `  ratelimit: ${ratelimit}`,
+      filtersBlock,
+      filteringBlock,
       userRulesBlock,
       '',
     ];
     return lines.join('\n');
+  }
+
+  private normalizeUpstreamMode(mode: string): string {
+    if (mode === 'parallel' || mode === 'fastest_addr' || mode === 'load_balance') {
+      return mode;
+    }
+    return 'load_balance';
+  }
+
+  private normalizeBlockingMode(mode: string): string {
+    if (mode === 'nxdomain' || mode === 'refused' || mode === 'null_ip' || mode === 'custom_ip'
+      || mode === 'default') {
+      return mode;
+    }
+    return 'default';
+  }
+
+  private parseAghFilters(): AghFilterEntry[] {
+    const out: AghFilterEntry[] = [];
+    try {
+      const arr = JSON.parse(this.aghFiltersJson.length > 0 ? this.aghFiltersJson : '[]') as AghFilterEntry[];
+      if (Array.isArray(arr)) {
+        arr.forEach((f: AghFilterEntry) => {
+          const url: string = typeof f?.url === 'string' ? f.url.trim() : '';
+          if (url.length === 0) {
+            return;
+          }
+          out.push({
+            id: typeof f?.id === 'number' && f.id > 0 ? Math.floor(f.id) : out.length + 1,
+            name: typeof f?.name === 'string' && f.name.length > 0 ? f.name : url,
+            url: url,
+            enabled: f?.enabled !== false,
+          });
+        });
+      }
+    } catch (_) {
+    }
+    return out;
+  }
+
+  private parseAghRewrites(): AghRewriteEntry[] {
+    const out: AghRewriteEntry[] = [];
+    try {
+      const arr = JSON.parse(this.aghRewritesJson.length > 0 ? this.aghRewritesJson : '[]') as AghRewriteEntry[];
+      if (Array.isArray(arr)) {
+        arr.forEach((r: AghRewriteEntry) => {
+          const domain: string = typeof r?.domain === 'string' ? r.domain.trim() : '';
+          const answer: string = typeof r?.answer === 'string' ? r.answer.trim() : '';
+          if (domain.length === 0 || answer.length === 0) {
+            return;
+          }
+          out.push({ domain: domain, answer: answer });
+        });
+      }
+    } catch (_) {
+    }
+    return out;
+  }
+
+  private parseAghAdvanced(): AghAdvancedConfig {
+    const def: AghAdvancedConfig = {
+      blockingMode: 'default',
+      upstreamMode: 'load_balance',
+      enableDnssec: false,
+      cacheEnabled: true,
+      cacheSizeMb: 4,
+      cacheOptimistic: false,
+      ratelimit: 0,
+    };
+    if (this.aghAdvancedJson.trim().length === 0) {
+      return def;
+    }
+    try {
+      const a = JSON.parse(this.aghAdvancedJson) as AghAdvancedConfig;
+      return {
+        blockingMode: typeof a?.blockingMode === 'string' ? a.blockingMode : def.blockingMode,
+        upstreamMode: typeof a?.upstreamMode === 'string' ? a.upstreamMode : def.upstreamMode,
+        enableDnssec: typeof a?.enableDnssec === 'boolean' ? a.enableDnssec : def.enableDnssec,
+        cacheEnabled: typeof a?.cacheEnabled === 'boolean' ? a.cacheEnabled : def.cacheEnabled,
+        cacheSizeMb: typeof a?.cacheSizeMb === 'number' && a.cacheSizeMb >= 0 ? a.cacheSizeMb : def.cacheSizeMb,
+        cacheOptimistic: typeof a?.cacheOptimistic === 'boolean' ? a.cacheOptimistic : def.cacheOptimistic,
+        ratelimit: typeof a?.ratelimit === 'number' && a.ratelimit >= 0 ? a.ratelimit : def.ratelimit,
+      };
+    } catch (_) {
+      return def;
+    }
   }
 
   private rulesFileSignature(): string {

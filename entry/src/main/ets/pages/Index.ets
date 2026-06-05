@@ -11,6 +11,7 @@ import { hdsMaterial, HdsTabs } from '@kit.UIDesignKit';
 import { SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { geoLocationManager } from '@kit.LocationKit';
 import { webview } from '@kit.ArkWeb';
+import { BLOCKED_SERVICES, BlockedServiceDef } from '../data/BlockedServices';
 import type { PromptAction } from '@ohos.arkui.UIContext';
 import abilityAccessCtrl, { Permissions } from '@ohos.abilityAccessCtrl';
 import bundleManager from '@ohos.bundle.bundleManager';
@@ -438,6 +439,57 @@ interface QuickRuleDialogButton {
   action: () => void;
 }
 
+// A user-managed online filter list (full-mode AdGuardHome subscription).
+interface FilterSubscription {
+  id: number;
+  name: string;
+  url: string;
+  enabled: boolean;
+}
+
+// A full-mode DNS rewrite: resolve `domain` to `answer` (IP, host, or A/AAAA).
+interface DnsRewriteRule {
+  domain: string;
+  answer: string;
+}
+
+// Full-mode AdGuardHome advanced DNS settings.
+interface AdvancedDnsConfig {
+  blockingMode: string;   // default | nxdomain | refused | null_ip
+  upstreamMode: string;   // load_balance | parallel | fastest_addr
+  enableDnssec: boolean;
+  cacheEnabled: boolean;
+  cacheSizeMb: number;
+  cacheOptimistic: boolean;
+  ratelimit: number;      // 0 = unlimited
+}
+
+// A built-in preset offered as a one-tap online subscription.
+interface SubscriptionPreset {
+  name: string;
+  url: string;
+}
+
+function defaultAdvancedDnsConfig(): AdvancedDnsConfig {
+  return {
+    blockingMode: 'default',
+    upstreamMode: 'load_balance',
+    enableDnssec: false,
+    cacheEnabled: true,
+    cacheSizeMb: 4,
+    cacheOptimistic: false,
+    ratelimit: 0,
+  };
+}
+
+// Mainstream, public DNS filter lists (the same ones AdGuardHome ships by
+// default, plus anti-AD for China). Users can also add custom URLs.
+const SUBSCRIPTION_PRESETS: SubscriptionPreset[] = [
+  { name: 'AdGuard DNS filter', url: 'https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt' },
+  { name: 'AdAway Default Blocklist', url: 'https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt' },
+  { name: 'anti-AD', url: 'https://anti-ad.net/easylist.txt' },
+];
+
 interface PersistState {
   keepAliveEnabled?: boolean;
   audioKeepAliveEnabled?: boolean;
@@ -453,6 +505,10 @@ interface PersistState {
   clearDnsLogOnStart?: boolean;
   clearDebugLogOnStart?: boolean;
   fullModeEnabled?: boolean;
+  blockedServiceIds?: string[];
+  filterSubscriptions?: FilterSubscription[];
+  dnsRewrites?: DnsRewriteRule[];
+  advancedDns?: AdvancedDnsConfig;
   currentTab: number;
 }
 
@@ -559,7 +615,25 @@ struct Index {
   @State clearDnsLogOnStart: boolean = false;
   @State clearDebugLogOnStart: boolean = false;
   @State fullModeEnabled: boolean = false;
+  @State blockedServiceIds: string[] = [];
+  @State showServicesSheet: boolean = false;
+  @State servicesSearchText: string = '';
   @State showAghWebSheet: boolean = false;
+  // Full-mode AdGuardHome extras: online subscriptions, DNS rewrites, advanced DNS.
+  @State filterSubscriptions: FilterSubscription[] = [];
+  @State dnsRewrites: DnsRewriteRule[] = [];
+  @State advancedDns: AdvancedDnsConfig = defaultAdvancedDnsConfig();
+  @State showSubscriptionsSheet: boolean = false;
+  @State subAddNameInput: string = '';
+  @State subAddUrlInput: string = '';
+  @State subFeedbackText: string = '';
+  @State showRewritesSheet: boolean = false;
+  @State rewriteAddDomainInput: string = '';
+  @State rewriteAddAnswerInput: string = '';
+  @State rewriteFeedbackText: string = '';
+  @State showAdvancedDnsSheet: boolean = false;
+  @State cacheSizeInput: string = '4';
+  @State ratelimitInput: string = '0';
   private aghWebController: webview.WebviewController = new webview.WebviewController();
   @State showSettingsPage: boolean = false;
   @State appVersionName: string = 'loading';
@@ -739,7 +813,268 @@ struct Index {
         chunks.push(normalized);
       }
     });
+    const serviceRules: string = this.blockedServiceRulesText();
+    if (serviceRules.length > 0) {
+      chunks.push(serviceRules);
+    }
     return chunks.join('\n\n');
+  }
+
+  // Rules contributed by the user-selected "blocked services". Appended to the
+  // merged rules so they work in both engines (lightweight reads filters.txt;
+  // full mode maps filters.txt to AdGuardHome user_rules).
+  private blockedServiceRulesText(): string {
+    if (this.blockedServiceIds.length === 0) {
+      return '';
+    }
+    const out: string[] = [];
+    BLOCKED_SERVICES.forEach((svc: BlockedServiceDef) => {
+      if (this.blockedServiceIds.includes(svc.id)) {
+        out.push(`! service: ${svc.name}`);
+        svc.rules.forEach((r: string) => out.push(r));
+      }
+    });
+    return out.join('\n');
+  }
+
+  private toggleBlockedService(id: string, enabled: boolean): void {
+    if (enabled) {
+      if (!this.blockedServiceIds.includes(id)) {
+        this.blockedServiceIds = this.blockedServiceIds.concat([id]);
+      }
+    } else {
+      this.blockedServiceIds = this.blockedServiceIds.filter((x: string) => x !== id);
+    }
+    // Persist + write the merged rules file; the VPN extension hot-reloads it in
+    // lightweight mode, and full mode picks it up on the next filter restart.
+    this.saveRules();
+  }
+
+  private filteredBlockedServices(): BlockedServiceDef[] {
+    const kw: string = this.servicesSearchText.trim().toLowerCase();
+    if (kw.length === 0) {
+      return BLOCKED_SERVICES;
+    }
+    return BLOCKED_SERVICES.filter((svc: BlockedServiceDef) => {
+      return svc.name.toLowerCase().includes(kw) || svc.id.toLowerCase().includes(kw);
+    });
+  }
+
+  // Trilingual inline label helper (en / zhHans / zhHant).
+  private tri(en: string, zhHans: string, zhHant: string): string {
+    return this.language === 'en' ? en : (this.language === 'zhHant' ? zhHant : zhHans);
+  }
+
+  // Subscriptions, rewrites and advanced DNS only apply in full mode and only at
+  // filter start. Persist them and, if the full engine is currently running,
+  // restart it so the change takes effect now; lightweight mode just persists.
+  private applyFullModeConfigChange(): void {
+    this.savePersistState();
+    if (this.fullModeEnabled && this.status.running && !this.busy) {
+      this.startVpn();
+    }
+  }
+
+  private normalizeAdvancedDns(raw: AdvancedDnsConfig): AdvancedDnsConfig {
+    const def: AdvancedDnsConfig = defaultAdvancedDnsConfig();
+    const blockingOk: boolean = raw?.blockingMode === 'default' || raw?.blockingMode === 'nxdomain'
+      || raw?.blockingMode === 'refused' || raw?.blockingMode === 'null_ip';
+    const upstreamOk: boolean = raw?.upstreamMode === 'load_balance' || raw?.upstreamMode === 'parallel'
+      || raw?.upstreamMode === 'fastest_addr';
+    return {
+      blockingMode: blockingOk ? raw.blockingMode : def.blockingMode,
+      upstreamMode: upstreamOk ? raw.upstreamMode : def.upstreamMode,
+      enableDnssec: typeof raw?.enableDnssec === 'boolean' ? raw.enableDnssec : def.enableDnssec,
+      cacheEnabled: typeof raw?.cacheEnabled === 'boolean' ? raw.cacheEnabled : def.cacheEnabled,
+      cacheSizeMb: typeof raw?.cacheSizeMb === 'number' && raw.cacheSizeMb >= 0
+        ? Math.floor(raw.cacheSizeMb) : def.cacheSizeMb,
+      cacheOptimistic: typeof raw?.cacheOptimistic === 'boolean' ? raw.cacheOptimistic : def.cacheOptimistic,
+      ratelimit: typeof raw?.ratelimit === 'number' && raw.ratelimit >= 0 ? Math.floor(raw.ratelimit) : def.ratelimit,
+    };
+  }
+
+  private cloneAdvancedDns(): AdvancedDnsConfig {
+    return {
+      blockingMode: this.advancedDns.blockingMode,
+      upstreamMode: this.advancedDns.upstreamMode,
+      enableDnssec: this.advancedDns.enableDnssec,
+      cacheEnabled: this.advancedDns.cacheEnabled,
+      cacheSizeMb: this.advancedDns.cacheSizeMb,
+      cacheOptimistic: this.advancedDns.cacheOptimistic,
+      ratelimit: this.advancedDns.ratelimit,
+    };
+  }
+
+  // ----- Online filter subscriptions (full mode) -----
+
+  private nextSubscriptionId(): number {
+    let maxId: number = 0;
+    this.filterSubscriptions.forEach((s: FilterSubscription) => {
+      if (s.id > maxId) {
+        maxId = s.id;
+      }
+    });
+    return maxId + 1;
+  }
+
+  private enabledSubscriptionCount(): number {
+    let n: number = 0;
+    this.filterSubscriptions.forEach((s: FilterSubscription) => {
+      if (s.enabled) {
+        n += 1;
+      }
+    });
+    return n;
+  }
+
+  private addFilterSubscription(name: string, url: string): void {
+    const u: string = url.trim();
+    if (u.length === 0) {
+      this.subFeedbackText = this.tri('Enter a list URL', '请输入规则列表 URL', '請輸入規則列表 URL');
+      return;
+    }
+    if (!(u.startsWith('http://') || u.startsWith('https://'))) {
+      this.subFeedbackText = this.tri('URL must start with http:// or https://',
+        'URL 需以 http:// 或 https:// 开头', 'URL 需以 http:// 或 https:// 開頭');
+      return;
+    }
+    if (this.filterSubscriptions.some((s: FilterSubscription) => s.url === u)) {
+      this.subFeedbackText = this.tri('Already added', '该订阅已存在', '該訂閱已存在');
+      return;
+    }
+    const nm: string = name.trim().length > 0 ? name.trim() : u;
+    this.filterSubscriptions = this.filterSubscriptions.concat([{
+      id: this.nextSubscriptionId(),
+      name: nm,
+      url: u,
+      enabled: true,
+    }]);
+    this.subAddNameInput = '';
+    this.subAddUrlInput = '';
+    this.subFeedbackText = this.tri('Added', '已添加', '已新增');
+    this.applyFullModeConfigChange();
+  }
+
+  private addSubscriptionPreset(preset: SubscriptionPreset): void {
+    this.addFilterSubscription(preset.name, preset.url);
+  }
+
+  private toggleFilterSubscription(id: number, enabled: boolean): void {
+    this.filterSubscriptions = this.filterSubscriptions.map((s: FilterSubscription) => {
+      if (s.id === id) {
+        return { id: s.id, name: s.name, url: s.url, enabled: enabled } as FilterSubscription;
+      }
+      return s;
+    });
+    this.applyFullModeConfigChange();
+  }
+
+  private removeFilterSubscription(id: number): void {
+    this.filterSubscriptions = this.filterSubscriptions.filter((s: FilterSubscription) => s.id !== id);
+    this.subFeedbackText = this.tri('Removed', '已删除', '已刪除');
+    this.applyFullModeConfigChange();
+  }
+
+  // ----- DNS rewrites (full mode) -----
+
+  private addDnsRewrite(domain: string, answer: string): void {
+    const d: string = domain.trim().toLowerCase();
+    const a: string = answer.trim();
+    if (d.length === 0 || a.length === 0) {
+      this.rewriteFeedbackText = this.tri('Enter both domain and answer', '请填写域名和应答值', '請填寫網域與應答值');
+      return;
+    }
+    if (this.dnsRewrites.some((r: DnsRewriteRule) => r.domain === d && r.answer === a)) {
+      this.rewriteFeedbackText = this.tri('Already added', '该重写已存在', '該重寫已存在');
+      return;
+    }
+    this.dnsRewrites = this.dnsRewrites.concat([{ domain: d, answer: a }]);
+    this.rewriteAddDomainInput = '';
+    this.rewriteAddAnswerInput = '';
+    this.rewriteFeedbackText = this.tri('Added', '已添加', '已新增');
+    this.applyFullModeConfigChange();
+  }
+
+  private removeDnsRewrite(index: number): void {
+    this.dnsRewrites = this.dnsRewrites.filter((_r: DnsRewriteRule, i: number) => i !== index);
+    this.rewriteFeedbackText = this.tri('Removed', '已删除', '已刪除');
+    this.applyFullModeConfigChange();
+  }
+
+  // ----- Advanced DNS settings (full mode) -----
+
+  private setBlockingMode(mode: string): void {
+    const next: AdvancedDnsConfig = this.cloneAdvancedDns();
+    next.blockingMode = mode;
+    this.advancedDns = next;
+    this.applyFullModeConfigChange();
+  }
+
+  private setUpstreamMode(mode: string): void {
+    const next: AdvancedDnsConfig = this.cloneAdvancedDns();
+    next.upstreamMode = mode;
+    this.advancedDns = next;
+    this.applyFullModeConfigChange();
+  }
+
+  private setEnableDnssec(value: boolean): void {
+    const next: AdvancedDnsConfig = this.cloneAdvancedDns();
+    next.enableDnssec = value;
+    this.advancedDns = next;
+    this.applyFullModeConfigChange();
+  }
+
+  private setCacheEnabled(value: boolean): void {
+    const next: AdvancedDnsConfig = this.cloneAdvancedDns();
+    next.cacheEnabled = value;
+    this.advancedDns = next;
+    this.applyFullModeConfigChange();
+  }
+
+  private setCacheOptimistic(value: boolean): void {
+    const next: AdvancedDnsConfig = this.cloneAdvancedDns();
+    next.cacheOptimistic = value;
+    this.advancedDns = next;
+    this.applyFullModeConfigChange();
+  }
+
+  private setCacheSizeMb(value: number): void {
+    const v: number = Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+    const next: AdvancedDnsConfig = this.cloneAdvancedDns();
+    next.cacheSizeMb = v;
+    this.advancedDns = next;
+    this.applyFullModeConfigChange();
+  }
+
+  private setRatelimit(value: number): void {
+    const v: number = Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+    const next: AdvancedDnsConfig = this.cloneAdvancedDns();
+    next.ratelimit = v;
+    this.advancedDns = next;
+    this.applyFullModeConfigChange();
+  }
+
+  private blockingModeLabel(mode: string): string {
+    if (mode === 'nxdomain') {
+      return 'NXDOMAIN';
+    }
+    if (mode === 'refused') {
+      return 'REFUSED';
+    }
+    if (mode === 'null_ip') {
+      return this.tri('Null IP (0.0.0.0)', '空 IP (0.0.0.0)', '空 IP (0.0.0.0)');
+    }
+    return this.tri('Default', '默认', '預設');
+  }
+
+  private upstreamModeLabel(mode: string): string {
+    if (mode === 'parallel') {
+      return this.tri('Parallel', '并行', '並行');
+    }
+    if (mode === 'fastest_addr') {
+      return this.tri('Fastest address', '最快地址', '最快位址');
+    }
+    return this.tri('Load balance', '负载均衡', '負載平衡');
   }
 
   private enabledRuleProfileCount(): number {
@@ -2078,6 +2413,9 @@ struct Index {
         clearDnsLogOnStart: this.clearDnsLogOnStart,
         clearDebugLogOnStart: this.clearDebugLogOnStart,
         filterMode: this.fullModeEnabled ? 'full' : 'lightweight',
+        aghFiltersJson: JSON.stringify(this.filterSubscriptions),
+        aghRewritesJson: JSON.stringify(this.dnsRewrites),
+        aghAdvancedJson: JSON.stringify(this.advancedDns),
       },
     };
   }
@@ -2160,6 +2498,46 @@ struct Index {
       if (typeof state.fullModeEnabled === 'boolean') {
         this.fullModeEnabled = state.fullModeEnabled;
       }
+      if (Array.isArray(state.blockedServiceIds)) {
+        const ids: string[] = [];
+        state.blockedServiceIds.forEach((x: string) => {
+          if (typeof x === 'string' && x.length > 0 && !ids.includes(x)) {
+            ids.push(x);
+          }
+        });
+        this.blockedServiceIds = ids;
+      }
+      if (Array.isArray(state.filterSubscriptions)) {
+        const subs: FilterSubscription[] = [];
+        state.filterSubscriptions.forEach((s: FilterSubscription, index: number) => {
+          const url: string = typeof s?.url === 'string' ? s.url.trim() : '';
+          if (url.length === 0) {
+            return;
+          }
+          subs.push({
+            id: typeof s?.id === 'number' && s.id > 0 ? Math.floor(s.id) : index + 1,
+            name: typeof s?.name === 'string' && s.name.trim().length > 0 ? s.name.trim() : url,
+            url: url,
+            enabled: s?.enabled !== false,
+          });
+        });
+        this.filterSubscriptions = subs;
+      }
+      if (Array.isArray(state.dnsRewrites)) {
+        const rws: DnsRewriteRule[] = [];
+        state.dnsRewrites.forEach((r: DnsRewriteRule) => {
+          const domain: string = typeof r?.domain === 'string' ? r.domain.trim() : '';
+          const answer: string = typeof r?.answer === 'string' ? r.answer.trim() : '';
+          if (domain.length === 0 || answer.length === 0) {
+            return;
+          }
+          rws.push({ domain: domain, answer: answer });
+        });
+        this.dnsRewrites = rws;
+      }
+      if (state.advancedDns !== undefined && state.advancedDns !== null) {
+        this.advancedDns = this.normalizeAdvancedDns(state.advancedDns);
+      }
       if (Array.isArray(state.ruleProfiles)) {
         const nextProfiles: RuleProfile[] = [];
         state.ruleProfiles.forEach((item: RuleProfile, index: number) => {
@@ -2209,6 +2587,10 @@ struct Index {
       clearDnsLogOnStart: this.clearDnsLogOnStart,
       clearDebugLogOnStart: this.clearDebugLogOnStart,
       fullModeEnabled: this.fullModeEnabled,
+      blockedServiceIds: this.blockedServiceIds,
+      filterSubscriptions: this.filterSubscriptions,
+      dnsRewrites: this.dnsRewrites,
+      advancedDns: this.advancedDns,
       currentTab: this.currentTab,
     };
     this.writeTextFile(this.stateFilePath, JSON.stringify(state));
@@ -3721,6 +4103,94 @@ struct Index {
   }
 
   @Builder
+  private ServicesSheet() {
+    Column({ space: 12 }) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text(this.language === 'en' ? 'Blocked services' : (this.language === 'zhHant' ? '服務屏蔽' : '服务屏蔽'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Text(this.language === 'en'
+            ? `${this.blockedServiceIds.length} blocked`
+            : (this.language === 'zhHant' ? `已屏蔽 ${this.blockedServiceIds.length} 個` : `已屏蔽 ${this.blockedServiceIds.length} 个`))
+            .fontSize(12)
+            .fontColor(this.mutedTextColor())
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Button(this.language === 'en' ? 'Close' : (this.language === 'zhHant' ? '關閉' : '关闭'))
+          .fontSize(13)
+          .height(36)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(12)
+          .onClick(() => {
+            this.showServicesSheet = false;
+          })
+      }
+      .width('100%')
+
+      TextInput({ text: this.servicesSearchText, placeholder: this.language === 'en' ? 'Search services' : '搜索服务' })
+        .width('100%')
+        .height(44)
+        .fontSize(15)
+        .backgroundColor(this.sheetInputSurfaceTone())
+        .borderRadius(16)
+        .border({ width: 1, color: this.sheetBorderTone() })
+        .padding({ left: 14, right: 14 })
+        .onChange((value: string) => {
+          this.servicesSearchText = value;
+        })
+
+      List() {
+        ForEach(this.filteredBlockedServices(), (svc: BlockedServiceDef) => {
+          ListItem() {
+            Row() {
+              Column({ space: 2 }) {
+                Text(svc.name)
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.primaryTextColor())
+                Text(`${svc.rules.length} ${this.language === 'en' ? 'rules' : '条规则'}`)
+                  .fontSize(11)
+                  .fontColor(this.mutedTextColor())
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+
+              Toggle({ type: ToggleType.Switch, isOn: this.blockedServiceIds.includes(svc.id) })
+                .onChange((value: boolean) => {
+                  this.toggleBlockedService(svc.id, value);
+                })
+            }
+            .width('100%')
+            .padding(14)
+            .backgroundColor(this.sheetSecondarySurfaceTone())
+            .borderRadius(14)
+            .border({ width: 1, color: this.sheetBorderTone() })
+          }
+        }, (svc: BlockedServiceDef) => svc.id)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+      .cachedCount(10)
+      .divider({ strokeWidth: 8, color: Color.Transparent })
+    }
+    .width('100%')
+    .height('100%')
+    .padding({
+      left: 14,
+      right: 14,
+      top: Math.max(18, this.avoidPaddingTop + 12),
+      bottom: Math.max(18, this.avoidPaddingBottom + 12)
+    })
+    .backgroundColor(this.sheetSurfaceTone())
+  }
+
+  @Builder
   private AghWebSheet() {
     Column({ space: 12 }) {
       Row({ space: 12 }) {
@@ -3767,6 +4237,611 @@ struct Index {
         .layoutWeight(1)
         .borderRadius(14)
         .backgroundColor(Color.White)
+    }
+    .width('100%')
+    .height('100%')
+    .padding({
+      left: 14,
+      right: 14,
+      top: Math.max(18, this.avoidPaddingTop + 12),
+      bottom: Math.max(18, this.avoidPaddingBottom + 12)
+    })
+    .backgroundColor(this.sheetSurfaceTone())
+  }
+
+  @Builder
+  private ModeChip(label: string, selected: boolean, onTap: () => void) {
+    Button(label)
+      .type(ButtonType.Normal)
+      .fontSize(13)
+      .height(38)
+      .fontColor(selected ? this.selectedChipTextTone() : this.primaryTextColor())
+      .backgroundColor(selected ? this.coolChipSurfaceTone() : this.sheetInputSurfaceTone())
+      .borderRadius(12)
+      .border({ width: selected ? 1.5 : 1, color: selected ? this.selectedOutlineTone() : this.sheetBorderTone() })
+      .padding({ left: 14, right: 14 })
+      .margin({ right: 8, bottom: 8 })
+      .onClick(() => {
+        onTap();
+      })
+  }
+
+  @Builder
+  private SubscriptionsSheet() {
+    Column({ space: 12 }) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text(this.tri('Online subscriptions', '在线规则订阅', '線上規則訂閱'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Text(this.tri(`${this.enabledSubscriptionCount()} enabled / ${this.filterSubscriptions.length} total`,
+            `已启用 ${this.enabledSubscriptionCount()} / 共 ${this.filterSubscriptions.length}`,
+            `已啟用 ${this.enabledSubscriptionCount()} / 共 ${this.filterSubscriptions.length}`))
+            .fontSize(12)
+            .fontColor(this.mutedTextColor())
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Button(this.tri('Close', '关闭', '關閉'))
+          .fontSize(13)
+          .height(36)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(12)
+          .onClick(() => {
+            this.showSubscriptionsSheet = false;
+          })
+      }
+      .width('100%')
+
+      Text(this.tri('Full engine only. Enabled lists download a few seconds after the filter starts; changes restart filtering while running.',
+        '仅完整引擎有效。启用的列表会在过滤启动几秒后下载；运行中更改会重启过滤。',
+        '僅完整引擎有效。啟用的列表會在過濾啟動幾秒後下載；執行中更改會重啟過濾。'))
+        .fontSize(12)
+        .lineHeight(18)
+        .fontColor(this.secondaryTextColor())
+        .width('100%')
+
+      Column({ space: 10 }) {
+        TextInput({ text: this.subAddNameInput, placeholder: this.tri('Name (optional)', '名称（可选）', '名稱（可選）') })
+          .width('100%')
+          .height(44)
+          .fontSize(15)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .borderRadius(14)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .padding({ left: 12, right: 12 })
+          .onChange((value: string) => {
+            this.subAddNameInput = value;
+          })
+        TextInput({ text: this.subAddUrlInput, placeholder: 'https://example.com/list.txt' })
+          .width('100%')
+          .height(44)
+          .fontSize(15)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .borderRadius(14)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .padding({ left: 12, right: 12 })
+          .onChange((value: string) => {
+            this.subAddUrlInput = value;
+          })
+        Button(this.tri('Add', '添加', '新增'))
+          .type(ButtonType.Normal)
+          .width('100%')
+          .height(44)
+          .fontSize(15)
+          .fontColor(Color.White)
+          .backgroundColor('#2B5B95')
+          .borderRadius(14)
+          .onClick(() => {
+            this.addFilterSubscription(this.subAddNameInput, this.subAddUrlInput);
+          })
+
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(SUBSCRIPTION_PRESETS, (p: SubscriptionPreset) => {
+            Button(p.name)
+              .type(ButtonType.Normal)
+              .fontSize(12)
+              .fontColor(this.primaryTextColor())
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .borderRadius(12)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .margin({ right: 8, bottom: 8 })
+              .onClick(() => {
+                this.addSubscriptionPreset(p);
+              })
+          }, (p: SubscriptionPreset) => p.url)
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .padding(14)
+      .backgroundColor(this.sheetSecondarySurfaceTone())
+      .borderRadius(18)
+      .border({ width: 1, color: this.sheetBorderTone() })
+
+      if (this.subFeedbackText.length > 0) {
+        Text(this.subFeedbackText)
+          .fontSize(12)
+          .fontColor(this.accentBlueTone())
+          .fontWeight(FontWeight.Medium)
+          .width('100%')
+      }
+
+      if (this.filterSubscriptions.length === 0) {
+        Text(this.tri('No subscriptions yet.', '暂无订阅。', '尚無訂閱。'))
+          .fontSize(13)
+          .fontColor(this.secondaryTextColor())
+          .width('100%')
+      }
+
+      List() {
+        ForEach(this.filterSubscriptions, (s: FilterSubscription) => {
+          ListItem() {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text(s.name)
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.primaryTextColor())
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(s.url)
+                  .fontSize(11)
+                  .fontColor(this.mutedTextColor())
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+
+              Toggle({ type: ToggleType.Switch, isOn: s.enabled })
+                .onChange((value: boolean) => {
+                  this.toggleFilterSubscription(s.id, value);
+                })
+              Button(this.tri('Delete', '删除', '刪除'))
+                .fontSize(12)
+                .height(34)
+                .backgroundColor(this.coolChipSurfaceTone())
+                .fontColor(this.primaryTextColor())
+                .borderRadius(10)
+                .onClick(() => {
+                  this.removeFilterSubscription(s.id);
+                })
+            }
+            .width('100%')
+            .padding(14)
+            .backgroundColor(this.sheetSecondarySurfaceTone())
+            .borderRadius(14)
+            .border({ width: 1, color: this.sheetBorderTone() })
+          }
+        }, (s: FilterSubscription) => `${s.id}`)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+      .cachedCount(8)
+      .divider({ strokeWidth: 8, color: Color.Transparent })
+    }
+    .width('100%')
+    .height('100%')
+    .padding({
+      left: 14,
+      right: 14,
+      top: Math.max(18, this.avoidPaddingTop + 12),
+      bottom: Math.max(18, this.avoidPaddingBottom + 12)
+    })
+    .backgroundColor(this.sheetSurfaceTone())
+  }
+
+  @Builder
+  private RewritesSheet() {
+    Column({ space: 12 }) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text(this.tri('DNS rewrites', 'DNS 重写', 'DNS 重寫'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Text(this.tri(`${this.dnsRewrites.length} rewrites`,
+            `共 ${this.dnsRewrites.length} 条`, `共 ${this.dnsRewrites.length} 條`))
+            .fontSize(12)
+            .fontColor(this.mutedTextColor())
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Button(this.tri('Close', '关闭', '關閉'))
+          .fontSize(13)
+          .height(36)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(12)
+          .onClick(() => {
+            this.showRewritesSheet = false;
+          })
+      }
+      .width('100%')
+
+      Text(this.tri('Full engine only. Answer can be an IP (A/AAAA), a hostname (CNAME), or A/AAAA to clear. Changes restart filtering while running.',
+        '仅完整引擎有效。应答值可填 IP（A/AAAA）、主机名（CNAME），或填 A/AAAA 清空。运行中更改会重启过滤。',
+        '僅完整引擎有效。應答值可填 IP（A/AAAA）、主機名（CNAME），或填 A/AAAA 清空。執行中更改會重啟過濾。'))
+        .fontSize(12)
+        .lineHeight(18)
+        .fontColor(this.secondaryTextColor())
+        .width('100%')
+
+      Column({ space: 10 }) {
+        TextInput({ text: this.rewriteAddDomainInput, placeholder: this.tri('Domain, e.g. example.com', '域名，如 example.com', '網域，如 example.com') })
+          .width('100%')
+          .height(44)
+          .fontSize(15)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .borderRadius(14)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .padding({ left: 12, right: 12 })
+          .onChange((value: string) => {
+            this.rewriteAddDomainInput = value;
+          })
+        TextInput({ text: this.rewriteAddAnswerInput, placeholder: this.tri('Answer, e.g. 1.2.3.4', '应答，如 1.2.3.4', '應答，如 1.2.3.4') })
+          .width('100%')
+          .height(44)
+          .fontSize(15)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .borderRadius(14)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .padding({ left: 12, right: 12 })
+          .onChange((value: string) => {
+            this.rewriteAddAnswerInput = value;
+          })
+        Button(this.tri('Add', '添加', '新增'))
+          .type(ButtonType.Normal)
+          .width('100%')
+          .height(44)
+          .fontSize(15)
+          .fontColor(Color.White)
+          .backgroundColor('#2B5B95')
+          .borderRadius(14)
+          .onClick(() => {
+            this.addDnsRewrite(this.rewriteAddDomainInput, this.rewriteAddAnswerInput);
+          })
+      }
+      .width('100%')
+      .padding(14)
+      .backgroundColor(this.sheetSecondarySurfaceTone())
+      .borderRadius(18)
+      .border({ width: 1, color: this.sheetBorderTone() })
+
+      if (this.rewriteFeedbackText.length > 0) {
+        Text(this.rewriteFeedbackText)
+          .fontSize(12)
+          .fontColor(this.accentBlueTone())
+          .fontWeight(FontWeight.Medium)
+          .width('100%')
+      }
+
+      if (this.dnsRewrites.length === 0) {
+        Text(this.tri('No rewrites yet.', '暂无重写。', '尚無重寫。'))
+          .fontSize(13)
+          .fontColor(this.secondaryTextColor())
+          .width('100%')
+      }
+
+      List() {
+        ForEach(this.dnsRewrites, (r: DnsRewriteRule, index: number) => {
+          ListItem() {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text(r.domain)
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.primaryTextColor())
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(`→ ${r.answer}`)
+                  .fontSize(12)
+                  .fontColor(this.mutedTextColor())
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+
+              Button(this.tri('Delete', '删除', '刪除'))
+                .fontSize(12)
+                .height(34)
+                .backgroundColor(this.coolChipSurfaceTone())
+                .fontColor(this.primaryTextColor())
+                .borderRadius(10)
+                .onClick(() => {
+                  this.removeDnsRewrite(index);
+                })
+            }
+            .width('100%')
+            .padding(14)
+            .backgroundColor(this.sheetSecondarySurfaceTone())
+            .borderRadius(14)
+            .border({ width: 1, color: this.sheetBorderTone() })
+          }
+        }, (r: DnsRewriteRule, index: number) => `${index}:${r.domain}:${r.answer}`)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+      .cachedCount(8)
+      .divider({ strokeWidth: 8, color: Color.Transparent })
+    }
+    .width('100%')
+    .height('100%')
+    .padding({
+      left: 14,
+      right: 14,
+      top: Math.max(18, this.avoidPaddingTop + 12),
+      bottom: Math.max(18, this.avoidPaddingBottom + 12)
+    })
+    .backgroundColor(this.sheetSurfaceTone())
+  }
+
+  @Builder
+  private AdvancedDnsSheet() {
+    Column({ space: 12 }) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text(this.tri('Advanced DNS', 'DNS 高级设置', 'DNS 進階設定'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Text(this.tri('Full engine only', '仅完整引擎有效', '僅完整引擎有效'))
+            .fontSize(12)
+            .fontColor(this.mutedTextColor())
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Button(this.tri('Close', '关闭', '關閉'))
+          .fontSize(13)
+          .height(36)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(12)
+          .onClick(() => {
+            this.showAdvancedDnsSheet = false;
+          })
+      }
+      .width('100%')
+
+      Scroll() {
+        Column({ space: 16 }) {
+          Text(this.tri('Changes restart filtering while running.',
+            '运行中更改会重启过滤以生效。', '執行中更改會重啟過濾以生效。'))
+            .fontSize(12)
+            .lineHeight(18)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+
+          // Blocking mode
+          Column({ space: 8 }) {
+            Text(this.tri('Blocking mode', '拦截方式', '攔截方式'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.tri('How blocked answers are returned.', '被拦截的应答如何返回。', '被攔截的應答如何返回。'))
+              .fontSize(12)
+              .fontColor(this.secondaryTextColor())
+              .width('100%')
+            Flex({ wrap: FlexWrap.Wrap }) {
+              this.ModeChip(this.blockingModeLabel('default'), this.advancedDns.blockingMode === 'default', () => {
+                this.setBlockingMode('default');
+              })
+              this.ModeChip(this.blockingModeLabel('nxdomain'), this.advancedDns.blockingMode === 'nxdomain', () => {
+                this.setBlockingMode('nxdomain');
+              })
+              this.ModeChip(this.blockingModeLabel('refused'), this.advancedDns.blockingMode === 'refused', () => {
+                this.setBlockingMode('refused');
+              })
+              this.ModeChip(this.blockingModeLabel('null_ip'), this.advancedDns.blockingMode === 'null_ip', () => {
+                this.setBlockingMode('null_ip');
+              })
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+
+          // Upstream mode
+          Column({ space: 8 }) {
+            Text(this.tri('Upstream mode', '上游模式', '上游模式'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.tri('How queries are sent to upstream resolvers.', '如何向上游解析器发送查询。', '如何向上游解析器發送查詢。'))
+              .fontSize(12)
+              .fontColor(this.secondaryTextColor())
+              .width('100%')
+            Flex({ wrap: FlexWrap.Wrap }) {
+              this.ModeChip(this.upstreamModeLabel('load_balance'), this.advancedDns.upstreamMode === 'load_balance', () => {
+                this.setUpstreamMode('load_balance');
+              })
+              this.ModeChip(this.upstreamModeLabel('parallel'), this.advancedDns.upstreamMode === 'parallel', () => {
+                this.setUpstreamMode('parallel');
+              })
+              this.ModeChip(this.upstreamModeLabel('fastest_addr'), this.advancedDns.upstreamMode === 'fastest_addr', () => {
+                this.setUpstreamMode('fastest_addr');
+              })
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+
+          // DNSSEC
+          Row() {
+            Column({ space: 2 }) {
+              Text('DNSSEC')
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.tri('Request and verify DNSSEC signatures.', '请求并校验 DNSSEC 签名。', '請求並驗證 DNSSEC 簽章。'))
+                .fontSize(12)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Toggle({ type: ToggleType.Switch, isOn: this.advancedDns.enableDnssec })
+              .onChange((value: boolean) => {
+                this.setEnableDnssec(value);
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+
+          // Cache
+          Column({ space: 12 }) {
+            Row() {
+              Column({ space: 2 }) {
+                Text(this.tri('DNS cache', 'DNS 缓存', 'DNS 快取'))
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.primaryTextColor())
+                Text(this.tri('Cache resolved answers for faster repeats.', '缓存解析结果以加速重复查询。', '快取解析結果以加速重複查詢。'))
+                  .fontSize(12)
+                  .fontColor(this.secondaryTextColor())
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+
+              Toggle({ type: ToggleType.Switch, isOn: this.advancedDns.cacheEnabled })
+                .onChange((value: boolean) => {
+                  this.setCacheEnabled(value);
+                })
+            }
+            .width('100%')
+
+            if (this.advancedDns.cacheEnabled) {
+              Row({ space: 10 }) {
+                Text(this.tri('Size (MB)', '大小（MB）', '大小（MB）'))
+                  .fontSize(14)
+                  .fontColor(this.primaryTextColor())
+                  .layoutWeight(1)
+                TextInput({ text: this.cacheSizeInput })
+                  .type(InputType.Number)
+                  .width(96)
+                  .height(40)
+                  .fontSize(15)
+                  .backgroundColor(this.sheetInputSurfaceTone())
+                  .borderRadius(12)
+                  .border({ width: 1, color: this.sheetBorderTone() })
+                  .padding({ left: 12, right: 12 })
+                  .onChange((value: string) => {
+                    this.cacheSizeInput = value;
+                  })
+                Button(this.tri('Apply', '应用', '套用'))
+                  .fontSize(13)
+                  .height(40)
+                  .backgroundColor(this.coolChipSurfaceTone())
+                  .fontColor(this.primaryTextColor())
+                  .borderRadius(12)
+                  .onClick(() => {
+                    const n: number = parseInt(this.cacheSizeInput, 10);
+                    this.setCacheSizeMb(Number.isFinite(n) && n >= 0 ? n : 0);
+                  })
+              }
+              .width('100%')
+
+              Row() {
+                Column({ space: 2 }) {
+                  Text(this.tri('Optimistic cache', '乐观缓存', '樂觀快取'))
+                    .fontSize(14)
+                    .fontColor(this.primaryTextColor())
+                  Text(this.tri('Serve stale answers while refreshing.', '过期时先返回旧结果再刷新。', '過期時先返回舊結果再刷新。'))
+                    .fontSize(12)
+                    .fontColor(this.secondaryTextColor())
+                }
+                .layoutWeight(1)
+                .alignItems(HorizontalAlign.Start)
+
+                Toggle({ type: ToggleType.Switch, isOn: this.advancedDns.cacheOptimistic })
+                  .onChange((value: boolean) => {
+                    this.setCacheOptimistic(value);
+                  })
+              }
+              .width('100%')
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+
+          // Rate limit
+          Column({ space: 8 }) {
+            Text(this.tri('Rate limit (qps)', '限速（每秒查询数）', '限速（每秒查詢數）'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.tri('0 = unlimited. Recommended for this app since all queries share one loopback source.',
+              '0 = 不限。本应用建议设 0，因为所有查询来自同一回环来源。',
+              '0 = 不限。本應用建議設 0，因為所有查詢來自同一回環來源。'))
+              .fontSize(12)
+              .lineHeight(18)
+              .fontColor(this.secondaryTextColor())
+              .width('100%')
+            Row({ space: 10 }) {
+              TextInput({ text: this.ratelimitInput })
+                .type(InputType.Number)
+                .layoutWeight(1)
+                .height(40)
+                .fontSize(15)
+                .backgroundColor(this.sheetInputSurfaceTone())
+                .borderRadius(12)
+                .border({ width: 1, color: this.sheetBorderTone() })
+                .padding({ left: 12, right: 12 })
+                .onChange((value: string) => {
+                  this.ratelimitInput = value;
+                })
+              Button(this.tri('Apply', '应用', '套用'))
+                .fontSize(13)
+                .height(40)
+                .backgroundColor(this.coolChipSurfaceTone())
+                .fontColor(this.primaryTextColor())
+                .borderRadius(12)
+                .onClick(() => {
+                  const n: number = parseInt(this.ratelimitInput, 10);
+                  this.setRatelimit(Number.isFinite(n) && n >= 0 ? n : 0);
+                })
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(14)
+          .backgroundColor(this.sheetSecondarySurfaceTone())
+          .borderRadius(18)
+          .border({ width: 1, color: this.sheetBorderTone() })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
     }
     .width('100%')
     .height('100%')
@@ -5071,6 +6146,210 @@ struct Index {
                 this.showAghWebSheet = false;
               }
             })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(20)
+        .backgroundColor(this.cardSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(26)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 14, color: this.cardShadowTone() })
+
+        Column({ space: 10 }) {
+          Text(this.language === 'en' ? 'Blocked services' : (this.language === 'zhHant' ? '服務屏蔽' : '服务屏蔽'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Row() {
+            Column({ space: 4 }) {
+              Text(this.language === 'en'
+                ? 'One-tap block common services (YouTube, TikTok, etc.)'
+                : (this.language === 'zhHant' ? '一鍵屏蔽常見服務（YouTube、TikTok 等）' : '一键屏蔽常见服务（YouTube、TikTok 等）'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.language === 'en'
+                ? `${this.blockedServiceIds.length} blocked`
+                : (this.language === 'zhHant' ? `已屏蔽 ${this.blockedServiceIds.length} 個` : `已屏蔽 ${this.blockedServiceIds.length} 个`))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Button(this.language === 'en' ? 'Manage' : (this.language === 'zhHant' ? '管理' : '管理'))
+              .fontSize(14)
+              .height(40)
+              .backgroundColor(this.coolChipSurfaceTone())
+              .fontColor(this.primaryTextColor())
+              .borderRadius(12)
+              .onClick(() => {
+                this.servicesSearchText = '';
+                this.showServicesSheet = true;
+              })
+              .bindContentCover(this.showServicesSheet, this.ServicesSheet(), {
+                modalTransition: ModalTransition.DEFAULT,
+                onDisappear: () => {
+                  this.showServicesSheet = false;
+                }
+              })
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(20)
+        .backgroundColor(this.cardSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(26)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 14, color: this.cardShadowTone() })
+
+        Column({ space: 10 }) {
+          Text(this.tri('Online subscriptions', '在线规则订阅', '線上規則訂閱'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Row() {
+            Column({ space: 4 }) {
+              Text(this.tri('Subscribe to public DNS blocklists (full engine only)',
+                '订阅公共 DNS 拦截列表（仅完整引擎）', '訂閱公共 DNS 攔截列表（僅完整引擎）'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.tri(`${this.enabledSubscriptionCount()} enabled / ${this.filterSubscriptions.length} total`,
+                `已启用 ${this.enabledSubscriptionCount()} / 共 ${this.filterSubscriptions.length}`,
+                `已啟用 ${this.enabledSubscriptionCount()} / 共 ${this.filterSubscriptions.length}`))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Button(this.tri('Manage', '管理', '管理'))
+              .fontSize(14)
+              .height(40)
+              .backgroundColor(this.coolChipSurfaceTone())
+              .fontColor(this.primaryTextColor())
+              .borderRadius(12)
+              .onClick(() => {
+                this.subFeedbackText = '';
+                this.subAddNameInput = '';
+                this.subAddUrlInput = '';
+                this.showSubscriptionsSheet = true;
+              })
+              .bindContentCover(this.showSubscriptionsSheet, this.SubscriptionsSheet(), {
+                modalTransition: ModalTransition.DEFAULT,
+                onDisappear: () => {
+                  this.showSubscriptionsSheet = false;
+                }
+              })
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(20)
+        .backgroundColor(this.cardSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(26)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 14, color: this.cardShadowTone() })
+
+        Column({ space: 10 }) {
+          Text(this.tri('DNS rewrites', 'DNS 重写', 'DNS 重寫'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Row() {
+            Column({ space: 4 }) {
+              Text(this.tri('Resolve domains to custom answers (full engine only)',
+                '将域名解析到自定义应答（仅完整引擎）', '將網域解析到自訂應答（僅完整引擎）'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.tri(`${this.dnsRewrites.length} rewrites`,
+                `共 ${this.dnsRewrites.length} 条`, `共 ${this.dnsRewrites.length} 條`))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Button(this.tri('Manage', '管理', '管理'))
+              .fontSize(14)
+              .height(40)
+              .backgroundColor(this.coolChipSurfaceTone())
+              .fontColor(this.primaryTextColor())
+              .borderRadius(12)
+              .onClick(() => {
+                this.rewriteFeedbackText = '';
+                this.rewriteAddDomainInput = '';
+                this.rewriteAddAnswerInput = '';
+                this.showRewritesSheet = true;
+              })
+              .bindContentCover(this.showRewritesSheet, this.RewritesSheet(), {
+                modalTransition: ModalTransition.DEFAULT,
+                onDisappear: () => {
+                  this.showRewritesSheet = false;
+                }
+              })
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(20)
+        .backgroundColor(this.cardSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(26)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 14, color: this.cardShadowTone() })
+
+        Column({ space: 10 }) {
+          Text(this.tri('Advanced DNS', 'DNS 高级设置', 'DNS 進階設定'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+          Row() {
+            Column({ space: 4 }) {
+              Text(this.tri('Blocking mode, upstream mode, cache, DNSSEC, rate limit (full engine only)',
+                '拦截方式、上游模式、缓存、DNSSEC、限速（仅完整引擎）',
+                '攔截方式、上游模式、快取、DNSSEC、限速（僅完整引擎）'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(`${this.blockingModeLabel(this.advancedDns.blockingMode)} · ${this.upstreamModeLabel(this.advancedDns.upstreamMode)}`)
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Button(this.tri('Manage', '管理', '管理'))
+              .fontSize(14)
+              .height(40)
+              .backgroundColor(this.coolChipSurfaceTone())
+              .fontColor(this.primaryTextColor())
+              .borderRadius(12)
+              .onClick(() => {
+                this.cacheSizeInput = `${this.advancedDns.cacheSizeMb}`;
+                this.ratelimitInput = `${this.advancedDns.ratelimit}`;
+                this.showAdvancedDnsSheet = true;
+              })
+              .bindContentCover(this.showAdvancedDnsSheet, this.AdvancedDnsSheet(), {
+                modalTransition: ModalTransition.DEFAULT,
+                onDisappear: () => {
+                  this.showAdvancedDnsSheet = false;
+                }
+              })
+          }
+          .width('100%')
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)
