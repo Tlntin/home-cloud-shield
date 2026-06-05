@@ -26,6 +26,11 @@ const ENTRY_ABILITY_NAME = `${VPN_BUNDLE_NAME}.EntryAbility`;
 const VPN_DIR_NAME = 'vpn';
 // AdGuardHome (full mode) web admin port; must match AGH_HTTP_ADDR in MyVpnExtAbility.
 const AGH_HTTP_PORT = 3000;
+// DNS query log: cap how many recent entries are parsed/held in memory (the file
+// can grow to tens of thousands of lines; parsing all every refresh tick and
+// rendering them at once freezes the UI), and how many to show per page.
+const MAX_QUERY_EVENTS = 2000;
+const DNS_PAGE_SIZE = 100;
 const STATUS_FILE_NAME = 'status.json';
 const RULES_FILE_NAME = 'filters.txt';
 const QUERY_LOG_FILE_NAME = 'dns_queries.jsonl';
@@ -539,6 +544,7 @@ struct Index {
   @State domainActionFilter: QueryActionFilter = 'all';
   @State dnsSearchText: string = '';
   @State dnsActionFilter: QueryActionFilter = 'all';
+  @State dnsPage: number = 0;
   @State configFeedbackText: string = '';
   @State dnsSheetFeedbackText: string = '';
   @State domainSheetFeedbackText: string = '';
@@ -1454,6 +1460,25 @@ struct Index {
     });
   }
 
+  // Total number of pages for the current filter/search (at least 1).
+  private dnsTotalPages(): number {
+    return Math.max(1, Math.ceil(this.filteredQueryEvents().length / DNS_PAGE_SIZE));
+  }
+
+  // Current page index, clamped into range (the filtered set can shrink when a
+  // filter/search is applied while on a later page).
+  private clampedDnsPage(): number {
+    return Math.min(Math.max(0, this.dnsPage), this.dnsTotalPages() - 1);
+  }
+
+  // The slice of filtered events for the current page. Rendering only one page
+  // (vs every entry) is what keeps the list responsive with large logs.
+  private pagedQueryEvents(): QueryLogEntry[] {
+    const all: QueryLogEntry[] = this.filteredQueryEvents();
+    const start: number = this.clampedDnsPage() * DNS_PAGE_SIZE;
+    return all.slice(start, start + DNS_PAGE_SIZE);
+  }
+
   private queryEntryText(item: QueryLogEntry): string {
     const requestBytes: number = item.requestBytes ?? 0;
     const responseBytes: number = item.responseBytes ?? 0;
@@ -1758,6 +1783,7 @@ struct Index {
     this.dnsSearchText = '';
     this.dnsActionFilter = 'all';
     this.domainActionFilter = 'all';
+    this.dnsPage = 0;
   }
 
   private confirmClearDnsRequests(): void {
@@ -2291,31 +2317,40 @@ struct Index {
       return;
     }
 
-    const lines: string[] = raw.split('\n');
-    const parsedEntries: QueryLogEntry[] = [];
+    const rawLines: string[] = raw.split('\n');
+    const nonEmpty: string[] = [];
     let total: number = 0;
     let allowed: number = 0;
     let blocked: number = 0;
+
+    // Cheap pass over every line for accurate summary counts (no JSON.parse).
+    for (const rawLine of rawLines) {
+      const line: string = rawLine.trim();
+      if (line.length === 0) {
+        continue;
+      }
+      nonEmpty.push(line);
+      total += 1;
+      if (line.indexOf('"action":"blocked"') >= 0) {
+        blocked += 1;
+      } else {
+        allowed += 1;
+      }
+    }
+
+    // Only JSON-parse the most recent MAX_QUERY_EVENTS lines for the list; parsing
+    // tens of thousands every 1.2s refresh tick would freeze the UI.
+    const startIdx: number = Math.max(0, nonEmpty.length - MAX_QUERY_EVENTS);
+    const parsedEntries: QueryLogEntry[] = [];
     let lastDomain: string = '';
     let lastRule: string = '';
     let requestBytes: number = 0;
     let responseBytes: number = 0;
     let totalDnsBytes: number = 0;
-
-    for (const rawLine of lines) {
-      const line: string = rawLine.trim();
-      if (line.length === 0) {
-        continue;
-      }
+    for (let i = startIdx; i < nonEmpty.length; i++) {
       try {
-        const entry = JSON.parse(line) as QueryLogEntry;
+        const entry = JSON.parse(nonEmpty[i]) as QueryLogEntry;
         parsedEntries.push(entry);
-        total += 1;
-        if (entry.action.trim().toLowerCase() === 'blocked') {
-          blocked += 1;
-        } else {
-          allowed += 1;
-        }
         requestBytes += entry.requestBytes ?? 0;
         responseBytes += entry.responseBytes ?? 0;
         totalDnsBytes += entry.totalDnsBytes ?? ((entry.requestBytes ?? 0) + (entry.responseBytes ?? 0));
@@ -3358,6 +3393,7 @@ struct Index {
         .padding({ left: 14, right: 14 })
         .onChange((value: string) => {
           this.dnsSearchText = value;
+          this.dnsPage = 0;
         })
 
       Row({ space: 8 }) {
@@ -3379,6 +3415,7 @@ struct Index {
           .shadow(this.dnsActionFilter === filter ? { radius: 16, color: this.selectedShadowTone(), offsetX: 0, offsetY: 4 } : { radius: 6, color: '#0A97C8E8', offsetX: 0, offsetY: 2 })
           .onClick(() => {
             this.dnsActionFilter = filter;
+            this.dnsPage = 0;
           })
         }, (filter: QueryActionFilter) => filter)
       }
@@ -3396,7 +3433,7 @@ struct Index {
         .justifyContent(FlexAlign.Center)
       } else {
         List({ scroller: this.dnsListScroller }) {
-          ForEach(this.filteredQueryEvents(), (item: QueryLogEntry) => {
+          ForEach(this.pagedQueryEvents(), (item: QueryLogEntry) => {
             ListItem() {
               Column({ space: 6 }) {
                 Row() {
@@ -3462,6 +3499,43 @@ struct Index {
         .scrollBar(BarState.Off)
         .cachedCount(8)
         .divider({ strokeWidth: 10, color: Color.Transparent })
+
+        if (this.dnsTotalPages() > 1) {
+          Row({ space: 12 }) {
+            Button(this.language === 'en' ? 'Prev' : (this.language === 'zhHant' ? '上一頁' : '上一页'))
+              .fontSize(13)
+              .height(36)
+              .layoutWeight(1)
+              .enabled(this.clampedDnsPage() > 0)
+              .opacity(this.clampedDnsPage() > 0 ? 1 : 0.4)
+              .backgroundColor(this.coolChipSurfaceTone())
+              .fontColor(this.primaryTextColor())
+              .borderRadius(12)
+              .onClick(() => {
+                this.dnsPage = Math.max(0, this.clampedDnsPage() - 1);
+                this.dnsListScroller.scrollEdge(Edge.Top);
+              })
+            Text(`${this.clampedDnsPage() + 1} / ${this.dnsTotalPages()}`)
+              .fontSize(13)
+              .fontColor(this.secondaryTextColor())
+              .textAlign(TextAlign.Center)
+            Button(this.language === 'en' ? 'Next' : (this.language === 'zhHant' ? '下一頁' : '下一页'))
+              .fontSize(13)
+              .height(36)
+              .layoutWeight(1)
+              .enabled(this.clampedDnsPage() < this.dnsTotalPages() - 1)
+              .opacity(this.clampedDnsPage() < this.dnsTotalPages() - 1 ? 1 : 0.4)
+              .backgroundColor(this.coolChipSurfaceTone())
+              .fontColor(this.primaryTextColor())
+              .borderRadius(12)
+              .onClick(() => {
+                this.dnsPage = Math.min(this.dnsTotalPages() - 1, this.clampedDnsPage() + 1);
+                this.dnsListScroller.scrollEdge(Edge.Top);
+              })
+          }
+          .width('100%')
+          .padding({ top: 8 })
+        }
       }
     }
     .width('100%')
@@ -3696,7 +3770,12 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .padding({ left: 14, right: 14, top: 18, bottom: Math.max(18, this.avoidPaddingBottom + 12) })
+    .padding({
+      left: 14,
+      right: 14,
+      top: Math.max(18, this.avoidPaddingTop + 12),
+      bottom: Math.max(18, this.avoidPaddingBottom + 12)
+    })
     .backgroundColor(this.sheetSurfaceTone())
   }
 
@@ -4110,6 +4189,7 @@ struct Index {
         })
         .onClick(() => {
           this.dnsSheetFeedbackText = '';
+          this.dnsPage = 0;
           this.showDnsSheet = true;
         })
         .bindSheet(this.showDnsSheet, this.DnsRequestsSheet(), {
@@ -4985,10 +5065,8 @@ struct Index {
                 this.showAghWebSheet = true;
               }
             })
-            .bindSheet(this.showAghWebSheet, this.AghWebSheet(), {
-              height: '90%',
-              backgroundColor: this.sheetSurfaceTone(),
-              showClose: false,
+            .bindContentCover(this.showAghWebSheet, this.AghWebSheet(), {
+              modalTransition: ModalTransition.DEFAULT,
               onDisappear: () => {
                 this.showAghWebSheet = false;
               }
