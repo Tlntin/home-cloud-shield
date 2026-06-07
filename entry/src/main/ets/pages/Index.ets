@@ -3436,6 +3436,21 @@ struct Index {
     });
   }
 
+  // Open the embedded AdGuardHome dashboard in the system browser instead of the
+  // in-app webview (easier to operate). The AGH HTTP server listens on device
+  // loopback, which is reachable by the browser on the same device.
+  private openAghInBrowser(): void {
+    const want: Want = {
+      action: 'ohos.want.action.viewData',
+      entities: ['entity.system.browsable'],
+      uri: `http://127.0.0.1:${AGH_HTTP_PORT}`
+    };
+    this.getHostContext().startAbility(want).catch((err: BusinessError) => {
+      this.errorText = this.errorMessage(err);
+      this.appendDebugLog(`==/vpn_ui/open_agh_browser_error/ ${this.errorMessage(err)}`);
+    });
+  }
+
   private disclaimerText(): string {
     return this.tri(
       'This app is an on-device DNS filtering tool.\n\n• The built-in "blocked services" list is derived from the AdGuardHome open-source project (servicelist.go). Online subscriptions and recommended lists are third-party open-source lists provided "as is", and may over- or under-block.\n\n• Whether to enable filtering, which services to block and which lists to subscribe to are entirely your own decisions and responsibility. Use it only on devices/networks you are authorized to manage, and never for any unlawful purpose.\n\n• The authors provide no warranty and are not liable for any service disruption, data loss or other damage arising from use of this app.\n\n• This app is open source under GPL-3.0.',
@@ -5413,7 +5428,7 @@ struct Index {
             Text(this.t('appTitle'))
               .fontSize(17)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
+              .fontColor(this.primaryTextColor())
             Blank()
             Row({ space: 10 }) {
               Button(this.engineModeLabel() + ' ▾')
@@ -5423,10 +5438,10 @@ struct Index {
                 .padding({ left: 11, right: 11 })
                 .fontSize(12)
                 .fontWeight(FontWeight.Medium)
-                .fontColor('#FFFFFF')
-                .backgroundColor('#1FFFFFFF')
+                .fontColor(this.selectedChipTextTone())
+                .backgroundColor(this.coolNeutralChipSurfaceTone())
                 .borderRadius(8)
-                .border({ width: 1, color: '#40FFFFFF' })
+                .border({ width: 1, color: this.cardBorderTone() })
                 .bindMenu([
                   {
                     value: this.tri('⚡ Lite', '⚡ 轻量', '⚡ 輕量'),
@@ -5446,14 +5461,15 @@ struct Index {
                   .width(7)
                   .height(7)
                   .borderRadius(4)
-                  .backgroundColor('#FFFFFF')
+                  .backgroundColor(this.status.running ? this.accentGreenTone() : this.mutedTextColor())
                 Text(this.status.running ? this.t('active') : this.t('idle'))
                   .fontSize(12)
                   .fontWeight(FontWeight.Medium)
-                  .fontColor('#FFFFFF')
+                  .fontColor(this.status.running ? this.accentGreenTone() : this.secondaryTextColor())
               }
               .padding({ left: 9, right: 12, top: 5, bottom: 5 })
-              .backgroundColor('#26FFFFFF')
+              .backgroundColor(this.status.running ? this.softGreenTone() : this.coolNeutralChipSurfaceTone())
+              .border({ width: 1, color: this.cardBorderTone() })
               .borderRadius(12)
               .alignItems(VerticalAlign.Center)
             }
@@ -5465,30 +5481,40 @@ struct Index {
           Column({ space: 10 }) {
             Stack() {
               Text(this.status.running ? '✓' : '◈')
-                .fontSize(38)
+                .fontSize(40)
                 .fontWeight(FontWeight.Bold)
                 .fontColor('#FFFFFF')
             }
-            .width(80)
-            .height(80)
-            .borderRadius(40)
-            .backgroundColor('#33FFFFFF')
-            .border({ width: 1.5, color: '#59FFFFFF' })
+            .width(86)
+            .height(86)
+            .borderRadius(43)
+            .shadow({ radius: 18, color: this.status.running ? '#5910B981' : '#590099CC', offsetX: 0, offsetY: 6 })
+            .linearGradient({
+              angle: 135,
+              colors: this.status.running
+                ? (this.isDarkModeActive()
+                    ? [['#10997D', 0.0], ['#047D5F', 1.0]]
+                    : [['#34D399', 0.0], ['#10B981', 1.0]])
+                : (this.isDarkModeActive()
+                    ? [['#06B6D4', 0.0], ['#0891B2', 1.0]]
+                    : [['#00D9FF', 0.0], ['#0099CC', 1.0]])
+            })
 
             Text(this.status.running ? this.t('running') : this.t('stopped'))
               .fontSize(23)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
+              .fontColor(this.primaryTextColor())
             Text(this.status.running ? this.t('runningHint') : this.t('stoppedHint'))
               .fontSize(13)
               .lineHeight(19)
-              .fontColor('#E6FFFFFF')
+              .fontColor(this.secondaryTextColor())
               .textAlign(TextAlign.Center)
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
           .width('100%')
           .alignItems(HorizontalAlign.Center)
+          .margin({ top: 4, bottom: 4 })
 
           Button(this.stopping
             ? this.tri('Stopping…', '停止中…', '停止中…')
@@ -5496,12 +5522,14 @@ struct Index {
             .enabled(!this.busy && !this.stopping)
             .width('100%')
             .height(50)
-            .fontSize(17)
+            .fontSize(16)
             .fontWeight(FontWeight.Medium)
-            .backgroundColor((this.busy || this.stopping) ? '#4DFFFFFF' : '#FFFFFF')
-            .fontColor((this.busy || this.stopping) ? '#FFFFFF' : (this.status.running ? '#10B981' : '#0099CC'))
+            .backgroundColor((this.busy || this.stopping)
+              ? this.chipSurfaceTone()
+              : (this.status.running ? '#10B981' : '#0099CC'))
+            .fontColor((this.busy || this.stopping) ? this.secondaryTextColor() : '#FFFFFF')
             .borderRadius(16)
-            .shadow({ radius: 12, color: '#22000000' })
+            .shadow({ radius: 12, color: this.status.running ? '#3310B981' : '#330099CC' })
             .onClick(() => {
               if (this.status.running) {
                 this.stopVpn().catch((err: BusinessError) => {
@@ -5517,12 +5545,13 @@ struct Index {
           if (this.status.running && !this.busy && !this.stopping) {
             Button(this.t('restartFilter'))
               .width('100%')
-              .height(40)
-              .fontSize(14)
+              .height(44)
+              .fontSize(16)
               .fontWeight(FontWeight.Medium)
-              .backgroundColor('#26FFFFFF')
-              .fontColor('#FFFFFF')
+              .backgroundColor(this.softGreenTone())
+              .fontColor(this.accentGreenTone())
               .borderRadius(14)
+              .border({ width: 1, color: this.cardBorderTone() })
               .onClick(() => {
                 this.startVpn().catch((err: BusinessError) => {
                   this.errorText = this.errorMessage(err);
@@ -5533,18 +5562,10 @@ struct Index {
         .width('100%')
         .alignItems(HorizontalAlign.Start)
         .padding(22)
+        .backgroundColor(this.cardSurfaceTone())
         .borderRadius(26)
-        .shadow({ radius: 24, color: this.status.running ? '#4D34D399' : '#4D00C2E0' })
-        .linearGradient({
-          angle: 135,
-          colors: this.status.running
-            ? (this.isDarkModeActive()
-                ? [['#10997D', 0.0], ['#047D5F', 1.0]]
-                : [['#34D399', 0.0], ['#10B981', 1.0]])
-            : (this.isDarkModeActive()
-                ? [['#06B6D4', 0.0], ['#0891B2', 1.0]]
-                : [['#00D9FF', 0.0], ['#0099CC', 1.0]])
-        })
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 18, color: this.cardShadowTone() })
 
         // ===== Quick stats: allowed / blocked =====
         Row({ space: 12 }) {
@@ -6588,9 +6609,9 @@ struct Index {
             Row({ space: 12 }) {
               this.SettingsIconText({ glyph: '⌘', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
                 title: this.tri('AdGuardHome dashboard', 'AdGuardHome 管理面板', 'AdGuardHome 管理面板'),
-                desc: this.tri('Requires full engine running', '需完整引擎并正在运行', '需完整引擎並正在執行') })
-              Text('›')
-                .fontSize(20)
+                desc: this.tri('Opens in browser · needs full engine running', '浏览器打开 · 需完整引擎并正在运行', '瀏覽器開啟 · 需完整引擎並正在執行') })
+              Text('↗')
+                .fontSize(18)
                 .fontColor(this.secondaryTextColor())
             }
             .width('100%')
@@ -6611,13 +6632,7 @@ struct Index {
                 }
                 return;
               }
-              this.showAghWebSheet = true;
-            })
-            .bindContentCover(this.showAghWebSheet, this.AghWebSheet(), {
-              modalTransition: ModalTransition.DEFAULT,
-              onDisappear: () => {
-                this.showAghWebSheet = false;
-              }
+              this.openAghInBrowser();
             })
 
             if (!this.fullModeEnabled) {
