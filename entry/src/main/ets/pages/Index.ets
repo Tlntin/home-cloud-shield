@@ -542,6 +542,7 @@ interface PersistState {
   filterSubscriptions?: FilterSubscription[];
   dnsRewrites?: DnsRewriteRule[];
   advancedDns?: AdvancedDnsConfig;
+  disclaimerAccepted?: boolean;
   currentTab: number;
 }
 
@@ -674,6 +675,8 @@ struct Index {
   @State showImportMenu: boolean = false;
   @State showRecommendedLibrary: boolean = false;
   @State showDisclaimerSheet: boolean = false;
+  @State showFirstRunDisclaimer: boolean = false;
+  private disclaimerAccepted: boolean = false;
   @State appVersionName: string = 'loading';
   @State appVersionCode: number = 0;
   @State avoidPaddingTop: number = 0;
@@ -2448,6 +2451,11 @@ struct Index {
     this.ensurePromptAction();
     this.ensureRuntimeFiles();
     this.loadPersistState();
+    // First launch (or after data clear / reinstall): require accepting the
+    // disclaimer before the app can be used; declining exits the app.
+    if (!this.disclaimerAccepted) {
+      this.showFirstRunDisclaimer = true;
+    }
     this.applyPreferredLanguage(this.language);
     this.ensureRuleProfilesInitialized();
     this.autoStartAttempted = false;
@@ -2658,6 +2666,9 @@ struct Index {
       if (state.advancedDns !== undefined && state.advancedDns !== null) {
         this.advancedDns = this.normalizeAdvancedDns(state.advancedDns);
       }
+      if (typeof state.disclaimerAccepted === 'boolean') {
+        this.disclaimerAccepted = state.disclaimerAccepted;
+      }
       if (Array.isArray(state.ruleProfiles)) {
         const nextProfiles: RuleProfile[] = [];
         state.ruleProfiles.forEach((item: RuleProfile, index: number) => {
@@ -2711,6 +2722,7 @@ struct Index {
       filterSubscriptions: this.filterSubscriptions,
       dnsRewrites: this.dnsRewrites,
       advancedDns: this.advancedDns,
+      disclaimerAccepted: this.disclaimerAccepted,
       currentTab: this.currentTab,
     };
     this.writeTextFile(this.stateFilePath, JSON.stringify(state));
@@ -3456,6 +3468,85 @@ struct Index {
       'This app is an on-device DNS filtering tool.\n\n• The built-in "blocked services" list is derived from the AdGuardHome open-source project (servicelist.go). Online subscriptions and recommended lists are third-party open-source lists provided "as is", and may over- or under-block.\n\n• Whether to enable filtering, which services to block and which lists to subscribe to are entirely your own decisions and responsibility. Use it only on devices/networks you are authorized to manage, and never for any unlawful purpose.\n\n• The authors provide no warranty and are not liable for any service disruption, data loss or other damage arising from use of this app.\n\n• This app is open source under GPL-3.0.',
       '本应用是运行在本机的 DNS 过滤工具。\n\n• 内置「服务屏蔽」清单来自 AdGuardHome 开源项目（servicelist.go）；在线订阅与推荐规则库均为第三方开源列表，按「现状」提供，可能存在误拦截或漏拦截。\n\n• 是否启用过滤、屏蔽哪些服务、订阅哪些列表，均由你自行决定并承担相应后果。请仅在你有权管理的设备 / 网络上使用，请勿用于任何非法用途。\n\n• 作者不提供任何担保，且不对因使用本应用造成的服务不可用、数据丢失或其他损失承担责任。\n\n• 本应用基于 GPL-3.0 开源。',
       '本應用是執行在本機的 DNS 過濾工具。\n\n• 內建「服務屏蔽」清單來自 AdGuardHome 開源專案（servicelist.go）；線上訂閱與推薦規則庫均為第三方開源清單，按「現狀」提供，可能存在誤攔截或漏攔截。\n\n• 是否啟用過濾、屏蔽哪些服務、訂閱哪些清單，均由你自行決定並承擔相應後果。請僅在你有權管理的裝置 / 網路上使用，請勿用於任何非法用途。\n\n• 作者不提供任何擔保，且不對因使用本應用造成的服務不可用、資料遺失或其他損失承擔責任。\n\n• 本應用基於 GPL-3.0 開源。');
+  }
+
+  private acceptDisclaimer(): void {
+    this.disclaimerAccepted = true;
+    this.showFirstRunDisclaimer = false;
+    this.savePersistState();
+  }
+
+  private declineDisclaimerAndExit(): void {
+    try {
+      this.getHostContext().terminateSelf();
+    } catch (_) {
+    }
+  }
+
+  // Mandatory first-launch disclaimer gate: must accept to continue, or exit.
+  @Builder
+  private FirstRunDisclaimer() {
+    Column() {
+      Column({ space: 14 }) {
+        Text(this.tri('Disclaimer', '免责声明', '免責聲明'))
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.primaryTextColor())
+          .width('100%')
+          .textAlign(TextAlign.Center)
+
+        Scroll() {
+          Text(this.disclaimerText())
+            .fontSize(14)
+            .lineHeight(23)
+            .fontColor(this.secondaryTextColor())
+            .textAlign(TextAlign.Start)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .align(Alignment.TopStart)
+        .scrollBar(BarState.Off)
+
+        Row({ space: 10 }) {
+          Button(this.tri('Decline & exit', '不接受并退出', '不接受並退出'))
+            .layoutWeight(1)
+            .height(46)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .backgroundColor(this.softRedTone())
+            .fontColor(this.isDarkModeActive() ? '#FF8A8A' : '#B42318')
+            .borderRadius(14)
+            .onClick(() => {
+              this.declineDisclaimerAndExit();
+            })
+          Button(this.tri('Accept', '接受', '接受'))
+            .layoutWeight(1)
+            .height(46)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .backgroundColor(this.accentBlueTone())
+            .fontColor('#FFFFFF')
+            .borderRadius(14)
+            .onClick(() => {
+              this.acceptDisclaimer();
+            })
+        }
+        .width('100%')
+      }
+      .width('88%')
+      .height('70%')
+      .alignItems(HorizontalAlign.Start)
+      .padding(22)
+      .backgroundColor(this.cardSurfaceTone())
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .shadow({ radius: 24, color: this.cardShadowTone() })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .backgroundColor('#A6000000')
   }
 
   @Builder
@@ -7372,6 +7463,11 @@ struct Index {
       .height('100%')
       if (deviceInfo.sdkApiVersion < 23) {
         this.ClassicTabHost()
+      }
+
+      // First-launch disclaimer gate sits on top of everything.
+      if (this.showFirstRunDisclaimer) {
+        this.FirstRunDisclaimer()
       }
     }
     .width('100%')

@@ -27,6 +27,7 @@ This layout helps keep the build chain reproducible and makes it easier to prepa
 ## Table of Contents
 
 - [Get a Build](#get-a-build)
+- [Changelog](#changelog)
 - [Overview](#overview)
 - [Filtering Engine Status](#filtering-engine-status)
 - [Screenshots](#screenshots)
@@ -35,6 +36,7 @@ This layout helps keep the build chain reproducible and makes it easier to prepa
 - [Good Fit For](#good-fit-for)
 - [Not a Good Fit For](#not-a-good-fit-for)
 - [Roadmap](#roadmap)
+- [Disclaimer](#disclaimer)
 - [Repository Layout](#repository-layout)
 - [Quick Start](#quick-start)
 - [Build Notes](#build-notes)
@@ -67,6 +69,10 @@ Of course, you can also build and install the app directly with **DevEco Studio*
 - An `unsigned` package is more suitable for build verification, workflow validation, or checking artifacts before secondary signing. Whether it can be installed directly depends on your device environment and signing setup.
 - If signed or distribution-ready artifacts are provided later, the instructions on the Releases page should be treated as the source of truth.
 
+## Changelog
+
+Current version: **v0.0.3**. The full bilingual changelog is in [`docs/CHANGELOG.md`](./docs/CHANGELOG.md).
+
 ## Overview
 
 The current application bundle name is `com.tlntin.home_cloud_shield`, and the product name shown in the UI is **栖云盾**.
@@ -81,20 +87,12 @@ Based on the current project structure and implemented pages, the project focuse
 
 ## Filtering Engine Status
 
-At runtime, the app currently uses the **lightweight DNS filtering implementation** in `entry/src/main/cpp/vpnclient_bridge.cpp`, rather than the full `AdGuardHome` runtime.
+The app now supports **two filtering engines**, switchable directly from a **dropdown on the home page**:
 
-The `native/adguardhome-ohos-lib/` directory is currently kept mainly for the following purposes:
+- **Lightweight mode (default)**: uses the lightweight DNS filtering implementation in `entry/src/main/cpp/vpnclient_bridge.cpp`, prioritizing lower power usage and faster response for mobile background operation.
+- **Full mode (AdGuardHome)**: wires in the ported `AdGuardHome` filtering core from `native/adguardhome-ohos-lib/` for broader rule compatibility, and unlocks **blocked services, online rule subscriptions, DNS rewrites, advanced DNS settings, and the AdGuardHome dashboard**; it is more resource-intensive and can be enabled on demand.
 
-- preserving the OHOS porting project and build chain for `AdGuardHome`
-- validating that the shared library can be built
-- preparing for possible future integration of a full filtering engine
-
-For now, the app does **not** directly enable the full `AdGuardHome` library as its default filtering engine, mainly due to concerns around **power usage, resource cost, and mobile-device suitability**.
-
-The long-term plan is to support two modes:
-
-- **Lightweight mode**: continue using the current C/C++ implementation, prioritizing lower power usage and faster response for mobile background operation
-- **Full mode**: try integrating the complete `AdGuardHome` filtering capability when the trade-offs become acceptable
+> For power usage and mobile suitability, the default remains the lightweight mode; full mode is wired in as an optional engine and is still being polished. Subscriptions, rewrites, advanced DNS, and the dashboard only take effect while the full engine is running.
 
 ### Compatibility scope of the current lightweight engine
 
@@ -122,17 +120,22 @@ So the more accurate description of this project today is: a **HarmonyOS local D
 
 ## Screenshots
 
-| Home | Config | Me |
-| --- | --- | --- |
-| ![Home](./images/home.jpg) | ![Config](./images/configs.jpg) | ![Me](./images/me.jpg) |
+| Home | Config | Me | Settings |
+| --- | --- | --- | --- |
+| ![Home](./images/home.jpg) | ![Config](./images/configs.jpg) | ![Me](./images/me.jpg) | ![Settings](./images/settings.jpg) |
 
 ## Features
 
+- **Dual filtering engine**: lightweight / full (AdGuardHome), switchable from a dropdown on the home page.
 - **Local DNS filtering**: routes DNS traffic through a local VPN workflow.
 - **Rule management**: supports importing, editing, enabling, and exporting AdGuard-style DNS rules.
+- **Full-mode-only capabilities**: blocked services (one-tap block common services, with tap-to-view of the actual domain rules), online rule subscriptions (with a recommended list library), DNS rewrites, advanced DNS settings (blocking mode / upstream mode / cache / DNSSEC / rate limit), and the AdGuardHome dashboard (opens in the system browser).
+- **Custom upstream DNS**: multiple upstreams plus built-in presets (AliDNS / DNSPod / Baidu / AdGuard).
 - **Log visibility**: shows recent DNS requests, matched rules, domain stats, and debug logs.
+- **Modern UI**: white-card hero, config overview stats (local + subscriptions), grouped Settings / Me pages, light/dark theme, and **instant in-app language switching**.
+- **Background keep-alive**: audio / location keep-alive and auto-start filtering.
 - **Native bridge integration**: connects the OpenHarmony app layer with lower-level logic through `C/C++ + NAPI`.
-- **Localization foundation**: the app already includes language resources for Simplified Chinese, English, and Traditional Chinese.
+- **Localization**: built-in Simplified Chinese, English, and Traditional Chinese; switching takes effect instantly.
 - **Open-source release readiness**: keeps GPL-related source code, third-party notices, and submodule metadata in the repository.
 
 ## Current Limitations
@@ -140,7 +143,7 @@ So the more accurate description of this project today is: a **HarmonyOS local D
 - The current filtering capability focuses on **DNS domain filtering**, not a full network proxy stack or the complete `AdGuardHome` feature set.
 - Rule compatibility is currently **partial AdGuard-style DNS rule compatibility**, not full syntax coverage.
 - Because the project depends on a local VPN extension and native bridge integration, validation on a **physical HarmonyOS device** is currently recommended.
-- `native/adguardhome-ohos-lib/` is currently kept mainly for porting and build validation, and is not yet wired in as the app's default runtime filtering core.
+- Full mode (`AdGuardHome`) is wired in as an **optional engine**, but it is more resource-intensive, so the default remains the lightweight mode; full mode is still being polished.
 
 ## Good Fit For
 
@@ -158,12 +161,11 @@ So the more accurate description of this project today is: a **HarmonyOS local D
 
 ## Roadmap
 
-- **Near term**: continue improving the lightweight DNS filtering engine, rule management UX, log visibility, and real-device stability.
-- **Mid term**: add clearer rule-compatibility notes, better build artifact documentation, and more complete release instructions.
-- **Mid to long term**: evaluate the cost/benefit of integrating the full `AdGuardHome` filtering capability on HarmonyOS.
-- **Target shape**: support two filtering modes in parallel:
-	- **Lightweight mode**: optimized for lower power usage, mobile background operation, and fast response.
-	- **Full mode**: optimized for broader rule compatibility and more complete filtering behavior.
+- **Done**: lightweight / full (AdGuardHome) dual engine, rule management, log visibility, online subscriptions / DNS rewrites / advanced DNS settings, the modern UI, and instant in-app localization.
+- **Near term**: keep polishing full-mode stability and power usage, and add clearer rule-compatibility notes and build-artifact documentation.
+- **Mid to long term**: further align the capabilities of the lightweight and full modes, and improve the mobile background experience and release flow.
+
+> Per-version details are in [`docs/CHANGELOG.md`](./docs/CHANGELOG.md).
 
 ## Repository Layout
 
@@ -241,6 +243,13 @@ The AdGuardHome OHOS shared-library scripts are located at:
 For SO library build details, see:
 
 - [`native/adguardhome-ohos-lib/README.md`](./native/adguardhome-ohos-lib/README.md)
+
+## Disclaimer
+
+- This app is an on-device **DNS filtering tool**. The built-in "blocked services" list is derived from the `AdGuardHome` open-source project (`servicelist.go`); online subscriptions and recommended lists are **third-party open-source lists** provided "as is", and may over- or under-block.
+- Whether to enable filtering, which services to block, and which lists to subscribe to are **entirely your own decisions and responsibility**. Use it only on **devices/networks you are authorized to manage**, and never for any unlawful purpose.
+- The authors provide no warranty and are not liable for any service disruption, data loss, or other damage arising from use of this app.
+- This app is open source under `GPL-3.0-only`. **On first launch you must read and accept this disclaimer before using the app**; declining exits the app. You can re-read it anytime via "Me → About → Disclaimer".
 
 ## Open Source and License
 
