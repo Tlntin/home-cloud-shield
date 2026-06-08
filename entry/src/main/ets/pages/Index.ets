@@ -3,7 +3,7 @@ import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { picker, fileIo } from '@kit.CoreFileKit';
 import { i18n, resourceManager } from '@kit.LocalizationKit';
-import { vpnExtension } from '@kit.NetworkKit';
+import { vpnExtension, socket } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { media } from '@kit.MediaKit';
 import { audio } from '@kit.AudioKit';
@@ -26,13 +26,18 @@ const VPN_MODULE_NAME = 'entry';
 const VPN_ABILITY_NAME = 'MyVpnExtAbility';
 const ENTRY_ABILITY_NAME = `${VPN_BUNDLE_NAME}.EntryAbility`;
 const VPN_DIR_NAME = 'vpn';
-// AdGuardHome (full mode) web admin port; must match AGH_HTTP_ADDR in MyVpnExtAbility.
+// AdGuardHome (full mode) web admin panel — default port. The effective port is
+// user-configurable (aghHttpPort) and passed to the VPN extension via the Want.
 const AGH_HTTP_PORT = 3000;
 // DNS server / coexist mode (experimental): the embedded AdGuardHome engine runs
 // in THIS (main) process as a standalone loopback DNS server, with no VPN, so a
 // separate VPN/proxy app can stay connected and use 127.0.0.1:AGH_DNS_PORT as its
 // DNS upstream. AGH_DNS_PORT must match AGH_DNS_PORT in MyVpnExtAbility.
 const AGH_DNS_PORT = 5354;
+// Allowed range for the user-configurable DNS-proxy port. Unprivileged apps
+// cannot bind ports below 1024.
+const DNS_PROXY_PORT_MIN = 1024;
+const DNS_PROXY_PORT_MAX = 65535;
 const AGH_CONFIG_FILE_NAME = 'AdGuardHome.yaml';
 const AGH_WORK_DIR_NAME = 'agh';
 const AGH_LOG_FILE_NAME = 'agh.log';
@@ -113,7 +118,9 @@ type LanguageKey =
   | 'continueLabel' | 'keepAliveWarnTitle' | 'keepAliveWarnMessage'
   | 'dnsProxyTitle' | 'dnsProxyDesc' | 'dnsProxyCopied' | 'dnsProxyStart' | 'dnsProxyStop'
   | 'dnsProxyDashboard' | 'dnsProxyDashboardDesc' | 'dnsProxyRunningStatus' | 'dnsProxyStoppedStatus'
-  | 'dnsProxyStopVpnFirst' | 'dnsProxyEngineLite' | 'dnsProxyEngineFull';
+  | 'dnsProxyStopVpnFirst' | 'dnsProxyEngineLite' | 'dnsProxyEngineFull'
+  | 'modeVpn' | 'modeDnsProxy' | 'dnsProxyPortTitle' | 'dnsProxyPortHint' | 'dnsProxyPortInvalid'
+  | 'aghPanelPortTitle' | 'aghPanelPortHint' | 'aghPanelPortConflict' | 'dnsProxyPortBumped';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -361,6 +368,15 @@ function resolveStringResource(key: LanguageKey): number {
     case 'dnsProxyStopVpnFirst': return $r('app.string.dnsProxyStopVpnFirst').id;
     case 'dnsProxyEngineLite': return $r('app.string.dnsProxyEngineLite').id;
     case 'dnsProxyEngineFull': return $r('app.string.dnsProxyEngineFull').id;
+    case 'modeVpn': return $r('app.string.modeVpn').id;
+    case 'modeDnsProxy': return $r('app.string.modeDnsProxy').id;
+    case 'dnsProxyPortTitle': return $r('app.string.dnsProxyPortTitle').id;
+    case 'dnsProxyPortHint': return $r('app.string.dnsProxyPortHint').id;
+    case 'dnsProxyPortInvalid': return $r('app.string.dnsProxyPortInvalid').id;
+    case 'aghPanelPortTitle': return $r('app.string.aghPanelPortTitle').id;
+    case 'aghPanelPortHint': return $r('app.string.aghPanelPortHint').id;
+    case 'aghPanelPortConflict': return $r('app.string.aghPanelPortConflict').id;
+    case 'dnsProxyPortBumped': return $r('app.string.dnsProxyPortBumped').id;
   }
 }
 
@@ -574,6 +590,9 @@ interface PersistState {
   clearDnsLogOnStart?: boolean;
   clearDebugLogOnStart?: boolean;
   fullModeEnabled?: boolean;
+  proxyModeEnabled?: boolean;
+  dnsProxyPort?: string;
+  aghHttpPort?: string;
   blockedServiceIds?: string[];
   filterSubscriptions?: FilterSubscription[];
   dnsRewrites?: DnsRewriteRule[];
@@ -686,11 +705,28 @@ struct Index {
   @State clearDnsLogOnStart: boolean = false;
   @State clearDebugLogOnStart: boolean = false;
   @State fullModeEnabled: boolean = false;
+  // Network mode (home two-axis selector): false = whole-device VPN, true = pure
+  // DNS proxy / coexist (no VPN). Orthogonal to the engine (lightweight/full).
+  @State proxyModeEnabled: boolean = false;
   // Experimental DNS server / coexist mode (no VPN). Tracked separately from
   // `status` (which mirrors the VPN extension's status.json); here AGH runs in
   // this process, so we own the lifecycle flag directly.
   @State dnsProxyRunning: boolean = false;
   @State dnsProxyStatusText: string = '';
+  // Local TCP port the DNS proxy listens on (DNS-proxy mode only; VPN mode uses a
+  // fixed internal loopback port). Stored as text for the input; validated to
+  // 1024-65535 at use, falling back to the default.
+  @State dnsProxyPort: string = `${AGH_DNS_PORT}`;
+  @State dnsProxyPortFeedback: string = '';
+  // AdGuardHome web admin panel port (full engine only). Same validation as the
+  // DNS-proxy port; must differ from it. Applies to both full-mode VPN and
+  // full-mode DNS proxy.
+  @State aghHttpPort: string = `${AGH_HTTP_PORT}`;
+  @State aghHttpPortFeedback: string = '';
+  // Actual bound ports while the DNS proxy runs (may differ from the configured
+  // values when those were busy and auto-incremented). 0 = use the configured.
+  @State dnsProxyActivePort: number = 0;
+  @State aghActiveHttpPort: number = 0;
   @State blockedServiceIds: string[] = [];
   @State showServicesSheet: boolean = false;
   @State servicesSearchText: string = '';
@@ -1639,7 +1675,15 @@ struct Index {
   private updateFullModeEnabled(value: boolean): void {
     this.fullModeEnabled = value;
     this.savePersistState();
-    if (this.status.running && !this.busy) {
+    if (this.busy) {
+      return;
+    }
+    // Restart the active mode so the new engine applies immediately.
+    if (this.proxyModeEnabled) {
+      if (this.dnsProxyRunning) {
+        this.startDnsProxy();
+      }
+    } else if (this.status.running) {
       this.startVpn();
     }
   }
@@ -1668,6 +1712,124 @@ struct Index {
     return this.fullModeEnabled
       ? this.tri('🔒 Full', '🔒 完整', '🔒 完整')
       : this.tri('⚡ Lite', '⚡ 轻量', '⚡ 輕量');
+  }
+
+  // Whether the currently selected network mode is running. VPN mode tracks the
+  // extension's status.json; DNS-proxy mode tracks the in-process server flag.
+  private activeRunning(): boolean {
+    return this.proxyModeEnabled ? this.dnsProxyRunning : this.status.running;
+  }
+
+  // Switch the home network mode. Only allowed while nothing is running (the
+  // segmented control is disabled otherwise), so the two modes never overlap.
+  private setNetworkProxyMode(proxy: boolean): void {
+    if (this.proxyModeEnabled === proxy) {
+      return;
+    }
+    this.proxyModeEnabled = proxy;
+    this.savePersistState();
+  }
+
+  // The validated DNS-proxy listen port (1024-65535). Falls back to the default
+  // when the field is empty or out of range; the unprivileged app cannot bind
+  // ports below 1024.
+  private dnsProxyPortNumber(): number {
+    const p: number = parseInt(this.dnsProxyPort.trim(), 10);
+    if (Number.isFinite(p) && p >= DNS_PROXY_PORT_MIN && p <= DNS_PROXY_PORT_MAX) {
+      return p;
+    }
+    return AGH_DNS_PORT;
+  }
+
+  // Persist an edited DNS-proxy port, with inline validation feedback.
+  private onDnsProxyPortChange(value: string): void {
+    this.dnsProxyPort = value;
+    const trimmed: string = value.trim();
+    const p: number = parseInt(trimmed, 10);
+    if (trimmed.length === 0 || !Number.isFinite(p) || p < DNS_PROXY_PORT_MIN || p > DNS_PROXY_PORT_MAX) {
+      this.dnsProxyPortFeedback = this.t('dnsProxyPortInvalid');
+    } else {
+      this.dnsProxyPortFeedback = '';
+    }
+    this.savePersistState();
+  }
+
+  // The validated AdGuardHome web panel port (full engine only). Falls back to
+  // the default when empty/out of range. Conflicts with the DNS port are only a
+  // UI warning; if ignored, AdGuardHome surfaces a bind error on start.
+  private aghHttpPortNumber(): number {
+    const p: number = parseInt(this.aghHttpPort.trim(), 10);
+    if (Number.isFinite(p) && p >= DNS_PROXY_PORT_MIN && p <= DNS_PROXY_PORT_MAX) {
+      return p;
+    }
+    return AGH_HTTP_PORT;
+  }
+
+  // The loopback port to display/use for the DNS proxy: the actual bound port
+  // while running, otherwise the configured one.
+  private displayedDnsPort(): number {
+    return (this.dnsProxyRunning && this.dnsProxyActivePort > 0) ? this.dnsProxyActivePort : this.dnsProxyPortNumber();
+  }
+
+  // The effective AdGuardHome panel port for opening the dashboard.
+  private effectiveHttpPort(): number {
+    return (this.dnsProxyRunning && this.aghActiveHttpPort > 0) ? this.aghActiveHttpPort : this.aghHttpPortNumber();
+  }
+
+  // Probe whether a loopback TCP port is free by trying to listen on it, then
+  // releasing it. Resolves true if free (or if probing is unavailable, so the
+  // real bind makes the final call), false if the port is in use.
+  private isTcpPortFree(port: number): Promise<boolean> {
+    return new Promise<boolean>((resolve: (free: boolean) => void) => {
+      try {
+        const server: socket.TCPSocketServer = socket.constructTCPSocketServerInstance();
+        const addr: socket.NetAddress = { address: '127.0.0.1', port: port, family: 1 };
+        server.listen(addr).then(() => {
+          server.close().then(() => {
+            resolve(true);
+          }).catch(() => {
+            resolve(true);
+          });
+        }).catch(() => {
+          resolve(false);
+        });
+      } catch (_) {
+        resolve(true);
+      }
+    });
+  }
+
+  // Find the first free loopback TCP port at or above startPort (scanning up to
+  // maxTries ports). Falls back to startPort when none is found in range — the
+  // real start then surfaces the bind error normally.
+  private async findFreeTcpPort(startPort: number, maxTries: number): Promise<number> {
+    for (let i = 0; i < maxTries; i++) {
+      const p: number = startPort + i;
+      if (p > DNS_PROXY_PORT_MAX) {
+        break;
+      }
+      const free: boolean = await this.isTcpPortFree(p);
+      if (free) {
+        return p;
+      }
+    }
+    return startPort;
+  }
+
+  // Persist an edited panel port, with inline validation feedback (range + must
+  // differ from the DNS-proxy port).
+  private onAghHttpPortChange(value: string): void {
+    this.aghHttpPort = value;
+    const trimmed: string = value.trim();
+    const p: number = parseInt(trimmed, 10);
+    if (trimmed.length === 0 || !Number.isFinite(p) || p < DNS_PROXY_PORT_MIN || p > DNS_PROXY_PORT_MAX) {
+      this.aghHttpPortFeedback = this.t('dnsProxyPortInvalid');
+    } else if (p === this.dnsProxyPortNumber()) {
+      this.aghHttpPortFeedback = this.t('aghPanelPortConflict');
+    } else {
+      this.aghHttpPortFeedback = '';
+    }
+    this.savePersistState();
   }
 
   // Whether a recommended preset list is already present in the subscriptions.
@@ -2586,6 +2748,7 @@ struct Index {
         aghFiltersJson: JSON.stringify(this.filterSubscriptions),
         aghRewritesJson: JSON.stringify(this.dnsRewrites),
         aghAdvancedJson: JSON.stringify(this.advancedDns),
+        aghHttpPort: this.aghHttpPortNumber(),
       },
     };
   }
@@ -2667,6 +2830,15 @@ struct Index {
       }
       if (typeof state.fullModeEnabled === 'boolean') {
         this.fullModeEnabled = state.fullModeEnabled;
+      }
+      if (typeof state.proxyModeEnabled === 'boolean') {
+        this.proxyModeEnabled = state.proxyModeEnabled;
+      }
+      if (typeof state.dnsProxyPort === 'string' && state.dnsProxyPort.length > 0) {
+        this.dnsProxyPort = state.dnsProxyPort;
+      }
+      if (typeof state.aghHttpPort === 'string' && state.aghHttpPort.length > 0) {
+        this.aghHttpPort = state.aghHttpPort;
       }
       if (Array.isArray(state.blockedServiceIds)) {
         const ids: string[] = [];
@@ -2760,6 +2932,9 @@ struct Index {
       clearDnsLogOnStart: this.clearDnsLogOnStart,
       clearDebugLogOnStart: this.clearDebugLogOnStart,
       fullModeEnabled: this.fullModeEnabled,
+      proxyModeEnabled: this.proxyModeEnabled,
+      dnsProxyPort: this.dnsProxyPort,
+      aghHttpPort: this.aghHttpPort,
       blockedServiceIds: this.blockedServiceIds,
       filterSubscriptions: this.filterSubscriptions,
       dnsRewrites: this.dnsRewrites,
@@ -3509,7 +3684,7 @@ struct Index {
     const want: Want = {
       action: 'ohos.want.action.viewData',
       entities: ['entity.system.browsable'],
-      uri: `http://127.0.0.1:${AGH_HTTP_PORT}`
+      uri: `http://127.0.0.1:${this.effectiveHttpPort()}`
     };
     this.getHostContext().startAbility(want).catch((err: BusinessError) => {
       this.errorText = this.errorMessage(err);
@@ -3522,7 +3697,7 @@ struct Index {
   // unmarshals this onto its built-in defaults, so we only emit the loopback
   // binds, our upstreams, enabled online subscriptions, and the user rules.
   // (Thin validation slice: DNS rewrites / advanced DNS are not wired here yet.)
-  private buildAghProxyYaml(): string {
+  private buildAghProxyYaml(dnsPort: number, httpPort: number): string {
     const yamlQuote = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
     const upstreams: string[] = [];
@@ -3568,11 +3743,11 @@ struct Index {
     const lines: string[] = [
       `schema_version: ${AGH_SCHEMA_VERSION}`,
       'http:',
-      `  address: 127.0.0.1:${AGH_HTTP_PORT}`,
+      `  address: 127.0.0.1:${httpPort}`,
       'dns:',
       '  bind_hosts:',
       '    - 127.0.0.1',
-      `  port: ${AGH_DNS_PORT}`,
+      `  port: ${dnsPort}`,
       '  upstream_dns:',
       upstreamLines,
       '  bootstrap_dns:',
@@ -3655,6 +3830,20 @@ struct Index {
       const upstream: string = this.upstreamDnsInput.trim().length > 0
         ? this.upstreamDnsInput.trim()
         : DEFAULT_UPSTREAM_DNS_IP;
+      // Auto-skip busy ports: probe from the configured port upward for a free
+      // loopback TCP port, so a port conflict doesn't fail the start. Full mode
+      // also needs a free panel port (distinct from the DNS port).
+      const configuredPort: number = this.dnsProxyPortNumber();
+      const port: number = await this.findFreeTcpPort(configuredPort, 20);
+      let httpPort: number = 0;
+      if (this.fullModeEnabled) {
+        const configuredHttp: number = this.aghHttpPortNumber();
+        const httpStart: number = (configuredHttp === port) ? configuredHttp + 1 : configuredHttp;
+        httpPort = await this.findFreeTcpPort(httpStart, 20);
+        if (httpPort === port) {
+          httpPort = await this.findFreeTcpPort(port + 1, 20);
+        }
+      }
 
       let err: string | undefined;
       if (this.fullModeEnabled) {
@@ -3663,18 +3852,18 @@ struct Index {
         const cfgPath: string = `${vpnDir}/${AGH_CONFIG_FILE_NAME}`;
         const workDir: string = `${vpnDir}/${AGH_WORK_DIR_NAME}`;
         const logPath: string = `${vpnDir}/${AGH_LOG_FILE_NAME}`;
-        this.writeTextFile(cfgPath, this.buildAghProxyYaml());
+        this.writeTextFile(cfgPath, this.buildAghProxyYaml(port, httpPort));
         try {
           fileIo.mkdirSync(workDir, true);
         } catch (_) {
         }
-        this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=full cfg=${cfgPath} port=${AGH_DNS_PORT}`);
-        err = vpnclientbridge.startAghServerOnly(cfgPath, workDir, logPath, AGH_DNS_PORT);
+        this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=full cfg=${cfgPath} port=${port}`);
+        err = vpnclientbridge.startAghServerOnly(cfgPath, workDir, logPath, port);
       } else {
         // Lightweight engine: a DNS-over-TCP server backed by the local matcher
         // (cross-app loopback only works over TCP on HarmonyOS).
-        this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=lite port=${AGH_DNS_PORT} upstream=${upstream}`);
-        err = vpnclientbridge.startLwDnsServer('127.0.0.1', AGH_DNS_PORT, upstream,
+        this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=lite port=${port} upstream=${upstream}`);
+        err = vpnclientbridge.startLwDnsServer('127.0.0.1', port, upstream,
           this.rulesFilePath, this.queryLogFilePath, this.dnsCacheTtlSeconds);
       }
       if (err !== undefined) {
@@ -3685,9 +3874,17 @@ struct Index {
       if (this.keepAliveModeList().length > 0) {
         await this.startLongTaskKeepAlive();
       }
+      this.dnsProxyActivePort = port;
+      this.aghActiveHttpPort = this.fullModeEnabled ? httpPort : 0;
       this.dnsProxyRunning = true;
-      this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${AGH_DNS_PORT}`);
-      this.appendDebugLog(`==/vpn_ui/dns_proxy_started/ engine=${this.fullModeEnabled ? 'full' : 'lite'} port=${AGH_DNS_PORT}`);
+      this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${port}`);
+      this.appendDebugLog(`==/vpn_ui/dns_proxy_started/ engine=${this.fullModeEnabled ? 'full' : 'lite'} port=${port} http=${httpPort}`);
+      if (port !== configuredPort) {
+        try {
+          this.ensurePromptAction()?.showToast({ message: this.t('dnsProxyPortBumped', `${port}`) });
+        } catch (_) {
+        }
+      }
     } catch (err) {
       const message: string = this.errorMessage(err);
       this.errorText = message;
@@ -3710,7 +3907,7 @@ struct Index {
       const running: boolean = stats.running === true;
       this.dnsProxyRunning = running;
       if (running && this.dnsProxyStatusText.length === 0) {
-        this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${AGH_DNS_PORT}`);
+        this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${this.displayedDnsPort()}`);
       }
     } catch (_) {
     }
@@ -3728,6 +3925,8 @@ struct Index {
       }
       await this.stopLongTaskKeepAlive(true);
       this.dnsProxyRunning = false;
+      this.dnsProxyActivePort = 0;
+      this.aghActiveHttpPort = 0;
       this.dnsProxyStatusText = this.t('dnsProxyStoppedStatus');
       this.appendDebugLog('==/vpn_ui/dns_proxy_stopped/');
     } catch (err) {
@@ -3755,7 +3954,7 @@ struct Index {
           .width('100%')
 
         Row({ space: 8 }) {
-          Text(`tcp://127.0.0.1:${AGH_DNS_PORT}`)
+          Text(`tcp://127.0.0.1:${this.displayedDnsPort()}`)
             .fontSize(15)
             .fontWeight(FontWeight.Bold)
             .fontColor(this.primaryTextColor())
@@ -3766,7 +3965,7 @@ struct Index {
             .backgroundColor(Color.Transparent)
             .fontColor('#2B5B95')
             .onClick(() => {
-              this.copyText(`tcp://127.0.0.1:${AGH_DNS_PORT}`);
+              this.copyText(`tcp://127.0.0.1:${this.displayedDnsPort()}`);
               try {
                 this.ensurePromptAction()?.showToast({ message: this.t('dnsProxyCopied') });
               } catch (_) {
@@ -5088,7 +5287,7 @@ struct Index {
             .fontSize(20)
             .fontWeight(FontWeight.Medium)
             .fontColor(this.primaryTextColor())
-          Text('http://127.0.0.1:3000')
+          Text(`http://127.0.0.1:${this.effectiveHttpPort()}`)
             .fontSize(12)
             .fontColor(this.mutedTextColor())
         }
@@ -5119,7 +5318,7 @@ struct Index {
       }
       .width('100%')
 
-      Web({ src: `http://127.0.0.1:${AGH_HTTP_PORT}`, controller: this.aghWebController })
+      Web({ src: `http://127.0.0.1:${this.effectiveHttpPort()}`, controller: this.aghWebController })
         .width('100%')
         .layoutWeight(1)
         .borderRadius(14)
@@ -5927,14 +6126,14 @@ struct Index {
                   .width(7)
                   .height(7)
                   .borderRadius(4)
-                  .backgroundColor(this.status.running ? this.accentGreenTone() : this.mutedTextColor())
-                Text(this.status.running ? this.t('active') : this.t('idle'))
+                  .backgroundColor(this.activeRunning() ? this.accentGreenTone() : this.mutedTextColor())
+                Text(this.activeRunning() ? this.t('active') : this.t('idle'))
                   .fontSize(12)
                   .fontWeight(FontWeight.Medium)
-                  .fontColor(this.status.running ? this.accentGreenTone() : this.secondaryTextColor())
+                  .fontColor(this.activeRunning() ? this.accentGreenTone() : this.secondaryTextColor())
               }
               .padding({ left: 9, right: 12, top: 5, bottom: 5 })
-              .backgroundColor(this.status.running ? this.softGreenTone() : this.coolNeutralChipSurfaceTone())
+              .backgroundColor(this.activeRunning() ? this.softGreenTone() : this.coolNeutralChipSurfaceTone())
               .border({ width: 1, color: this.cardBorderTone() })
               .borderRadius(12)
               .alignItems(VerticalAlign.Center)
@@ -5944,9 +6143,44 @@ struct Index {
           .width('100%')
           .alignItems(VerticalAlign.Center)
 
+          // Network mode (two-axis with the engine dropdown above): whole-device
+          // VPN, or pure DNS proxy that coexists with another VPN. Locked while
+          // running so the two modes never overlap.
+          Row() {
+            Button(this.t('modeVpn'))
+              .layoutWeight(1)
+              .height(34)
+              .fontSize(13)
+              .fontWeight(this.proxyModeEnabled ? FontWeight.Normal : FontWeight.Bold)
+              .fontColor(this.proxyModeEnabled ? this.secondaryTextColor() : '#FFFFFF')
+              .backgroundColor(this.proxyModeEnabled ? Color.Transparent : '#0099CC')
+              .borderRadius(9)
+              .enabled(!this.status.running && !this.dnsProxyRunning && !this.busy && !this.stopping)
+              .onClick(() => {
+                this.setNetworkProxyMode(false);
+              })
+            Button(this.t('modeDnsProxy'))
+              .layoutWeight(1)
+              .height(34)
+              .fontSize(13)
+              .fontWeight(this.proxyModeEnabled ? FontWeight.Bold : FontWeight.Normal)
+              .fontColor(this.proxyModeEnabled ? '#FFFFFF' : this.secondaryTextColor())
+              .backgroundColor(this.proxyModeEnabled ? '#0099CC' : Color.Transparent)
+              .borderRadius(9)
+              .enabled(!this.status.running && !this.dnsProxyRunning && !this.busy && !this.stopping)
+              .onClick(() => {
+                this.setNetworkProxyMode(true);
+              })
+          }
+          .width('100%')
+          .padding(3)
+          .backgroundColor(this.coolNeutralChipSurfaceTone())
+          .borderRadius(12)
+          .border({ width: 1, color: this.cardBorderTone() })
+
           Column({ space: 10 }) {
             Stack() {
-              Text(this.status.running ? '✓' : '◈')
+              Text(this.activeRunning() ? '✓' : '◈')
                 .fontSize(40)
                 .fontWeight(FontWeight.Bold)
                 .fontColor('#FFFFFF')
@@ -5954,10 +6188,10 @@ struct Index {
             .width(86)
             .height(86)
             .borderRadius(43)
-            .shadow({ radius: 18, color: this.status.running ? '#5910B981' : '#590099CC', offsetX: 0, offsetY: 6 })
+            .shadow({ radius: 18, color: this.activeRunning() ? '#5910B981' : '#590099CC', offsetX: 0, offsetY: 6 })
             .linearGradient({
               angle: 135,
-              colors: this.status.running
+              colors: this.activeRunning()
                 ? (this.isDarkModeActive()
                     ? [['#10997D', 0.0], ['#047D5F', 1.0]]
                     : [['#34D399', 0.0], ['#10B981', 1.0]])
@@ -5966,11 +6200,11 @@ struct Index {
                     : [['#00D9FF', 0.0], ['#0099CC', 1.0]])
             })
 
-            Text(this.status.running ? this.t('running') : this.t('stopped'))
+            Text(this.activeRunning() ? this.t('running') : this.t('stopped'))
               .fontSize(23)
               .fontWeight(FontWeight.Bold)
               .fontColor(this.primaryTextColor())
-            Text(this.status.running ? this.t('runningHint') : this.t('stoppedHint'))
+            Text(this.activeRunning() ? this.t('runningHint') : this.t('stoppedHint'))
               .fontSize(13)
               .lineHeight(19)
               .fontColor(this.secondaryTextColor())
@@ -5984,7 +6218,10 @@ struct Index {
 
           Button(this.stopping
             ? this.tri('Stopping…', '停止中…', '停止中…')
-            : (this.busy ? this.t('working') : (this.status.running ? this.t('stopFilter') : this.t('startFilter'))))
+            : (this.busy ? this.t('working')
+              : (this.proxyModeEnabled
+                ? (this.dnsProxyRunning ? this.t('dnsProxyStop') : this.t('dnsProxyStart'))
+                : (this.status.running ? this.t('stopFilter') : this.t('startFilter')))))
             .enabled(!this.busy && !this.stopping)
             .width('100%')
             .height(50)
@@ -5992,23 +6229,35 @@ struct Index {
             .fontWeight(FontWeight.Medium)
             .backgroundColor((this.busy || this.stopping)
               ? this.chipSurfaceTone()
-              : (this.status.running ? '#10B981' : '#0099CC'))
+              : (this.activeRunning() ? '#10B981' : '#0099CC'))
             .fontColor((this.busy || this.stopping) ? this.secondaryTextColor() : '#FFFFFF')
             .borderRadius(16)
-            .shadow({ radius: 12, color: this.status.running ? '#3310B981' : '#330099CC' })
+            .shadow({ radius: 12, color: this.activeRunning() ? '#3310B981' : '#330099CC' })
             .onClick(() => {
-              if (this.status.running) {
-                this.stopVpn().catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
+              if (this.proxyModeEnabled) {
+                if (this.dnsProxyRunning) {
+                  this.stopDnsProxy().catch((err: BusinessError) => {
+                    this.errorText = this.errorMessage(err);
+                  });
+                } else {
+                  this.startDnsProxy().catch((err: BusinessError) => {
+                    this.errorText = this.errorMessage(err);
+                  });
+                }
               } else {
-                this.startVpn().catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
+                if (this.status.running) {
+                  this.stopVpn().catch((err: BusinessError) => {
+                    this.errorText = this.errorMessage(err);
+                  });
+                } else {
+                  this.startVpn().catch((err: BusinessError) => {
+                    this.errorText = this.errorMessage(err);
+                  });
+                }
               }
             })
 
-          if (this.status.running && !this.busy && !this.stopping) {
+          if (this.activeRunning() && !this.busy && !this.stopping) {
             Button(this.t('restartFilter'))
               .width('100%')
               .height(44)
@@ -6019,10 +6268,63 @@ struct Index {
               .borderRadius(14)
               .border({ width: 1, color: this.cardBorderTone() })
               .onClick(() => {
-                this.startVpn().catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
+                if (this.proxyModeEnabled) {
+                  this.startDnsProxy().catch((err: BusinessError) => {
+                    this.errorText = this.errorMessage(err);
+                  });
+                } else {
+                  this.startVpn().catch((err: BusinessError) => {
+                    this.errorText = this.errorMessage(err);
+                  });
+                }
               })
+          }
+
+          // DNS-proxy mode: show the local TCP DNS address + active engine so the
+          // user can point their proxy app's DNS upstream at it.
+          if (this.proxyModeEnabled) {
+            Column({ space: 8 }) {
+              Text(this.fullModeEnabled ? this.t('dnsProxyEngineFull') : this.t('dnsProxyEngineLite'))
+                .fontSize(12)
+                .fontColor(this.secondaryTextColor())
+                .width('100%')
+              Row({ space: 8 }) {
+                Text(`tcp://127.0.0.1:${this.displayedDnsPort()}`)
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(this.primaryTextColor())
+                Blank()
+                Button(this.t('copy'))
+                  .fontSize(12)
+                  .height(28)
+                  .backgroundColor(Color.Transparent)
+                  .fontColor('#2B5B95')
+                  .onClick(() => {
+                    this.copyText(`tcp://127.0.0.1:${this.displayedDnsPort()}`);
+                    try {
+                      this.ensurePromptAction()?.showToast({ message: this.t('dnsProxyCopied') });
+                    } catch (_) {
+                    }
+                  })
+              }
+              .width('100%')
+              .alignItems(VerticalAlign.Center)
+
+              if (this.dnsProxyRunning && this.fullModeEnabled) {
+                Button(this.t('dnsProxyDashboard'))
+                  .width('100%')
+                  .height(36)
+                  .fontSize(13)
+                  .backgroundColor(this.softGreenTone())
+                  .fontColor('#2B5B95')
+                  .borderRadius(12)
+                  .onClick(() => {
+                    this.openAghInBrowser();
+                  })
+              }
+            }
+            .width('100%')
+            .alignItems(HorizontalAlign.Start)
           }
         }
         .width('100%')
@@ -6032,9 +6334,6 @@ struct Index {
         .borderRadius(26)
         .border({ width: 1, color: this.cardBorderTone() })
         .shadow({ radius: 18, color: this.cardShadowTone() })
-
-        // ===== 🧪 纯 DNS 代理（与 VPN 共存）=====
-        this.DnsProxyCard()
 
         // ===== Quick stats: allowed / blocked =====
         Row({ space: 12 }) {
@@ -7133,9 +7432,6 @@ struct Index {
         .width('100%')
         .alignItems(HorizontalAlign.Start)
 
-        // ===== 🧪 纯 DNS 代理（与 VPN 共存）=====
-        this.DnsProxyCard()
-
         // ===== 🔗 上游 DNS =====
         Column({ space: 8 }) {
           this.SettingsGroupTitle({ text: this.tri('🔗 Upstream DNS', '🔗 上游 DNS', '🔗 上游 DNS') })
@@ -7222,6 +7518,108 @@ struct Index {
               .onClick(() => {
                 this.applyUpstreamDns(this.upstreamDnsInput);
               })
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(16)
+          .backgroundColor(this.elevatedSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(22)
+          .border({ width: 1, color: this.cardBorderTone() })
+          .shadow({ radius: 12, color: this.cardShadowTone() })
+          .linearGradient({
+            angle: 145,
+            colors: this.isDarkModeActive()
+              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+          })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+
+        // ===== 🧩 DNS 代理端口 =====
+        Column({ space: 8 }) {
+          this.SettingsGroupTitle({ text: this.t('dnsProxyPortTitle') })
+          Column({ space: 10 }) {
+            Text(this.t('dnsProxyPortHint'))
+              .fontSize(12)
+              .lineHeight(18)
+              .fontColor(this.secondaryTextColor())
+              .width('100%')
+
+            TextInput({ text: this.dnsProxyPort, placeholder: `${AGH_DNS_PORT}` })
+              .type(InputType.Number)
+              .width('100%')
+              .height(44)
+              .fontSize(15)
+              .enabled(!this.dnsProxyRunning)
+              .opacity(this.dnsProxyRunning ? 0.5 : 1)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12 })
+              .onChange((value: string) => {
+                this.onDnsProxyPortChange(value);
+              })
+
+            if (this.dnsProxyPortFeedback.length > 0) {
+              Text(this.dnsProxyPortFeedback)
+                .fontSize(12)
+                .fontColor('#C0392B')
+                .width('100%')
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(16)
+          .backgroundColor(this.elevatedSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(22)
+          .border({ width: 1, color: this.cardBorderTone() })
+          .shadow({ radius: 12, color: this.cardShadowTone() })
+          .linearGradient({
+            angle: 145,
+            colors: this.isDarkModeActive()
+              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+          })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+
+        // ===== 🖥️ AdGuardHome 面板端口 =====
+        Column({ space: 8 }) {
+          this.SettingsGroupTitle({ text: this.t('aghPanelPortTitle') })
+          Column({ space: 10 }) {
+            Text(this.t('aghPanelPortHint'))
+              .fontSize(12)
+              .lineHeight(18)
+              .fontColor(this.secondaryTextColor())
+              .width('100%')
+
+            TextInput({ text: this.aghHttpPort, placeholder: `${AGH_HTTP_PORT}` })
+              .type(InputType.Number)
+              .width('100%')
+              .height(44)
+              .fontSize(15)
+              .enabled(!this.dnsProxyRunning && !this.status.running)
+              .opacity((this.dnsProxyRunning || this.status.running) ? 0.5 : 1)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(14)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 12, right: 12 })
+              .onChange((value: string) => {
+                this.onAghHttpPortChange(value);
+              })
+
+            if (this.aghHttpPortFeedback.length > 0) {
+              Text(this.aghHttpPortFeedback)
+                .fontSize(12)
+                .fontColor('#C0392B')
+                .width('100%')
+            }
           }
           .width('100%')
           .alignItems(HorizontalAlign.Start)

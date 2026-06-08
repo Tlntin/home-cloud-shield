@@ -41,7 +41,8 @@ const AGH_CONFIG_FILE_NAME = 'AdGuardHome.yaml';
 const AGH_WORK_DIR_NAME = 'agh';
 const AGH_LOG_FILE_NAME = 'agh.log';
 const AGH_DNS_PORT = 5354;
-const AGH_HTTP_ADDR = '127.0.0.1:3000';
+const AGH_HTTP_PORT_DEFAULT = 3000;
+const WANT_AGH_HTTP_PORT = 'aghHttpPort';
 const AGH_SCHEMA_VERSION = 29;
 const WANT_FILTER_MODE = 'filterMode';
 const FILTER_MODE_FULL = 'full';
@@ -132,6 +133,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private aghFiltersJson: string = '[]';
   private aghRewritesJson: string = '[]';
   private aghAdvancedJson: string = '';
+  private aghHttpPort: number = AGH_HTTP_PORT_DEFAULT;
   private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   private logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   private logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
@@ -201,6 +203,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.aghFiltersJson = this.wantStringParam(want, WANT_AGH_FILTERS_JSON);
     this.aghRewritesJson = this.wantStringParam(want, WANT_AGH_REWRITES_JSON);
     this.aghAdvancedJson = this.wantStringParam(want, WANT_AGH_ADVANCED_JSON);
+    const httpPort: number = this.wantNumberParam(want, WANT_AGH_HTTP_PORT, AGH_HTTP_PORT_DEFAULT);
+    this.aghHttpPort = (httpPort >= 1024 && httpPort <= 65535) ? httpPort : AGH_HTTP_PORT_DEFAULT;
     this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
     this.logRetentionDays = this.wantNumberParam(want, WANT_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS);
     this.logMaxSizeMb = this.wantNumberParam(want, WANT_LOG_MAX_SIZE_MB, DEFAULT_LOG_MAX_SIZE_MB);
@@ -687,7 +691,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     const lines: string[] = [
       `schema_version: ${AGH_SCHEMA_VERSION}`,
       'http:',
-      `  address: ${AGH_HTTP_ADDR}`,
+      `  address: 127.0.0.1:${this.aghHttpPort}`,
       'dns:',
       '  bind_hosts:',
       '    - 127.0.0.1',
