@@ -256,5 +256,21 @@ func StopEmbedded() {
 	cleanup(ctx)
 	cleanupAlways()
 
+	// Upstream AdGuard Home assumes a single run per process, so a few modules
+	// keep run-once package/global state that cleanup() does not reset. The host
+	// app, however, can Stop and Start repeatedly within one long-lived process
+	// (e.g. the "DNS server / coexist" mode runs AdGuardHome in the app's main
+	// process, which is not killed between runs). Reset the known run-once guards
+	// so a subsequent StartEmbedded re-initializes cleanly instead of failing.
+	//
+	// cleanup() -> stopDNSServer() already closed the clients container; clearing
+	// storage only drops the "clients container already initialized" guard in
+	// clientsContainer.Init.
+	globalContext.clients.storage = nil
+	// clientsContainer.registerWebHandlers is gated by this once-flag. Each
+	// StartEmbedded builds a fresh mux (globalContext.mux), so re-enable it to let
+	// the client web handlers register again on the new mux.
+	webHandlersRegistered = false
+
 	embedStarted = false
 }

@@ -113,7 +113,7 @@ type LanguageKey =
   | 'continueLabel' | 'keepAliveWarnTitle' | 'keepAliveWarnMessage'
   | 'dnsProxyTitle' | 'dnsProxyDesc' | 'dnsProxyCopied' | 'dnsProxyStart' | 'dnsProxyStop'
   | 'dnsProxyDashboard' | 'dnsProxyDashboardDesc' | 'dnsProxyRunningStatus' | 'dnsProxyStoppedStatus'
-  | 'dnsProxyStopVpnFirst';
+  | 'dnsProxyStopVpnFirst' | 'dnsProxyEngineLite' | 'dnsProxyEngineFull';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -359,6 +359,8 @@ function resolveStringResource(key: LanguageKey): number {
     case 'dnsProxyRunningStatus': return $r('app.string.dnsProxyRunningStatus').id;
     case 'dnsProxyStoppedStatus': return $r('app.string.dnsProxyStoppedStatus').id;
     case 'dnsProxyStopVpnFirst': return $r('app.string.dnsProxyStopVpnFirst').id;
+    case 'dnsProxyEngineLite': return $r('app.string.dnsProxyEngineLite').id;
+    case 'dnsProxyEngineFull': return $r('app.string.dnsProxyEngineFull').id;
   }
 }
 
@@ -472,6 +474,13 @@ interface FilterSubscription {
   name: string;
   url: string;
   enabled: boolean;
+}
+
+// Lightweight view of the native getStats() JSON. In the main app process this
+// reflects only the in-process DNS-proxy server (AdGuardHome); the VPN modes run
+// AdGuardHome in the extension process, so their state is not visible here.
+interface AghProxyStats {
+  running: boolean;
 }
 
 // A full-mode DNS rewrite: resolve `domain` to `answer` (IP, host, or A/AAAA).
@@ -2509,6 +2518,7 @@ struct Index {
     this.loadRulesText();
     this.loadAppVersion();
     this.refreshAll();
+    this.syncDnsProxyRunning();
     void this.tryAutoStartFilterOnLaunch();
     this.refreshTimer = setInterval(() => {
       this.refreshAll();
@@ -3642,18 +3652,31 @@ struct Index {
     try {
       this.writeTextFile(this.rulesFilePath, this.rulesText);
       this.writeTextFile(this.upstreamDnsFilePath, this.upstreamDnsInput.trim());
-      const vpnDir: string = `${this.getHostContext().filesDir}/${VPN_DIR_NAME}`;
-      const cfgPath: string = `${vpnDir}/${AGH_CONFIG_FILE_NAME}`;
-      const workDir: string = `${vpnDir}/${AGH_WORK_DIR_NAME}`;
-      const logPath: string = `${vpnDir}/${AGH_LOG_FILE_NAME}`;
-      this.writeTextFile(cfgPath, this.buildAghProxyYaml());
-      try {
-        fileIo.mkdirSync(workDir, true);
-      } catch (_) {
-      }
+      const upstream: string = this.upstreamDnsInput.trim().length > 0
+        ? this.upstreamDnsInput.trim()
+        : DEFAULT_UPSTREAM_DNS_IP;
 
-      this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ cfg=${cfgPath} dir=${workDir} port=${AGH_DNS_PORT}`);
-      const err: string | undefined = vpnclientbridge.startAghServerOnly(cfgPath, workDir, logPath, AGH_DNS_PORT);
+      let err: string | undefined;
+      if (this.fullModeEnabled) {
+        // Full engine: AdGuardHome as a standalone DNS server (serves UDP + TCP).
+        const vpnDir: string = `${this.getHostContext().filesDir}/${VPN_DIR_NAME}`;
+        const cfgPath: string = `${vpnDir}/${AGH_CONFIG_FILE_NAME}`;
+        const workDir: string = `${vpnDir}/${AGH_WORK_DIR_NAME}`;
+        const logPath: string = `${vpnDir}/${AGH_LOG_FILE_NAME}`;
+        this.writeTextFile(cfgPath, this.buildAghProxyYaml());
+        try {
+          fileIo.mkdirSync(workDir, true);
+        } catch (_) {
+        }
+        this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=full cfg=${cfgPath} port=${AGH_DNS_PORT}`);
+        err = vpnclientbridge.startAghServerOnly(cfgPath, workDir, logPath, AGH_DNS_PORT);
+      } else {
+        // Lightweight engine: a DNS-over-TCP server backed by the local matcher
+        // (cross-app loopback only works over TCP on HarmonyOS).
+        this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=lite port=${AGH_DNS_PORT} upstream=${upstream}`);
+        err = vpnclientbridge.startLwDnsServer('127.0.0.1', AGH_DNS_PORT, upstream,
+          this.rulesFilePath, this.queryLogFilePath, this.dnsCacheTtlSeconds);
+      }
       if (err !== undefined) {
         throw new Error(err);
       }
@@ -3663,8 +3686,8 @@ struct Index {
         await this.startLongTaskKeepAlive();
       }
       this.dnsProxyRunning = true;
-      this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `127.0.0.1:${AGH_DNS_PORT}`);
-      this.appendDebugLog(`==/vpn_ui/dns_proxy_started/ port=${AGH_DNS_PORT}`);
+      this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${AGH_DNS_PORT}`);
+      this.appendDebugLog(`==/vpn_ui/dns_proxy_started/ engine=${this.fullModeEnabled ? 'full' : 'lite'} port=${AGH_DNS_PORT}`);
     } catch (err) {
       const message: string = this.errorMessage(err);
       this.errorText = message;
@@ -3673,6 +3696,23 @@ struct Index {
       this.appendDebugLog(`==/vpn_ui/dns_proxy_error/ ${message}`);
     } finally {
       this.busy = false;
+    }
+  }
+
+  // Re-sync the DNS-proxy toggle with reality on (re)entry: AdGuardHome can keep
+  // running in this (persistent, keep-alive) process across UI re-creations,
+  // while dnsProxyRunning (a @State) resets to false. Read the native running
+  // flag so the button shows the true state and a redundant stop/restart isn't
+  // triggered on the next tap.
+  private syncDnsProxyRunning(): void {
+    try {
+      const stats = JSON.parse(vpnclientbridge.getStats()) as AghProxyStats;
+      const running: boolean = stats.running === true;
+      this.dnsProxyRunning = running;
+      if (running && this.dnsProxyStatusText.length === 0) {
+        this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${AGH_DNS_PORT}`);
+      }
+    } catch (_) {
     }
   }
 
@@ -3708,8 +3748,14 @@ struct Index {
           .fontColor(this.secondaryTextColor())
           .width('100%')
 
+        Text(this.fullModeEnabled ? this.t('dnsProxyEngineFull') : this.t('dnsProxyEngineLite'))
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#2B5B95')
+          .width('100%')
+
         Row({ space: 8 }) {
-          Text(`127.0.0.1:${AGH_DNS_PORT}`)
+          Text(`tcp://127.0.0.1:${AGH_DNS_PORT}`)
             .fontSize(15)
             .fontWeight(FontWeight.Bold)
             .fontColor(this.primaryTextColor())
@@ -3720,7 +3766,7 @@ struct Index {
             .backgroundColor(Color.Transparent)
             .fontColor('#2B5B95')
             .onClick(() => {
-              this.copyText(`127.0.0.1:${AGH_DNS_PORT}`);
+              this.copyText(`tcp://127.0.0.1:${AGH_DNS_PORT}`);
               try {
                 this.ensurePromptAction()?.showToast({ message: this.t('dnsProxyCopied') });
               } catch (_) {
@@ -3755,7 +3801,7 @@ struct Index {
             .width('100%')
         }
 
-        if (this.dnsProxyRunning) {
+        if (this.dnsProxyRunning && this.fullModeEnabled) {
           Row({ space: 12 }) {
             this.SettingsIconText({ glyph: '⌘', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA',
               iconFg: '#2B5B95',
@@ -5986,6 +6032,9 @@ struct Index {
         .borderRadius(26)
         .border({ width: 1, color: this.cardBorderTone() })
         .shadow({ radius: 18, color: this.cardShadowTone() })
+
+        // ===== 🧪 纯 DNS 代理（与 VPN 共存）=====
+        this.DnsProxyCard()
 
         // ===== Quick stats: allowed / blocked =====
         Row({ space: 12 }) {

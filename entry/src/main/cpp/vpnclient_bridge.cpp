@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -159,6 +160,10 @@ struct StatsState {
     uint32_t dnsCacheTtlSeconds = 3600;
     std::unordered_map<std::string, DnsCacheEntry> dnsResponseCache;
     std::thread worker;
+    // Lightweight DNS-over-TCP server (DNS-proxy / coexist mode, no VPN): the
+    // listening socket and its accept thread. listenFd == -1 means not running.
+    int dnsServerListenFd = -1;
+    std::thread dnsServerThread;
 };
 
 StatsState g_state;
@@ -171,6 +176,11 @@ constexpr int kUpstreamAttempts = 2;
 // Serializes writes back to the TUN fd across the reader thread (blocked
 // responses) and the forward worker threads (upstream responses).
 std::mutex g_tunWriteMu;
+
+// Caps concurrent DNS-over-TCP connections served by the lightweight DNS server,
+// so a misbehaving local client cannot spawn unbounded handler threads.
+constexpr int kLwMaxDnsConns = 64;
+std::atomic<int> g_lwConnCount{0};
 
 // A DNS query that passed the filter and must be resolved upstream. Forwarding
 // is the slow part (a network round-trip), so it runs on a worker pool instead
@@ -2368,14 +2378,29 @@ void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp,
 std::string StopDnsFilter()
 {
     std::thread reader;
+    std::thread dnsServer;
+    int listenToClose = -1;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         g_state.stopRequested = true;
         g_state.running = false;
         reader = std::move(g_state.worker);
+        dnsServer = std::move(g_state.dnsServerThread);
+        listenToClose = g_state.dnsServerListenFd;
+        g_state.dnsServerListenFd = -1;
+    }
+    // Close the listening socket first so the accept loop unblocks and exits.
+    // In-flight connection handler threads are detached; they observe
+    // stopRequested between queries (or time out) and close themselves.
+    if (listenToClose >= 0) {
+        shutdown(listenToClose, SHUT_RDWR);
+        close(listenToClose);
     }
     if (reader.joinable()) {
         reader.join();
+    }
+    if (dnsServer.joinable()) {
+        dnsServer.join();
     }
 
     // Join the forward workers before touching the TUN fd: one of them may still
@@ -2565,6 +2590,251 @@ std::string StartAghServerOnly(const std::string &aghConfigPath, const std::stri
     return {};
 }
 
+// Reads exactly len bytes from fd into buf. Returns false on EOF, error, or
+// (with SO_RCVTIMEO set) an idle timeout.
+bool ReadExactly(int fd, uint8_t *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        const ssize_t n = read(fd, buf + off, len - off);
+        if (n > 0) {
+            off += static_cast<size_t>(n);
+            continue;
+        }
+        if (n == 0) {
+            return false; // peer closed
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return false; // error or recv timeout (EAGAIN/EWOULDBLOCK)
+    }
+    return true;
+}
+
+// Resolves one DNS query message (no transport framing) through the lightweight
+// engine: parse the question, match local rules (block) or serve from cache /
+// forward upstream over UDP, update stats and the query log. Returns the DNS
+// response bytes, or empty on parse/forward failure. Upstream is UDP on purpose:
+// on HarmonyOS an app's UDP egress to public resolvers works, while outbound
+// TCP/53 may be blocked; the client link to us is the part that must be TCP.
+std::vector<uint8_t> ResolveDnsMessage(const std::vector<uint8_t> &message)
+{
+    const DnsQuestion question = ParseDnsQuestion(message.data(), message.size());
+    if (!question.valid) {
+        return {};
+    }
+
+    std::shared_ptr<const std::vector<RuleEntry>> rules;
+    std::string queryLogPath;
+    std::vector<std::string> upstreams;
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        rules = g_state.activeRules;
+        queryLogPath = g_state.queryLogPath;
+        upstreams = g_state.upstreamDnsIps;
+    }
+
+    const MatchResult match = rules
+        ? MatchDomain(question.name, question.qtype, *rules)
+        : MatchResult {};
+
+    std::vector<uint8_t> dnsResponse;
+    std::string source = "upstream";
+    std::string responseError;
+    if (match.blocked) {
+        source = "blocked";
+        dnsResponse = BuildBlockedDnsResponse(message.data(), message.size(), question);
+    } else {
+        const bool cacheHit =
+            TryGetCachedDnsResponse(question, message.data(), message.size(), dnsResponse);
+        {
+            std::lock_guard<std::mutex> lock(g_state.mu);
+            if (cacheHit) {
+                g_state.dnsCacheHits++;
+            } else {
+                g_state.dnsCacheMisses++;
+            }
+        }
+        if (cacheHit) {
+            source = "cache";
+        } else {
+            dnsResponse = ForwardDnsQuery(message.data(), message.size(), upstreams,
+                static_cast<uint16_t>(53), responseError);
+            if (!dnsResponse.empty()) {
+                StoreDnsResponseCache(question, dnsResponse);
+            }
+        }
+    }
+
+    if (dnsResponse.empty()) {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.lastError = responseError;
+        LogError("==/vpn_native/lw_dns_error/ domain=%{public}s err=%{public}s", question.name.c_str(),
+            responseError.c_str());
+        return {};
+    }
+
+    LogDnsEvent(queryLogPath, question.name, question.qtype, match.blocked, match.matchedRule, source,
+        message.size(), dnsResponse.size());
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        g_state.lastQueryDomain = question.name;
+        g_state.lastMatchedRule = match.matchedRule;
+        g_state.loggedQueries++;
+        if (match.blocked) {
+            g_state.blockedQueries++;
+        } else {
+            g_state.allowedQueries++;
+        }
+    }
+    return dnsResponse;
+}
+
+// Handles one accepted DNS-over-TCP connection: reads length-prefixed (RFC 7766)
+// query messages until the client closes, the server stops, or the socket goes
+// idle, replying to each. Runs on its own detached thread.
+void LwDnsServerConnLoop(int connFd)
+{
+    timeval tv {};
+    tv.tv_sec = 30;
+    tv.tv_usec = 0;
+    setsockopt(connFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(g_state.mu);
+            if (g_state.stopRequested) {
+                break;
+            }
+        }
+        uint8_t lenBuf[2];
+        if (!ReadExactly(connFd, lenBuf, 2)) {
+            break;
+        }
+        const uint16_t msgLen = static_cast<uint16_t>((lenBuf[0] << 8) | lenBuf[1]);
+        if (msgLen == 0 || msgLen > 4096) {
+            break;
+        }
+        std::vector<uint8_t> query(msgLen);
+        if (!ReadExactly(connFd, query.data(), msgLen)) {
+            break;
+        }
+
+        const std::vector<uint8_t> response = ResolveDnsMessage(query);
+        if (response.empty()) {
+            break;
+        }
+        std::vector<uint8_t> out;
+        out.reserve(response.size() + 2);
+        out.push_back(static_cast<uint8_t>((response.size() >> 8) & 0xFF));
+        out.push_back(static_cast<uint8_t>(response.size() & 0xFF));
+        out.insert(out.end(), response.begin(), response.end());
+        std::string writeError;
+        if (!WriteAll(connFd, out.data(), out.size(), writeError)) {
+            break;
+        }
+    }
+    close(connFd);
+    g_lwConnCount.fetch_sub(1);
+}
+
+// Accept loop for the lightweight DNS-over-TCP server. Exits when StopDnsFilter
+// closes the listening socket (accept fails).
+void LwDnsServerAcceptLoop(int listenFd)
+{
+    LogInfo("==/vpn_native/lw_dns_accept_loop/ fd=%{public}d", listenFd);
+    for (;;) {
+        sockaddr_in cli {};
+        socklen_t cliLen = sizeof(cli);
+        const int connFd = accept(listenFd, reinterpret_cast<sockaddr *>(&cli), &cliLen);
+        if (connFd < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break; // listening socket closed by StopDnsFilter
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_state.mu);
+            if (g_state.stopRequested) {
+                close(connFd);
+                break;
+            }
+        }
+        if (g_lwConnCount.load() >= kLwMaxDnsConns) {
+            close(connFd);
+            continue;
+        }
+        g_lwConnCount.fetch_add(1);
+        std::thread(LwDnsServerConnLoop, connFd).detach();
+    }
+    LogInfo("%{public}s", "==/vpn_native/lw_dns_accept_exit/");
+}
+
+// Start "DNS server / coexist" mode with the lightweight engine: bind a
+// DNS-over-TCP listener on bindIp:port (no VPN, no TUN) and resolve each query
+// through the local matcher + UDP upstream. A separate proxy/VPN app can point
+// its DNS upstream at tcp://bindIp:port. TCP only: cross-app UDP loopback does
+// not work on HarmonyOS. Teardown goes through StopDnsFilter().
+std::string StartLwDnsServer(const std::string &bindIp, uint16_t port, const std::string &upstreamDnsIp,
+    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds)
+{
+    if (bindIp.empty()) {
+        return "bind ip is required";
+    }
+    if (port == 0) {
+        return "port is required";
+    }
+    if (rulesPath.empty()) {
+        return "rules path is required";
+    }
+    if (queryLogPath.empty()) {
+        return "query log path is required";
+    }
+
+    LogInfo("==/vpn_native/start_lw_dns_server/ bind=%{public}s port=%{public}u upstream=%{public}s rules=%{public}s",
+        bindIp.c_str(), static_cast<unsigned>(port), upstreamDnsIp.c_str(), rulesPath.c_str());
+
+    StopDnsFilter();
+
+    const int listenFd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenFd < 0) {
+        return std::string("socket failed: ") + std::strerror(errno);
+    }
+    int one = 1;
+    setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, bindIp.c_str(), &addr.sin_addr) != 1) {
+        close(listenFd);
+        return "invalid bind ip";
+    }
+    if (bind(listenFd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+        const std::string e = std::string("bind failed: ") + std::strerror(errno);
+        close(listenFd);
+        return e;
+    }
+    if (listen(listenFd, 64) < 0) {
+        const std::string e = std::string("listen failed: ") + std::strerror(errno);
+        close(listenFd);
+        return e;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        // -1 fd: no TUN. Seed the resolver state (rules/upstream/query log) the
+        // same way the lightweight TUN path does; fullMode stays false.
+        ResetStatsLocked(g_state, -1, bindIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds);
+        g_state.fullMode = false;
+        g_state.dnsServerListenFd = listenFd;
+        g_state.dnsServerThread = std::thread(LwDnsServerAcceptLoop, listenFd);
+    }
+    LogInfo("==/vpn_native/lw_dns_server_started/ port=%{public}u", static_cast<unsigned>(port));
+    return {};
+}
+
 // Hot-swap the active rule set without tearing down the VPN or the reader
 // thread. The fresh snapshot is parsed off-lock and then published atomically,
 // so in-flight queries keep matching against a consistent rule list.
@@ -2743,6 +3013,46 @@ napi_value JsStartAghServerOnly(napi_env env, napi_callback_info info)
         StartAghServerOnly(aghConfigPath, aghWorkDir, aghLogPath, static_cast<uint16_t>(aghDnsPort)));
 }
 
+napi_value JsStartLwDnsServer(napi_env env, napi_callback_info info)
+{
+    size_t argc = 6;
+    napi_value argv[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 6) {
+        return MakeUtf8(env,
+            "bind ip, port, upstream dns, rules path, query log path, and cache ttl are required");
+    }
+
+    std::string bindIp;
+    int32_t port = 0;
+    std::string upstreamDnsIp;
+    std::string rulesPath;
+    std::string queryLogPath;
+    int32_t cacheTtl = 0;
+    if (!ReadArgString(env, argv[0], bindIp) || bindIp.empty()) {
+        return MakeUtf8(env, "invalid bind ip");
+    }
+    if (!ReadArgInt32(env, argv[1], port) || port <= 0 || port > 65535) {
+        return MakeUtf8(env, "invalid port");
+    }
+    if (!ReadArgString(env, argv[2], upstreamDnsIp) || upstreamDnsIp.empty()) {
+        return MakeUtf8(env, "invalid upstream dns");
+    }
+    if (!ReadArgString(env, argv[3], rulesPath) || rulesPath.empty()) {
+        return MakeUtf8(env, "invalid rules path");
+    }
+    if (!ReadArgString(env, argv[4], queryLogPath) || queryLogPath.empty()) {
+        return MakeUtf8(env, "invalid query log path");
+    }
+    if (!ReadArgInt32(env, argv[5], cacheTtl) || cacheTtl < 0) {
+        return MakeUtf8(env, "invalid cache ttl");
+    }
+
+    return ReturnErrOrUndefined(env,
+        StartLwDnsServer(bindIp, static_cast<uint16_t>(port), upstreamDnsIp, rulesPath, queryLogPath,
+            static_cast<uint32_t>(cacheTtl)));
+}
+
 napi_value JsStopDnsFilter(napi_env env, napi_callback_info info)
 {
     (void)info;
@@ -2801,6 +3111,7 @@ napi_value Init(napi_env env, napi_value exports)
         {"startDnsFilter", nullptr, JsStartDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startFullDnsFilter", nullptr, JsStartFullDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startAghServerOnly", nullptr, JsStartAghServerOnly, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startLwDnsServer", nullptr, JsStartLwDnsServer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopDnsFilter", nullptr, JsStopDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reloadDnsRules", nullptr, JsReloadDnsRules, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setUpstreamDns", nullptr, JsSetUpstreamDns, nullptr, nullptr, nullptr, napi_default, nullptr},

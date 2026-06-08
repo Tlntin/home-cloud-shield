@@ -52,6 +52,8 @@
     { "name": "dnsProxyRunningStatus", "value": "DNS server running at %s" },
     { "name": "dnsProxyStoppedStatus", "value": "DNS server stopped" },
     { "name": "dnsProxyStopVpnFirst", "value": "Stop VPN filtering first" },
+    { "name": "dnsProxyEngineLite", "value": "Engine: Lightweight (TCP only)" },
+    { "name": "dnsProxyEngineFull", "value": "Engine: Full (AdGuardHome)" },
     { "name": "working", "value": "Working..." },
     { "name": "runningHint", "value": "DNS requests are intercepted and evaluated against current rules." },
     { "name": "stoppedHint", "value": "Start the local VPN shell to begin intercepting DNS traffic." },

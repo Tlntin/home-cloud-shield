@@ -29,6 +29,19 @@ declare module 'libvpnclientbridge.so' {
     aghLogPath: string,
     aghDnsPort: number
   ): string | undefined;
+  // DNS server / coexist mode with the lightweight engine: bind a DNS-over-TCP
+  // listener on bindIp:port (no VPN/TUN) and resolve each query through the local
+  // matcher + UDP upstream. A separate proxy app points its DNS upstream at
+  // tcp://bindIp:port. TCP only (cross-app UDP loopback does not work on
+  // HarmonyOS). Tear down with stopDnsFilter().
+  export function startLwDnsServer(
+    bindIp: string,
+    port: number,
+    upstreamDnsIp: string,
+    rulesPath: string,
+    queryLogPath: string,
+    dnsCacheTtlSeconds: number
+  ): string | undefined;
   export function stopDnsFilter(): string | undefined;
   export function reloadDnsRules(rulesPath: string): string | undefined;
   export function setUpstreamDns(upstreamDnsIp: string): string | undefined;

@@ -14,3 +14,4 @@
 .claude
 entry/src/main/libs/arm64-v8a/libadguardhome_ohos.so
 design
+/*.txt

@@ -52,6 +52,8 @@
     { "name": "dnsProxyRunningStatus", "value": "DNS 服务器已运行：%s" },
     { "name": "dnsProxyStoppedStatus", "value": "DNS 服务器已停止" },
     { "name": "dnsProxyStopVpnFirst", "value": "请先停止 VPN 过滤" },
+    { "name": "dnsProxyEngineLite", "value": "当前引擎：轻量级（仅 TCP）" },
+    { "name": "dnsProxyEngineFull", "value": "当前引擎：完整（AdGuardHome）" },
     { "name": "working", "value": "处理中..." },
     { "name": "runningHint", "value": "DNS 请求正在被接管，并按当前规则进行匹配。" },
     { "name": "stoppedHint", "value": "启动本地 VPN 后，即可开始接管 DNS 流量。" },
