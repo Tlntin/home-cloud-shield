@@ -996,7 +996,15 @@ struct Index {
   // restart it so the change takes effect now; lightweight mode just persists.
   private applyFullModeConfigChange(): void {
     this.savePersistState();
-    if (this.fullModeEnabled && this.status.running && !this.busy) {
+    if (!this.fullModeEnabled || this.busy) {
+      return;
+    }
+    // Restart whichever full-engine mode is running so the change applies now.
+    if (this.proxyModeEnabled) {
+      if (this.dnsProxyRunning) {
+        this.startDnsProxy();
+      }
+    } else if (this.status.running) {
       this.startVpn();
     }
   }
@@ -3216,6 +3224,11 @@ struct Index {
   }
 
   private async canEnableAutoStartFilter(): Promise<boolean> {
+    // DNS-proxy mode runs a local server with no VPN, so it needs no VPN
+    // authorization probe — enabling auto-start is always allowed there.
+    if (this.proxyModeEnabled) {
+      return true;
+    }
     try {
       await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
       this.appendDebugLog('==/vpn_ui/auto_start_permission_granted/');
@@ -3246,11 +3259,17 @@ struct Index {
   }
 
   private async tryAutoStartFilterOnLaunch(): Promise<void> {
-    if (this.autoStartAttempted || !this.autoStartFilterEnabled || this.busy || this.status.running) {
+    // Resume whichever network mode was last selected (persisted), not always
+    // VPN. activeRunning() is mode-aware so we don't re-start something already up.
+    if (this.autoStartAttempted || !this.autoStartFilterEnabled || this.busy || this.activeRunning()) {
       return;
     }
     this.autoStartAttempted = true;
-    await this.startVpn();
+    if (this.proxyModeEnabled) {
+      await this.startDnsProxy();
+    } else {
+      await this.startVpn();
+    }
   }
 
   private async stopVpn(): Promise<void> {
