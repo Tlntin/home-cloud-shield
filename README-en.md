@@ -71,7 +71,7 @@ Of course, you can also build and install the app directly with **DevEco Studio*
 
 ## Changelog
 
-Current version: **v0.0.3**. The full bilingual changelog is in [`docs/CHANGELOG.md`](./docs/CHANGELOG.md).
+Current version: **v0.0.4**. The latest bilingual changelog is in [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md); older versions are in [`docs/CHANGELOG-0.0.3.md`](./docs/CHANGELOG-0.0.3.md).
 
 ## Overview
 
@@ -93,6 +93,15 @@ The app now supports **two filtering engines**, switchable directly from a **dro
 - **Full mode (AdGuardHome)**: wires in the ported `AdGuardHome` filtering core from `native/adguardhome-ohos-lib/` for broader rule compatibility, and unlocks **blocked services, online rule subscriptions, DNS rewrites, advanced DNS settings, and the AdGuardHome dashboard**; it is more resource-intensive and can be enabled on demand.
 
 > For power usage and mobile suitability, the default remains the lightweight mode; full mode is wired in as an optional engine and is still being polished. Subscriptions, rewrites, advanced DNS, and the dashboard only take effect while the full engine is running.
+
+### Network mode: VPN / DNS proxy (coexists with another VPN)
+
+Besides the engine, the home page also lets you switch the **network mode** (orthogonal to the engine choice):
+
+- **VPN mode (default)**: routes device-wide DNS traffic through a local VPN.
+- **DNS proxy mode**: runs the filtering engine as a **local DNS server without a VPN** (`127.0.0.1`, TCP only), so it can **coexist with another VPN / proxy app**. Point your proxy app's DNS upstream at `tcp://127.0.0.1:<port>` to filter while proxying; the port is configurable in Settings and auto-advances to the next free port when busy.
+
+> Due to a HarmonyOS limitation, only **TCP** loopback works across apps (UDP does not), so the peer proxy must support a `tcp://` DNS upstream (e.g. `mihomo` / `clash-meta`, `sing-box`). Enabling "Background keep-alive" is recommended so it keeps running in the background.
 
 ### Compatibility scope of the current lightweight engine
 
@@ -127,7 +136,8 @@ So the more accurate description of this project today is: a **HarmonyOS local D
 ## Features
 
 - **Dual filtering engine**: lightweight / full (AdGuardHome), switchable from a dropdown on the home page.
-- **Local DNS filtering**: routes DNS traffic through a local VPN workflow.
+- **Network mode (coexists with another VPN)**: VPN mode / DNS proxy mode, switchable via a segmented control on the home page. DNS proxy mode uses no VPN and runs the filtering engine as a local DNS server (`tcp://127.0.0.1:<port>`) for other proxy apps to use; the port is configurable in Settings and auto-advances on conflict.
+- **Local DNS filtering**: routes DNS traffic through a local VPN or a pure DNS proxy.
 - **Rule management**: supports importing, editing, enabling, and exporting AdGuard-style DNS rules.
 - **Full-mode-only capabilities**: blocked services (one-tap block common services, with tap-to-view of the actual domain rules), online rule subscriptions (with a recommended list library), DNS rewrites, advanced DNS settings (blocking mode / upstream mode / cache / DNSSEC / rate limit), and the AdGuardHome dashboard (opens in the system browser).
 - **Custom upstream DNS**: multiple upstreams plus built-in presets (AliDNS / DNSPod / Baidu / AdGuard).
@@ -165,7 +175,7 @@ So the more accurate description of this project today is: a **HarmonyOS local D
 - **Near term**: keep polishing full-mode stability and power usage, and add clearer rule-compatibility notes and build-artifact documentation.
 - **Mid to long term**: further align the capabilities of the lightweight and full modes, and improve the mobile background experience and release flow.
 
-> Per-version details are in [`docs/CHANGELOG.md`](./docs/CHANGELOG.md).
+> Per-version details are in [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md) (and [`docs/CHANGELOG-0.0.3.md`](./docs/CHANGELOG-0.0.3.md)).
 
 ## Repository Layout
 
