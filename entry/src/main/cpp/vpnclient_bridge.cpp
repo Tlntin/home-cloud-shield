@@ -2519,6 +2519,52 @@ std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std
     return {};
 }
 
+// Start "DNS server / coexist" mode: boot the embedded AdGuardHome engine as a
+// standalone loopback DNS server on 127.0.0.1:aghDnsPort WITHOUT creating a VPN
+// or taking over a TUN. Another app (e.g. a proxy/VPN client) can then point its
+// DNS upstream at this port, so device-wide DNS filtering and a separate VPN can
+// coexist. There is no reader thread and no forward pool here: AdGuardHome owns
+// the socket and does all serving. Teardown goes through StopDnsFilter(), which
+// stops AdGuardHome whenever fullMode is set.
+std::string StartAghServerOnly(const std::string &aghConfigPath, const std::string &aghWorkDir,
+    const std::string &aghLogPath, uint16_t aghDnsPort)
+{
+    if (aghConfigPath.empty()) {
+        return "adguardhome config path is required";
+    }
+    if (aghWorkDir.empty()) {
+        return "adguardhome work dir is required";
+    }
+    if (aghDnsPort == 0) {
+        return "adguardhome dns port is required";
+    }
+
+    LogInfo("==/vpn_native/start_agh_server_only/ agh_cfg=%{public}s agh_dir=%{public}s agh_port=%{public}u",
+        aghConfigPath.c_str(), aghWorkDir.c_str(), static_cast<unsigned>(aghDnsPort));
+
+    StopDnsFilter();
+
+    // StartEmbedded binds the DNS listener synchronously, so once this returns the
+    // loopback port is ready. A bad config surfaces here instead of leaving a
+    // half-started server behind.
+    const std::string aghErr = StartAdGuardHome(aghConfigPath, aghWorkDir, aghLogPath);
+    if (!aghErr.empty()) {
+        LogError("==/vpn_native/agh_start_error/ %{public}s", aghErr.c_str());
+        return std::string("adguardhome start failed: ") + aghErr;
+    }
+    LogInfo("==/vpn_native/agh_server_only_started/ port=%{public}u", static_cast<unsigned>(aghDnsPort));
+
+    // No TUN fd, no reader thread, no forward pool. We only mark state so
+    // getStats() reports running and StopDnsFilter() stops AdGuardHome on teardown.
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        ResetStatsLocked(g_state, -1, "127.0.0.1", "127.0.0.1", "", "", 0);
+        g_state.fullMode = true;
+        g_state.aghDnsPort = aghDnsPort;
+    }
+    return {};
+}
+
 // Hot-swap the active rule set without tearing down the VPN or the reader
 // thread. The fresh snapshot is parsed off-lock and then published atomically,
 // so in-flight queries keep matching against a consistent rule list.
@@ -2667,6 +2713,36 @@ napi_value JsStartFullDnsFilter(napi_env env, napi_callback_info info)
             static_cast<uint16_t>(aghDnsPort), queryLogPath));
 }
 
+napi_value JsStartAghServerOnly(napi_env env, napi_callback_info info)
+{
+    size_t argc = 4;
+    napi_value argv[4] = {nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 4) {
+        return MakeUtf8(env, "agh config path, agh work dir, agh log path, and agh dns port are required");
+    }
+
+    std::string aghConfigPath;
+    std::string aghWorkDir;
+    std::string aghLogPath;
+    int32_t aghDnsPort = 0;
+    if (!ReadArgString(env, argv[0], aghConfigPath) || aghConfigPath.empty()) {
+        return MakeUtf8(env, "invalid agh config path");
+    }
+    if (!ReadArgString(env, argv[1], aghWorkDir) || aghWorkDir.empty()) {
+        return MakeUtf8(env, "invalid agh work dir");
+    }
+    if (!ReadArgString(env, argv[2], aghLogPath)) {
+        return MakeUtf8(env, "invalid agh log path");
+    }
+    if (!ReadArgInt32(env, argv[3], aghDnsPort) || aghDnsPort <= 0 || aghDnsPort > 65535) {
+        return MakeUtf8(env, "invalid agh dns port");
+    }
+
+    return ReturnErrOrUndefined(env,
+        StartAghServerOnly(aghConfigPath, aghWorkDir, aghLogPath, static_cast<uint16_t>(aghDnsPort)));
+}
+
 napi_value JsStopDnsFilter(napi_env env, napi_callback_info info)
 {
     (void)info;
@@ -2724,6 +2800,7 @@ napi_value Init(napi_env env, napi_value exports)
     napi_property_descriptor desc[] = {
         {"startDnsFilter", nullptr, JsStartDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startFullDnsFilter", nullptr, JsStartFullDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startAghServerOnly", nullptr, JsStartAghServerOnly, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopDnsFilter", nullptr, JsStopDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reloadDnsRules", nullptr, JsReloadDnsRules, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setUpstreamDns", nullptr, JsSetUpstreamDns, nullptr, nullptr, nullptr, napi_default, nullptr},

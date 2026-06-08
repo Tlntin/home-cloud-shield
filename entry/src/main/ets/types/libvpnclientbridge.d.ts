@@ -18,6 +18,17 @@ declare module 'libvpnclientbridge.so' {
     aghDnsPort: number,
     queryLogPath: string
   ): string | undefined;
+  // DNS server / coexist mode: boot the embedded AdGuardHome engine as a
+  // standalone loopback DNS server on 127.0.0.1:aghDnsPort, with NO VPN/TUN.
+  // Another app can point its DNS upstream at this port. Tear down with
+  // stopDnsFilter(). Hosted in the main app process (kept alive by the
+  // continuous task), since there is no VPN extension to keep it alive.
+  export function startAghServerOnly(
+    aghConfigPath: string,
+    aghWorkDir: string,
+    aghLogPath: string,
+    aghDnsPort: number
+  ): string | undefined;
   export function stopDnsFilter(): string | undefined;
   export function reloadDnsRules(rulesPath: string): string | undefined;
   export function setUpstreamDns(upstreamDnsIp: string): string | undefined;
