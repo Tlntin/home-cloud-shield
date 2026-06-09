@@ -101,7 +101,7 @@ Besides the engine, the home page also lets you switch the **network mode** (ort
 - **VPN mode (default)**: routes device-wide DNS traffic through a local VPN.
 - **DNS proxy mode**: runs the filtering engine as a **local DNS server without a VPN** (`127.0.0.1`, TCP only), so it can **coexist with another VPN / proxy app**. Point your proxy app's DNS upstream at `tcp://127.0.0.1:<port>` to filter while proxying; the port is configurable in Settings and auto-advances to the next free port when busy.
 
-> Due to a HarmonyOS limitation, only **TCP** loopback works across apps (UDP does not), so the peer proxy must support a `tcp://` DNS upstream (e.g. `mihomo` / `clash-meta`, `sing-box`). Enabling "Background keep-alive" is recommended so it keeps running in the background.
+> Across apps, UDP loopback on HarmonyOS is **unreliable** (in testing it works without Wi-Fi but usually fails on Wi-Fi), whereas **TCP loopback always works**; for reliability, point the peer proxy at a `tcp://` DNS upstream (e.g. `mihomo` / `clash-meta`, `sing-box`). Enabling "Background keep-alive" is also recommended so it keeps running in the background.
 
 ### Compatibility scope of the current lightweight engine
 
