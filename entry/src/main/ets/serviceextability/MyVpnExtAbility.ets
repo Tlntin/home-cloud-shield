@@ -1,7 +1,7 @@
 import { Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
-import { vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
+import { connection, vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import vpnclientbridge from 'libvpnclientbridge.so';
 
@@ -36,6 +36,40 @@ const DNS_SERVER_IPV6 = 'fd00:ad00::1';
 const IPV6_ROUTE = 'fd00:ad00::';
 const IPV6_PREFIX_LENGTH = 64;
 const UPSTREAM_DNS_IP = '119.29.29.29';
+// Host-route prefix lengths used to pull individual DNS resolver IPs into the
+// tun (see PUBLIC_DNS_RESOLVERS / dnsCaptureRouteIps).
+const IPV4_HOST_PREFIX_LENGTH = 32;
+const IPV6_HOST_PREFIX_LENGTH = 128;
+// Debounce window for network-change events. A single Wi-Fi (dis)connect fires
+// several callbacks (netAvailable + properties + capabilities) in a burst; we
+// wait for it to settle, then re-evaluate the capture routes once.
+const NET_CHANGE_DEBOUNCE_MS = 1500;
+// Well-known public DNS resolvers. This is a DNS-only split-tunnel VPN: only the
+// tun subnet is routed, and we merely advertise 10.8.0.1 as the resolver. But on
+// Wi-Fi the system and many apps send DNS straight to the network's DHCP resolver
+// or a hard-coded public resolver instead of 10.8.0.1; those packets are outside
+// the tun subnet, so they escape the filter (this is why interception "stops"
+// once Wi-Fi connects). We add a /32 (or /128) host route for each resolver below
+// — plus the underlying network's actual DNS servers, fetched at start — so those
+// queries are captured too. No routing loop results: blockedApplications excludes
+// this app, so our own upstream forwarding sockets still egress on the real
+// network even when their destination IP is one of these.
+const PUBLIC_DNS_RESOLVERS: string[] = [
+  // AliDNS
+  '223.5.5.5', '223.6.6.6', '2400:3200::1', '2400:3200:baba::1',
+  // DNSPod / Tencent
+  '119.29.29.29', '182.254.116.116', '2402:4e00::',
+  // 114DNS
+  '114.114.114.114', '114.114.115.115',
+  // Baidu
+  '180.76.76.76',
+  // Google
+  '8.8.8.8', '8.8.4.4', '2001:4860:4860::8888', '2001:4860:4860::8844',
+  // Cloudflare
+  '1.1.1.1', '1.0.0.1', '2606:4700:4700::1111', '2606:4700:4700::1001',
+  // Quad9 / OpenDNS
+  '9.9.9.9', '208.67.222.222', '208.67.220.220',
+];
 // Full-mode (embedded AdGuardHome) runtime files and fixed loopback ports.
 const AGH_CONFIG_FILE_NAME = 'AdGuardHome.yaml';
 const AGH_WORK_DIR_NAME = 'agh';
@@ -145,6 +179,16 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private lastNote: string = 'DNS filter has not been started yet.';
   private lastRulesSignature: string = '';
   private lastUpstreamSignature: string = '';
+  // Network-change watcher (Tier 2): when the underlying network switches, its
+  // DNS servers change, so the per-resolver host routes baked into the tun at
+  // create() go stale. We watch for changes and rebuild the tun when the set of
+  // captured resolver IPs actually differs.
+  private netConn?: connection.NetConnection;
+  private netListenerActive: boolean = false;
+  private netChangeDebounceTimer: number = -1;
+  private lastDnsCaptureSignature: string = '';
+  private reconfiguring: boolean = false;
+  private netRecheckPending: boolean = false;
 
   private isLegacyDefaultRulesText(content: string): boolean {
     return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim() === LEGACY_DEFAULT_RULES_TEXT;
@@ -374,7 +418,48 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     }
   }
 
-  private buildVpnConfig(): vpnExtension.VpnConfig {
+  private buildVpnConfig(dnsCaptureIps: string[]): vpnExtension.VpnConfig {
+    const routes: vpnExtension.RouteInfo[] = [{
+      interface: 'vpn-tun',
+      destination: {
+        address: {
+          address: IPV4_ROUTE,
+          family: 1,
+          port: 0,
+        },
+        prefixLength: IPV4_PREFIX_LENGTH,
+      },
+      gateway: {
+        address: '0.0.0.0',
+        family: 1,
+        port: 0,
+      },
+      hasGateway: false,
+      isDefaultRoute: false,
+    }, {
+      interface: 'vpn-tun',
+      destination: {
+        address: {
+          address: IPV6_ROUTE,
+          family: 2,
+          port: 0,
+        },
+        prefixLength: IPV6_PREFIX_LENGTH,
+      },
+      gateway: {
+        address: '::',
+        family: 2,
+        port: 0,
+      },
+      hasGateway: false,
+      isDefaultRoute: false,
+    }];
+    // Pull each well-known/underlying DNS resolver IP into the tun via a host
+    // route so DNS sent to them (instead of our advertised 10.8.0.1) is captured.
+    dnsCaptureIps.forEach((ip: string) => {
+      routes.push(this.buildHostRoute(ip));
+    });
+
     return {
       addresses: [{
         address: {
@@ -389,47 +474,86 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
         },
         prefixLength: IPV6_PREFIX_LENGTH,
       }],
-      routes: [{
-        interface: 'vpn-tun',
-        destination: {
-          address: {
-            address: IPV4_ROUTE,
-            family: 1,
-            port: 0,
-          },
-          prefixLength: IPV4_PREFIX_LENGTH,
-        },
-        gateway: {
-          address: '0.0.0.0',
-          family: 1,
-          port: 0,
-        },
-        hasGateway: false,
-        isDefaultRoute: false,
-      }, {
-        interface: 'vpn-tun',
-        destination: {
-          address: {
-            address: IPV6_ROUTE,
-            family: 2,
-            port: 0,
-          },
-          prefixLength: IPV6_PREFIX_LENGTH,
-        },
-        gateway: {
-          address: '::',
-          family: 2,
-          port: 0,
-        },
-        hasGateway: false,
-        isDefaultRoute: false,
-      }],
+      routes: routes,
       mtu: 1400,
       dnsAddresses: [DNS_SERVER_IP, DNS_SERVER_IPV6],
       isIPv4Accepted: true,
       isIPv6Accepted: true,
       blockedApplications: [APP_BUNDLE_NAME],
     };
+  }
+
+  // Build a single-host (/32 or /128) tun route for one resolver IP.
+  private buildHostRoute(ip: string): vpnExtension.RouteInfo {
+    const isV6: boolean = ip.includes(':');
+    return {
+      interface: 'vpn-tun',
+      destination: {
+        address: {
+          address: ip,
+          family: isV6 ? 2 : 1,
+          port: 0,
+        },
+        prefixLength: isV6 ? IPV6_HOST_PREFIX_LENGTH : IPV4_HOST_PREFIX_LENGTH,
+      },
+      gateway: {
+        address: isV6 ? '::' : '0.0.0.0',
+        family: isV6 ? 2 : 1,
+        port: 0,
+      },
+      hasGateway: false,
+      isDefaultRoute: false,
+    };
+  }
+
+  // The full, de-duplicated list of resolver IPs to capture via host routes:
+  // the built-in public resolvers plus the underlying network's current DNS
+  // servers. Our own tun/DNS addresses and loopback are excluded.
+  private dnsCaptureRouteIps(underlyingDnsIps: string[]): string[] {
+    const skip: string[] = [DNS_SERVER_IP, DNS_SERVER_IPV6, TUN_ADDRESS_IP, TUN_ADDRESS_IPV6];
+    const out: string[] = [];
+    const consider = (raw: string): void => {
+      const ip: string = raw.trim();
+      if (ip.length === 0 || skip.includes(ip) || out.includes(ip)) {
+        return;
+      }
+      if (ip.startsWith('127.') || ip === '::1' || ip === '0.0.0.0' || ip === '::') {
+        return;
+      }
+      if (!this.isLikelyIpAddress(ip)) {
+        return;
+      }
+      out.push(ip);
+    };
+    PUBLIC_DNS_RESOLVERS.forEach(consider);
+    underlyingDnsIps.forEach(consider);
+    return out;
+  }
+
+  // Read the DNS servers of the current default (physical) network. Called just
+  // before create(), while the underlying network is still the default, so on
+  // Wi-Fi this returns the DHCP-pushed resolver(s) (e.g. the gateway). Best
+  // effort: any failure (e.g. missing permission) degrades to public resolvers
+  // only.
+  private async queryUnderlyingDnsServers(): Promise<string[]> {
+    const result: string[] = [];
+    try {
+      const netHandle: connection.NetHandle = await connection.getDefaultNet();
+      if (netHandle.netId === 0) {
+        return result;
+      }
+      const props: connection.ConnectionProperties = await connection.getConnectionProperties(netHandle);
+      const servers: connection.NetAddress[] = props.dnses ?? [];
+      servers.forEach((s: connection.NetAddress) => {
+        const ip: string = (s.address ?? '').trim();
+        if (ip.length > 0 && this.isLikelyIpAddress(ip) && !result.includes(ip)) {
+          result.push(ip);
+        }
+      });
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ext/underlying_dns_error/ ${this.errorMessage(err)}`);
+    }
+    return result;
   }
 
   private logVpnConfig(): void {
@@ -455,10 +579,45 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       throw new Error('VpnConnection is not available');
     }
 
+    await this.createTunAndStartFilter();
+
+    // startDnsFilter already loaded the current rules and upstream, so seed the
+    // baselines to avoid a redundant reload/apply on the first watch tick.
+    this.lastRulesSignature = this.rulesFileSignature();
+    this.lastUpstreamSignature = this.upstreamFileSignature();
+    this.startStatusPump();
+    // Re-pull the underlying DNS into the tun whenever the network changes
+    // (e.g. Wi-Fi <-> cellular), so the capture host routes don't go stale.
+    this.registerNetworkListener();
+    this.writeStatus(
+      'running',
+      true,
+      'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.'
+    );
+    hilog.info(DOMAIN, TAG, '==/vpn_ext/running/ tun_fd=%{public}d', this.tunFd);
+    this.appendDebugLog(`==/vpn_ext/running/ tun_fd=${this.tunFd}`);
+  }
+
+  // Create the tun and start the native DNS filter using routes computed from
+  // the current network. Shared by initial setup and live network-change
+  // reconfiguration. Throws on any failure.
+  private async createTunAndStartFilter(): Promise<void> {
+    if (this.vpnConnection === undefined) {
+      throw new Error('VpnConnection is not available');
+    }
+
     try {
       this.logVpnConfig();
       this.writeStatus('creating', false, 'Creating DNS-only VPN and preparing the local filter engine.');
-      this.tunFd = await this.vpnConnection.create(this.buildVpnConfig());
+      // Capture DNS sent to the underlying network's resolvers and common public
+      // resolvers (not just our advertised 10.8.0.1) so filtering survives Wi-Fi.
+      const underlyingDns: string[] = await this.queryUnderlyingDnsServers();
+      const dnsCaptureIps: string[] = this.dnsCaptureRouteIps(underlyingDns);
+      this.lastDnsCaptureSignature = dnsCaptureIps.join(',');
+      this.appendDebugLog(`==/vpn_ext/dns_capture_routes/ underlying=[${underlyingDns.join(',')}] captured=${dnsCaptureIps.length}`);
+      hilog.info(DOMAIN, TAG, '==/vpn_ext/dns_capture_routes/ underlying=%{public}s captured=%{public}d',
+        underlyingDns.join(','), dnsCaptureIps.length);
+      this.tunFd = await this.vpnConnection.create(this.buildVpnConfig(dnsCaptureIps));
       hilog.info(DOMAIN, TAG, '==/vpn_ext/tun_created/ fd=%{public}d', this.tunFd);
       this.appendDebugLog(`==/vpn_ext/tun_created/ fd=${this.tunFd}`);
       if (this.tunFd < 0) {
@@ -523,19 +682,146 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     } catch (err) {
       throw new Error(this.errorMessage(err));
     }
+  }
 
-    // startDnsFilter already loaded the current rules and upstream, so seed the
-    // baselines to avoid a redundant reload/apply on the first watch tick.
+  // Tear down the running native filter and tun, then rebuild both with routes
+  // computed from the current network. The status pump and the network listener
+  // stay alive across this. Throws if the rebuild fails.
+  private async reapplyVpnConfig(): Promise<void> {
+    if (this.vpnConnection === undefined) {
+      return;
+    }
+    this.appendDebugLog('==/vpn_ext/reapply_begin/');
+    const nativeStopErr: string | undefined = vpnclientbridge.stopDnsFilter();
+    if (nativeStopErr !== undefined) {
+      this.appendDebugLog(`==/vpn_ext/reapply_native_stop_error/ ${nativeStopErr}`);
+    }
+    try {
+      await this.vpnConnection.destroy();
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ext/reapply_destroy_error/ ${this.errorMessage(err)}`);
+    }
+    this.tunFd = -1;
+    // Rebuild on a fresh VpnConnection instead of reusing the just-destroyed one,
+    // so we never depend on create()-after-destroy being supported on the same
+    // handle. createVpnConnection only allocates a lightweight JS handle; the
+    // system VPN authorization for this extension persists across it.
+    this.vpnConnection = vpnExtension.createVpnConnection(this.context);
+    await this.createTunAndStartFilter();
+    // The native filter just reloaded rules/upstream from disk, so reseed the
+    // watch baselines to avoid a redundant reload on the next tick.
     this.lastRulesSignature = this.rulesFileSignature();
     this.lastUpstreamSignature = this.upstreamFileSignature();
-    this.startStatusPump();
     this.writeStatus(
       'running',
       true,
       'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.'
     );
-    hilog.info(DOMAIN, TAG, '==/vpn_ext/running/ tun_fd=%{public}d', this.tunFd);
-    this.appendDebugLog(`==/vpn_ext/running/ tun_fd=${this.tunFd}`);
+    this.appendDebugLog(`==/vpn_ext/reapply_done/ tun_fd=${this.tunFd}`);
+  }
+
+  // Subscribe to default-network changes so we can refresh the capture routes
+  // when the underlying network (and thus its DNS) switches. Best effort:
+  // failure to register just means no live refresh (a manual restart still
+  // re-reads the network).
+  private registerNetworkListener(): void {
+    if (this.netListenerActive) {
+      return;
+    }
+    try {
+      this.netConn = connection.createNetConnection();
+      this.netConn.register((err: BusinessError) => {
+        if (err) {
+          this.appendDebugLog(`==/vpn_ext/net_register_error/ ${this.errorMessage(err)}`);
+        }
+      });
+      this.netConn.on('netAvailable', (_data: connection.NetHandle) => {
+        this.scheduleNetworkReconfigure('netAvailable');
+      });
+      this.netConn.on('netConnectionPropertiesChange', (_data: connection.NetConnectionPropertyInfo) => {
+        this.scheduleNetworkReconfigure('propertiesChange');
+      });
+      this.netConn.on('netLost', (_data: connection.NetHandle) => {
+        this.scheduleNetworkReconfigure('netLost');
+      });
+      this.netListenerActive = true;
+      this.appendDebugLog('==/vpn_ext/net_listener_registered/');
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ext/net_listener_register_exception/ ${this.errorMessage(err)}`);
+    }
+  }
+
+  private unregisterNetworkListener(): void {
+    if (this.netChangeDebounceTimer >= 0) {
+      clearTimeout(this.netChangeDebounceTimer);
+      this.netChangeDebounceTimer = -1;
+    }
+    if (this.netConn !== undefined) {
+      try {
+        this.netConn.unregister((err: BusinessError) => {
+          if (err) {
+            this.appendDebugLog(`==/vpn_ext/net_unregister_error/ ${this.errorMessage(err)}`);
+          }
+        });
+      } catch (err) {
+        this.appendDebugLog(`==/vpn_ext/net_unregister_exception/ ${this.errorMessage(err)}`);
+      }
+      this.netConn = undefined;
+    }
+    this.netListenerActive = false;
+    this.netRecheckPending = false;
+  }
+
+  // Coalesce a burst of network callbacks into a single delayed re-evaluation.
+  private scheduleNetworkReconfigure(reason: string): void {
+    if (this.netChangeDebounceTimer >= 0) {
+      clearTimeout(this.netChangeDebounceTimer);
+    }
+    this.netChangeDebounceTimer = setTimeout(() => {
+      this.netChangeDebounceTimer = -1;
+      this.onNetworkChanged(reason).catch((err: BusinessError) => {
+        this.appendDebugLog(`==/vpn_ext/net_reconfigure_error/ ${this.errorMessage(err)}`);
+        this.writeStatus('error', false, this.errorMessage(err));
+      });
+    }, NET_CHANGE_DEBOUNCE_MS);
+  }
+
+  // Re-read the underlying DNS and, if the captured resolver set changed, rebuild
+  // the tun. Serialized via reconfiguring/netRecheckPending so overlapping bursts
+  // don't run concurrent rebuilds but the final state is still applied.
+  private async onNetworkChanged(reason: string): Promise<void> {
+    if (this.reconfiguring) {
+      this.netRecheckPending = true;
+      return;
+    }
+    this.reconfiguring = true;
+    try {
+      for (;;) {
+        this.netRecheckPending = false;
+        if (this.tunFd < 0) {
+          break;  // VPN not active; nothing to reconfigure
+        }
+        const underlyingDns: string[] = await this.queryUnderlyingDnsServers();
+        if (underlyingDns.length === 0) {
+          // No usable default network yet (transient loss / mid-switch). Keep the
+          // current routes; a later netAvailable carrying real DNS reconfigures.
+          this.appendDebugLog(`==/vpn_ext/net_change_skip_empty/ reason=${reason}`);
+        } else {
+          const signature: string = this.dnsCaptureRouteIps(underlyingDns).join(',');
+          if (signature === this.lastDnsCaptureSignature) {
+            this.appendDebugLog(`==/vpn_ext/net_change_noop/ reason=${reason} underlying=[${underlyingDns.join(',')}]`);
+          } else {
+            this.appendDebugLog(`==/vpn_ext/net_change_reconfigure/ reason=${reason} underlying=[${underlyingDns.join(',')}]`);
+            await this.reapplyVpnConfig();
+          }
+        }
+        if (!this.netRecheckPending) {
+          break;
+        }
+      }
+    } finally {
+      this.reconfiguring = false;
+    }
   }
 
   private startStatusPump(): void {
@@ -882,6 +1168,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   }
 
   private async destroyVpn(): Promise<void> {
+    this.unregisterNetworkListener();
     if (this.statusTimer >= 0) {
       clearInterval(this.statusTimer);
       this.statusTimer = -1;

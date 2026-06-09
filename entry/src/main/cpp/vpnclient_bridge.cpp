@@ -164,6 +164,10 @@ struct StatsState {
     // listening socket and its accept thread. listenFd == -1 means not running.
     int dnsServerListenFd = -1;
     std::thread dnsServerThread;
+    // Companion DNS-over-UDP listener for the same coexist server (plain RFC 1035
+    // datagrams, no length prefix). udpFd == -1 means not running.
+    int dnsServerUdpFd = -1;
+    std::thread dnsServerUdpThread;
 };
 
 StatsState g_state;
@@ -181,6 +185,11 @@ std::mutex g_tunWriteMu;
 // so a misbehaving local client cannot spawn unbounded handler threads.
 constexpr int kLwMaxDnsConns = 64;
 std::atomic<int> g_lwConnCount{0};
+
+// Caps concurrent in-flight DNS-over-UDP queries served by the lightweight DNS
+// server, mirroring the TCP connection cap above.
+constexpr int kLwMaxUdpInflight = 64;
+std::atomic<int> g_lwUdpInflight{0};
 
 // A DNS query that passed the filter and must be resolved upstream. Forwarding
 // is the slow part (a network round-trip), so it runs on a worker pool instead
@@ -2379,19 +2388,26 @@ std::string StopDnsFilter()
 {
     std::thread reader;
     std::thread dnsServer;
+    std::thread dnsUdp;
     int listenToClose = -1;
+    int udpToClose = -1;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         g_state.stopRequested = true;
         g_state.running = false;
         reader = std::move(g_state.worker);
         dnsServer = std::move(g_state.dnsServerThread);
+        dnsUdp = std::move(g_state.dnsServerUdpThread);
         listenToClose = g_state.dnsServerListenFd;
         g_state.dnsServerListenFd = -1;
+        udpToClose = g_state.dnsServerUdpFd;
+        g_state.dnsServerUdpFd = -1;
     }
-    // Close the listening socket first so the accept loop unblocks and exits.
-    // In-flight connection handler threads are detached; they observe
-    // stopRequested between queries (or time out) and close themselves.
+    // Close the TCP listening socket first so the accept loop unblocks and exits.
+    // The UDP loop instead exits via its SO_RCVTIMEO wakeup observing
+    // stopRequested, so its socket is closed after the loop is joined. In-flight
+    // connection/query handler threads are detached; they observe stopRequested
+    // between queries (or time out) and finish on their own.
     if (listenToClose >= 0) {
         shutdown(listenToClose, SHUT_RDWR);
         close(listenToClose);
@@ -2401,6 +2417,12 @@ std::string StopDnsFilter()
     }
     if (dnsServer.joinable()) {
         dnsServer.join();
+    }
+    if (dnsUdp.joinable()) {
+        dnsUdp.join();
+    }
+    if (udpToClose >= 0) {
+        close(udpToClose);
     }
 
     // Join the forward workers before touching the TUN fd: one of them may still
@@ -2615,9 +2637,9 @@ bool ReadExactly(int fd, uint8_t *buf, size_t len)
 // Resolves one DNS query message (no transport framing) through the lightweight
 // engine: parse the question, match local rules (block) or serve from cache /
 // forward upstream over UDP, update stats and the query log. Returns the DNS
-// response bytes, or empty on parse/forward failure. Upstream is UDP on purpose:
-// on HarmonyOS an app's UDP egress to public resolvers works, while outbound
-// TCP/53 may be blocked; the client link to us is the part that must be TCP.
+// response bytes, or empty on parse/forward failure. Shared by the TCP and UDP
+// coexist listeners. Upstream is UDP on purpose: on HarmonyOS an app's UDP egress
+// to public resolvers works, while outbound TCP/53 may be blocked.
 std::vector<uint8_t> ResolveDnsMessage(const std::vector<uint8_t> &message)
 {
     const DnsQuestion question = ParseDnsQuestion(message.data(), message.size());
@@ -2771,11 +2793,58 @@ void LwDnsServerAcceptLoop(int listenFd)
     LogInfo("%{public}s", "==/vpn_native/lw_dns_accept_exit/");
 }
 
-// Start "DNS server / coexist" mode with the lightweight engine: bind a
-// DNS-over-TCP listener on bindIp:port (no VPN, no TUN) and resolve each query
-// through the local matcher + UDP upstream. A separate proxy/VPN app can point
-// its DNS upstream at tcp://bindIp:port. TCP only: cross-app UDP loopback does
-// not work on HarmonyOS. Teardown goes through StopDnsFilter().
+// Serve loop for the lightweight DNS-over-UDP listener. Receives a raw query
+// datagram (no 2-byte length prefix, unlike TCP), then resolves it on a detached
+// worker through the shared matcher/cache/upstream and replies to the sender from
+// the bound socket. The blocking recvfrom uses SO_RCVTIMEO so the loop can notice
+// stopRequested and exit; StopDnsFilter closes the socket after joining it.
+void LwDnsServerUdpLoop(int udpFd)
+{
+    LogInfo("==/vpn_native/lw_dns_udp_loop/ fd=%{public}d", udpFd);
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(g_state.mu);
+            if (g_state.stopRequested) {
+                break;
+            }
+        }
+        uint8_t buffer[2048];
+        sockaddr_in cli {};
+        socklen_t cliLen = sizeof(cli);
+        const ssize_t received = recvfrom(udpFd, buffer, sizeof(buffer), 0,
+            reinterpret_cast<sockaddr *>(&cli), &cliLen);
+        if (received <= 0) {
+            if (received < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+                continue;  // recv timeout / interrupt: re-check stopRequested
+            }
+            if (received < 0) {
+                break;  // socket closed or hard error
+            }
+            continue;  // empty datagram
+        }
+        if (g_lwUdpInflight.load() >= kLwMaxUdpInflight) {
+            continue;  // under flood: drop and let the client retry
+        }
+        g_lwUdpInflight.fetch_add(1);
+        std::vector<uint8_t> query(buffer, buffer + received);
+        std::thread([udpFd, query = std::move(query), cli, cliLen]() {
+            const std::vector<uint8_t> response = ResolveDnsMessage(query);
+            if (!response.empty()) {
+                sendto(udpFd, response.data(), response.size(), 0,
+                    reinterpret_cast<const sockaddr *>(&cli), cliLen);
+            }
+            g_lwUdpInflight.fetch_sub(1);
+        }).detach();
+    }
+    LogInfo("%{public}s", "==/vpn_native/lw_dns_udp_exit/");
+}
+
+// Start "DNS server / coexist" mode with the lightweight engine: bind matching
+// DNS listeners on bindIp:port over both TCP and UDP (no VPN, no TUN) and resolve
+// each query through the local matcher + UDP upstream. A separate proxy/VPN app
+// can point its DNS upstream at tcp:// or udp://bindIp:port. The UDP listener is
+// best effort (a UDP bind failure leaves the TCP server fully functional).
+// Teardown goes through StopDnsFilter().
 std::string StartLwDnsServer(const std::string &bindIp, uint16_t port, const std::string &upstreamDnsIp,
     const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds)
 {
@@ -2822,6 +2891,31 @@ std::string StartLwDnsServer(const std::string &bindIp, uint16_t port, const std
         return e;
     }
 
+    // Companion UDP listener on the same ip:port. Best effort: if it can't be
+    // created/bound, log and carry on with TCP only so existing clients keep
+    // working.
+    int udpFd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udpFd >= 0) {
+        int udpReuse = 1;
+        setsockopt(udpFd, SOL_SOCKET, SO_REUSEADDR, &udpReuse, sizeof(udpReuse));
+        // Periodic wakeups so the recv loop can observe stopRequested and exit.
+        timeval udpTimeout {};
+        udpTimeout.tv_sec = 1;
+        udpTimeout.tv_usec = 0;
+        setsockopt(udpFd, SOL_SOCKET, SO_RCVTIMEO, &udpTimeout, sizeof(udpTimeout));
+        sockaddr_in udpAddr {};
+        udpAddr.sin_family = AF_INET;
+        udpAddr.sin_port = htons(port);
+        if (inet_pton(AF_INET, bindIp.c_str(), &udpAddr.sin_addr) != 1
+            || bind(udpFd, reinterpret_cast<sockaddr *>(&udpAddr), sizeof(udpAddr)) < 0) {
+            LogError("==/vpn_native/lw_dns_udp_bind_error/ %{public}s", std::strerror(errno));
+            close(udpFd);
+            udpFd = -1;
+        }
+    } else {
+        LogError("==/vpn_native/lw_dns_udp_socket_error/ %{public}s", std::strerror(errno));
+    }
+
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         // -1 fd: no TUN. Seed the resolver state (rules/upstream/query log) the
@@ -2830,8 +2924,13 @@ std::string StartLwDnsServer(const std::string &bindIp, uint16_t port, const std
         g_state.fullMode = false;
         g_state.dnsServerListenFd = listenFd;
         g_state.dnsServerThread = std::thread(LwDnsServerAcceptLoop, listenFd);
+        if (udpFd >= 0) {
+            g_state.dnsServerUdpFd = udpFd;
+            g_state.dnsServerUdpThread = std::thread(LwDnsServerUdpLoop, udpFd);
+        }
     }
-    LogInfo("==/vpn_native/lw_dns_server_started/ port=%{public}u", static_cast<unsigned>(port));
+    LogInfo("==/vpn_native/lw_dns_server_started/ port=%{public}u udp=%{public}d",
+        static_cast<unsigned>(port), udpFd >= 0 ? 1 : 0);
     return {};
 }
 

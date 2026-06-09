@@ -12,6 +12,7 @@ import { SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { geoLocationManager } from '@kit.LocationKit';
 import { webview } from '@kit.ArkWeb';
 import { BLOCKED_SERVICES, BlockedServiceDef } from '../data/BlockedServices';
+import { dnsLogDb, DnsLogRow } from '../data/DnsLogDb';
 import type { PromptAction } from '@ohos.arkui.UIContext';
 import abilityAccessCtrl, { Permissions } from '@ohos.abilityAccessCtrl';
 import bundleManager from '@ohos.bundle.bundleManager';
@@ -446,6 +447,26 @@ interface QuerySummary {
   totalDnsBytes: number;
 }
 
+// Subset of AdGuardHome's querylog.json line shape we read in full DNS-proxy mode.
+interface AghQueryLogRule {
+  Text?: string;
+}
+
+interface AghQueryLogResult {
+  IsFiltered?: boolean;
+  Reason?: number;
+  Rules?: AghQueryLogRule[];
+}
+
+interface AghQueryLogLine {
+  T?: string;
+  QH?: string;
+  QT?: string;
+  Answer?: string;
+  Cached?: boolean;
+  Result?: AghQueryLogResult;
+}
+
 interface DomainQueryStats {
   domain: string;
   total: number;
@@ -677,6 +698,10 @@ struct Index {
   @State customBlockRuleCountBadge: number = 0;
   @State customAllowRuleCountBadge: number = 0;
   @State queryEvents: QueryLogEntry[] = [];
+  // Current filter+search match count (full table, for pagination/labels) and a
+  // recent-rows window (drives the domain leaderboard). Both filled by SQL.
+  @State dnsFilteredCount: number = 0;
+  @State recentRows: QueryLogEntry[] = [];
   @State querySummary: QuerySummary = defaultQuerySummary();
   @State debugLines: string[] = [];
   @State showDnsSheet: boolean = false;
@@ -760,6 +785,17 @@ struct Index {
   @State avoidPaddingBottom: number = 0;
 
   private refreshTimer: number = -1;
+  // DNS query-log RDB ingestion state. The native layer keeps appending jsonl;
+  // we incrementally ingest new lines into SQLite (DnsLogDb) and query it. Offsets
+  // are character offsets into the (ASCII) log text; lastTs is the ingest
+  // watermark used to skip already-stored rows on a full re-scan (launch/rotation).
+  private dnsDbReady: boolean = false;
+  private dnsDbInitStarted: boolean = false;
+  private dnsRefreshing: boolean = false;
+  private appLogOffset: number = 0;
+  private appLogLastTs: number = 0;
+  private aghLogOffset: number = 0;
+  private aghLogLastTs: number = 0;
   // Locale-specific resource manager so t() reflects the in-app language choice
   // immediately, without waiting for an app restart.
   private overrideResManager?: resourceManager.ResourceManager;
@@ -2089,13 +2125,13 @@ struct Index {
   }
 
   private async copyDnsRequests(): Promise<void> {
-    const content = this.dnsExportText();
+    const content = await this.dnsExportTextAsync();
     if (content.trim().length === 0) {
       this.dnsSheetFeedbackText = this.t('noDnsRequestsToCopy');
       return;
     }
     await this.copyText(content);
-    this.dnsSheetFeedbackText = this.t('dnsRequestsCopied', this.filteredQueryEvents().length);
+    this.dnsSheetFeedbackText = this.t('dnsRequestsCopied', this.dnsFilteredCount);
   }
 
   private async copyDebugLogs(): Promise<void> {
@@ -2112,26 +2148,11 @@ struct Index {
     return this.debugLines.slice().reverse().join('\n');
   }
 
-  private filteredQueryEvents(): QueryLogEntry[] {
-    let items: QueryLogEntry[] = this.queryEvents;
-    if (this.dnsActionFilter !== 'all') {
-      items = items.filter((item: QueryLogEntry) => item.action.trim().toLowerCase() === this.dnsActionFilter);
-    }
-    const keyword = this.dnsSearchText.trim().toLowerCase();
-    if (keyword.length === 0) {
-      return items;
-    }
-    return items.filter((item: QueryLogEntry) => {
-      return item.domain.toLowerCase().includes(keyword)
-        || item.qtype.toLowerCase().includes(keyword)
-        || item.action.toLowerCase().includes(keyword)
-        || item.rule.toLowerCase().includes(keyword);
-    });
-  }
-
-  // Total number of pages for the current filter/search (at least 1).
+  // Total number of pages for the current filter/search (at least 1). The count
+  // comes from SQL over the whole table, so it's correct regardless of which page
+  // is currently loaded.
   private dnsTotalPages(): number {
-    return Math.max(1, Math.ceil(this.filteredQueryEvents().length / DNS_PAGE_SIZE));
+    return Math.max(1, Math.ceil(this.dnsFilteredCount / DNS_PAGE_SIZE));
   }
 
   // Current page index, clamped into range (the filtered set can shrink when a
@@ -2140,12 +2161,10 @@ struct Index {
     return Math.min(Math.max(0, this.dnsPage), this.dnsTotalPages() - 1);
   }
 
-  // The slice of filtered events for the current page. Rendering only one page
-  // (vs every entry) is what keeps the list responsive with large logs.
+  // The current page of events. queryEvents already holds exactly the SQL page for
+  // the active filter/search (newest first), so just return it.
   private pagedQueryEvents(): QueryLogEntry[] {
-    const all: QueryLogEntry[] = this.filteredQueryEvents();
-    const start: number = this.clampedDnsPage() * DNS_PAGE_SIZE;
-    return all.slice(start, start + DNS_PAGE_SIZE);
+    return this.queryEvents;
   }
 
   private queryEntryText(item: QueryLogEntry): string {
@@ -2168,13 +2187,18 @@ struct Index {
     }
   }
 
-  private dnsExportText(): string {
-    const lines: string[] = this.filteredQueryEvents().map((item: QueryLogEntry) => this.queryEntryText(item));
-    return lines.join('\n');
+  // Build export text from all rows matching the current filter/search (capped),
+  // queried fresh from the DB rather than the loaded page.
+  private async dnsExportTextAsync(): Promise<string> {
+    if (!this.dnsDbReady) {
+      return '';
+    }
+    const rows: DnsLogRow[] = await dnsLogDb.allFiltered(this.dnsActionFilter, this.dnsSearchText, 50000);
+    return rows.map((r: DnsLogRow) => this.queryEntryText(this.rowToEntry(r))).join('\n');
   }
 
   private dnsSheetCountText(): string {
-    return `${this.filteredQueryEvents().length} ${this.t('lines')}`;
+    return `${this.dnsFilteredCount} ${this.t('lines')}`;
   }
 
   private domainSheetCountText(): string {
@@ -2183,7 +2207,7 @@ struct Index {
 
   private topDomainStats(limit: number = 5): DomainQueryStats[] {
     const map: Map<string, DomainQueryStats> = new Map<string, DomainQueryStats>();
-    for (const item of this.queryEvents) {
+    for (const item of this.recentRows) {
       const key: string = item.domain.trim().toLowerCase();
       if (key.length === 0) {
         continue;
@@ -2423,7 +2447,7 @@ struct Index {
   }
 
   private async exportDnsRequests(): Promise<void> {
-    const content = this.dnsExportText();
+    const content = await this.dnsExportTextAsync();
     if (content.trim().length === 0) {
       this.dnsSheetFeedbackText = this.t('noDnsRequestsToExport');
       return;
@@ -2445,8 +2469,19 @@ struct Index {
     if (!this.writeTextFile(this.queryLogFilePath, '')) {
       throw new Error(this.t('clearDnsRequestsFailed'));
     }
+    // Wipe the DB too. The app jsonl is now empty; for AGH (full-proxy) skip its
+    // pre-existing history by parking the watermark/offset at the current file end
+    // so only post-clear entries get re-ingested.
+    dnsLogDb.clear().catch(() => {
+    });
+    this.appLogOffset = 0;
+    this.appLogLastTs = 0;
+    this.aghLogLastTs = Date.now();
+    this.aghLogOffset = this.readTextFile(this.aghQueryLogPath()).length;
     this.queryEvents = [];
+    this.recentRows = [];
     this.querySummary = defaultQuerySummary();
+    this.dnsFilteredCount = 0;
     this.dnsSheetFeedbackText = this.t('dnsRequestsCleared');
     this.keepAliveStatusText = this.t('dnsRequestsCleared');
     this.dnsSearchText = '';
@@ -2689,6 +2724,8 @@ struct Index {
     this.loadAppVersion();
     this.refreshAll();
     this.syncDnsProxyRunning();
+    this.initDnsDb().catch(() => {
+    });
     void this.tryAutoStartFilterOnLaunch();
     this.refreshTimer = setInterval(() => {
       this.refreshAll();
@@ -3046,74 +3083,270 @@ struct Index {
     }
   }
 
+  // Open the "recent DNS requests" sheet pre-filtered to a tab (used by the home
+  // allowed/blocked stat cards so a tap jumps straight to that filter).
+  private openDnsSheetWithFilter(filter: QueryActionFilter): void {
+    this.dnsActionFilter = filter;
+    this.dnsPage = 0;
+    this.dnsSheetFeedbackText = '';
+    this.showDnsSheet = true;
+    this.refreshQueryLog();
+  }
+
+  // Kick off the async RDB-backed refresh (ingest new jsonl/AGH lines, then query
+  // counts + the current page + the leaderboard window). Kept synchronous-named so
+  // the refresh timer and filter/search/page handlers can call it fire-and-forget.
   private refreshQueryLog(): void {
     if (this.suppressRuntimeArtifacts) {
       this.queryEvents = [];
+      this.recentRows = [];
       this.querySummary = defaultQuerySummary();
+      this.dnsFilteredCount = 0;
       return;
     }
+    this.refreshDnsLogAsync().catch(() => {
+    });
+  }
 
-    const raw = this.readTextFile(this.queryLogFilePath);
-    if (raw.trim().length === 0) {
-      this.queryEvents = [];
-      this.querySummary = defaultQuerySummary();
+  // One-time RDB init: open the store and seed per-origin ingest watermarks from
+  // what's already stored, so a relaunch re-scan re-inserts only new rows.
+  private async initDnsDb(): Promise<void> {
+    if (this.dnsDbReady || this.dnsDbInitStarted) {
       return;
     }
+    this.dnsDbInitStarted = true;
+    const ok: boolean = await dnsLogDb.init(this.getHostContext());
+    if (!ok) {
+      this.dnsDbInitStarted = false;
+      return;
+    }
+    this.appLogLastTs = await dnsLogDb.maxTs('app');
+    this.aghLogLastTs = await dnsLogDb.maxTs('agh');
+    this.appLogOffset = 0;
+    this.aghLogOffset = 0;
+    // Apply the configured retention to the DB once at startup (the jsonl has its
+    // own rotation; the DB keeps its own history bounded the same way).
+    if (this.logRetentionDays > 0) {
+      await dnsLogDb.pruneOlderThan(Date.now() - this.logRetentionDays * 24 * 60 * 60 * 1000);
+    }
+    this.dnsDbReady = true;
+    this.refreshDnsLogAsync().catch(() => {
+    });
+  }
 
-    const rawLines: string[] = raw.split('\n');
-    const nonEmpty: string[] = [];
-    let total: number = 0;
-    let allowed: number = 0;
-    let blocked: number = 0;
+  private async refreshDnsLogAsync(): Promise<void> {
+    if (this.suppressRuntimeArtifacts) {
+      return;
+    }
+    if (!this.dnsDbReady) {
+      await this.initDnsDb();
+      if (!this.dnsDbReady) {
+        return;
+      }
+    }
+    if (this.dnsRefreshing) {
+      return;
+    }
+    this.dnsRefreshing = true;
+    try {
+      // Pick the log source by engine, not by network mode. In full mode (VPN or
+      // proxy) AdGuardHome does the filtering and records the accurate result
+      // (incl. blocked) in its own querylog; the C++ relay's app jsonl would mark
+      // every full-mode query "allowed". In lightweight mode the C++ engine writes
+      // the accurate app jsonl itself. The AGH querylog path is shared by both the
+      // VPN extension and the main process (same app filesDir).
+      if (this.fullModeEnabled) {
+        await this.ingestAghLog();
+      } else {
+        await this.ingestAppLog();
+      }
 
-    // Cheap pass over every line for accurate summary counts (no JSON.parse).
-    for (const rawLine of rawLines) {
-      const line: string = rawLine.trim();
-      if (line.length === 0) {
+      const filter: string = this.dnsActionFilter;
+      const search: string = this.dnsSearchText;
+      const summary = await dnsLogDb.summary();
+      const count: number = await dnsLogDb.countFor(filter, search);
+      const totalPages: number = Math.max(1, Math.ceil(count / DNS_PAGE_SIZE));
+      const page: number = Math.min(Math.max(0, this.dnsPage), totalPages - 1);
+      const rows: DnsLogRow[] = await dnsLogDb.page(filter, search, DNS_PAGE_SIZE, page * DNS_PAGE_SIZE);
+      const recent: DnsLogRow[] = await dnsLogDb.recentRows(MAX_QUERY_EVENTS);
+
+      this.querySummary = {
+        total: summary.total,
+        allowed: summary.allowed,
+        blocked: summary.blocked,
+        lastDomain: summary.lastDomain,
+        lastRule: summary.lastRule,
+        requestBytes: summary.requestBytes,
+        responseBytes: summary.responseBytes,
+        totalDnsBytes: summary.totalDnsBytes,
+      };
+      this.dnsFilteredCount = count;
+      this.queryEvents = rows.map((r: DnsLogRow) => this.rowToEntry(r));
+      this.recentRows = recent.map((r: DnsLogRow) => this.rowToEntry(r));
+    } finally {
+      this.dnsRefreshing = false;
+    }
+  }
+
+  private rowToEntry(r: DnsLogRow): QueryLogEntry {
+    return {
+      ts: r.ts,
+      domain: r.domain,
+      qtype: r.qtype,
+      action: r.action,
+      rule: r.rule,
+      source: r.source,
+      requestBytes: r.requestBytes,
+      responseBytes: r.responseBytes,
+      totalDnsBytes: r.totalDnsBytes,
+    };
+  }
+
+  private aghQueryLogPath(): string {
+    const vpnDir: string = `${this.getHostContext().filesDir}/${VPN_DIR_NAME}`;
+    return `${vpnDir}/${AGH_WORK_DIR_NAME}/data/querylog.json`;
+  }
+
+  // Read the appended tail of the app jsonl and insert new rows. On shrink (clear
+  // / rotation) the whole file is re-scanned but the ts watermark skips rows
+  // already stored, so no duplicates.
+  private async ingestAppLog(): Promise<void> {
+    const raw: string = this.readTextFile(this.queryLogFilePath);
+    if (raw.length < this.appLogOffset) {
+      this.appLogOffset = 0;  // file shrank: cleared or rotated
+    }
+    if (raw.length <= this.appLogOffset) {
+      return;
+    }
+    const slice: string = raw.substring(this.appLogOffset);
+    const lastNl: number = slice.lastIndexOf('\n');
+    if (lastNl < 0) {
+      return;  // no complete new line yet
+    }
+    const chunk: string = slice.substring(0, lastNl);
+    const newOffset: number = this.appLogOffset + lastNl + 1;
+    const rows: DnsLogRow[] = [];
+    let maxTs: number = this.appLogLastTs;
+    for (const line of chunk.split('\n')) {
+      const t: string = line.trim();
+      if (t.length === 0) {
         continue;
       }
-      nonEmpty.push(line);
-      total += 1;
-      if (line.indexOf('"action":"blocked"') >= 0) {
-        blocked += 1;
-      } else {
-        allowed += 1;
+      const row: DnsLogRow | undefined = this.parseAppLogLine(t);
+      if (row === undefined || row.ts <= this.appLogLastTs) {
+        continue;
+      }
+      rows.push(row);
+      if (row.ts > maxTs) {
+        maxTs = row.ts;
       }
     }
+    this.appLogOffset = newOffset;
+    if (rows.length > 0) {
+      await dnsLogDb.insertRows(rows, 'app');
+      this.appLogLastTs = maxTs;
+    }
+  }
 
-    // Only JSON-parse the most recent MAX_QUERY_EVENTS lines for the list; parsing
-    // tens of thousands every 1.2s refresh tick would freeze the UI.
-    const startIdx: number = Math.max(0, nonEmpty.length - MAX_QUERY_EVENTS);
-    const parsedEntries: QueryLogEntry[] = [];
-    let lastDomain: string = '';
-    let lastRule: string = '';
-    let requestBytes: number = 0;
-    let responseBytes: number = 0;
-    let totalDnsBytes: number = 0;
-    for (let i = startIdx; i < nonEmpty.length; i++) {
-      try {
-        const entry = JSON.parse(nonEmpty[i]) as QueryLogEntry;
-        parsedEntries.push(entry);
-        requestBytes += entry.requestBytes ?? 0;
-        responseBytes += entry.responseBytes ?? 0;
-        totalDnsBytes += entry.totalDnsBytes ?? ((entry.requestBytes ?? 0) + (entry.responseBytes ?? 0));
-        lastDomain = entry.domain;
-        lastRule = entry.rule;
-      } catch (_) {
+  private async ingestAghLog(): Promise<void> {
+    const raw: string = this.readTextFile(this.aghQueryLogPath());
+    if (raw.length < this.aghLogOffset) {
+      this.aghLogOffset = 0;
+    }
+    if (raw.length <= this.aghLogOffset) {
+      return;
+    }
+    const slice: string = raw.substring(this.aghLogOffset);
+    const lastNl: number = slice.lastIndexOf('\n');
+    if (lastNl < 0) {
+      return;
+    }
+    const chunk: string = slice.substring(0, lastNl);
+    const newOffset: number = this.aghLogOffset + lastNl + 1;
+    const rows: DnsLogRow[] = [];
+    let maxTs: number = this.aghLogLastTs;
+    for (const line of chunk.split('\n')) {
+      const t: string = line.trim();
+      if (t.length === 0) {
+        continue;
+      }
+      const row: DnsLogRow | undefined = this.parseAghLogLine(t);
+      if (row === undefined || row.ts <= this.aghLogLastTs) {
+        continue;
+      }
+      rows.push(row);
+      if (row.ts > maxTs) {
+        maxTs = row.ts;
       }
     }
+    this.aghLogOffset = newOffset;
+    if (rows.length > 0) {
+      await dnsLogDb.insertRows(rows, 'agh');
+      this.aghLogLastTs = maxTs;
+    }
+  }
 
-    this.queryEvents = parsedEntries.reverse();
-    this.querySummary = {
-      total: total,
-      allowed: allowed,
-      blocked: blocked,
-      lastDomain: lastDomain,
-      lastRule: lastRule,
-      requestBytes: requestBytes,
-      responseBytes: responseBytes,
-      totalDnsBytes: totalDnsBytes,
-    };
+  private parseAppLogLine(line: string): DnsLogRow | undefined {
+    try {
+      const e = JSON.parse(line) as QueryLogEntry;
+      const req: number = e.requestBytes ?? 0;
+      const resp: number = e.responseBytes ?? 0;
+      return {
+        ts: e.ts,
+        domain: e.domain,
+        qtype: e.qtype,
+        action: e.action,
+        rule: e.rule,
+        source: e.source ?? '',
+        requestBytes: req,
+        responseBytes: resp,
+        totalDnsBytes: e.totalDnsBytes ?? (req + resp),
+      };
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  private parseAghLogLine(line: string): DnsLogRow | undefined {
+    try {
+      const e = JSON.parse(line) as AghQueryLogLine;
+      const domain: string = (e.QH ?? '').trim();
+      if (domain.length === 0) {
+        return undefined;
+      }
+      const tsMs: number = e.T !== undefined ? Date.parse(e.T) : 0;
+      // AdGuardHome marks a query blocked via the Reason code, not only IsFiltered
+      // (which is omitted/false for e.g. blocked-services hits): FilteredBlockList(3)
+      // .. FilteredBlockedService(8) count as blocked; Rewritten(9-11) and
+      // NotFiltered(0-2) do not.
+      const reason: number = e.Result?.Reason ?? 0;
+      const blocked: boolean = (reason >= 3 && reason <= 8) || e.Result?.IsFiltered === true;
+      // AdGuardHome marks cache hits with a top-level Cached flag (omitted/false
+      // for upstream-resolved). Map it to our source so the cache-hit stat works
+      // in full mode too.
+      const cached: boolean = e.Cached === true;
+      let rule: string = '';
+      const rules: AghQueryLogRule[] | undefined = e.Result?.Rules;
+      if (rules !== undefined && rules.length > 0 && typeof rules[0]?.Text === 'string') {
+        rule = rules[0].Text as string;
+      }
+      // AGH stores the base64 response in Answer; approximate the response size
+      // from it (it does not record the request size).
+      const respBytes: number = typeof e.Answer === 'string' ? Math.floor(e.Answer.length * 3 / 4) : 0;
+      return {
+        ts: Number.isFinite(tsMs) ? tsMs : 0,
+        domain: domain,
+        qtype: e.QT ?? '',
+        action: blocked ? 'blocked' : 'allowed',
+        rule: rule,
+        source: blocked ? 'blocked' : (cached ? 'cache' : 'upstream'),
+        requestBytes: 0,
+        responseBytes: respBytes,
+        totalDnsBytes: respBytes,
+      };
+    } catch (_) {
+      return undefined;
+    }
   }
 
   private refreshDebugLog(): void {
@@ -3879,8 +4112,7 @@ struct Index {
         this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=full cfg=${cfgPath} port=${port}`);
         err = vpnclientbridge.startAghServerOnly(cfgPath, workDir, logPath, port);
       } else {
-        // Lightweight engine: a DNS-over-TCP server backed by the local matcher
-        // (cross-app loopback only works over TCP on HarmonyOS).
+        // Lightweight engine: a DNS server (TCP + UDP) backed by the local matcher.
         this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=lite port=${port} upstream=${upstream}`);
         err = vpnclientbridge.startLwDnsServer('127.0.0.1', port, upstream,
           this.rulesFilePath, this.queryLogFilePath, this.dnsCacheTtlSeconds);
@@ -3955,6 +4187,33 @@ struct Index {
     }
   }
 
+  // One copyable "<scheme>://127.0.0.1:<port>" address row. Both engines listen
+  // on TCP and UDP at the loopback address, so we surface both schemes.
+  @Builder
+  DnsProxyAddressRow(scheme: string) {
+    Row({ space: 8 }) {
+      Text(`${scheme}://127.0.0.1:${this.displayedDnsPort()}`)
+        .fontSize(14)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.primaryTextColor())
+      Blank()
+      Button(this.t('copy'))
+        .fontSize(12)
+        .height(28)
+        .backgroundColor(Color.Transparent)
+        .fontColor('#2B5B95')
+        .onClick(() => {
+          this.copyText(`${scheme}://127.0.0.1:${this.displayedDnsPort()}`);
+          try {
+            this.ensurePromptAction()?.showToast({ message: this.t('dnsProxyCopied') });
+          } catch (_) {
+          }
+        })
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
+  }
+
   @Builder
   DnsProxyCard() {
     Column({ space: 8 }) {
@@ -3972,27 +4231,8 @@ struct Index {
           .fontColor('#2B5B95')
           .width('100%')
 
-        Row({ space: 8 }) {
-          Text(`tcp://127.0.0.1:${this.displayedDnsPort()}`)
-            .fontSize(15)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.primaryTextColor())
-          Blank()
-          Button(this.t('copy'))
-            .fontSize(12)
-            .height(30)
-            .backgroundColor(Color.Transparent)
-            .fontColor('#2B5B95')
-            .onClick(() => {
-              this.copyText(`tcp://127.0.0.1:${this.displayedDnsPort()}`);
-              try {
-                this.ensurePromptAction()?.showToast({ message: this.t('dnsProxyCopied') });
-              } catch (_) {
-              }
-            })
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
+        this.DnsProxyAddressRow('tcp')
+        this.DnsProxyAddressRow('udp')
 
         Button(this.dnsProxyRunning ? this.t('dnsProxyStop') : this.t('dnsProxyStart'))
           .width('100%')
@@ -4245,17 +4485,15 @@ struct Index {
     return Date.now() - updatedAtMs > STATUS_STALE_TIMEOUT_MS;
   }
 
+  // Allowed/blocked come from the SQLite summary (cumulative across restarts and
+  // always consistent with the total = allowed + blocked). The native counters are
+  // per-session (reset on each filter (re)start) and would otherwise make the home
+  // numbers reset to ~0 after an app restart and not add up to the total.
   private displayAllowed(): number {
-    if (this.status.nativeStats.allowedQueries > 0) {
-      return this.status.nativeStats.allowedQueries;
-    }
     return this.querySummary.allowed;
   }
 
   private displayBlocked(): number {
-    if (this.status.nativeStats.blockedQueries > 0) {
-      return this.status.nativeStats.blockedQueries;
-    }
     return this.querySummary.blocked;
   }
 
@@ -4716,11 +4954,13 @@ struct Index {
     .margin({ bottom: 10 })
   }
 
+  // Preview of the most recent queries (independent of the list's active
+  // filter/page), so it uses the recent-rows window rather than the loaded page.
   private visibleQueryEvents(): QueryLogEntry[] {
-    if (this.queryEvents.length <= 8) {
-      return this.queryEvents;
+    if (this.recentRows.length <= 8) {
+      return this.recentRows;
     }
-    return this.queryEvents.slice(0, 8);
+    return this.recentRows.slice(0, 8);
   }
 
   private visibleDebugLines(): string[] {
@@ -4804,6 +5044,8 @@ struct Index {
         .onChange((value: string) => {
           this.dnsSearchText = value;
           this.dnsPage = 0;
+          // Re-query the page/count for the new search term.
+          this.refreshQueryLog();
         })
 
       Row({ space: 8 }) {
@@ -4826,12 +5068,15 @@ struct Index {
           .onClick(() => {
             this.dnsActionFilter = filter;
             this.dnsPage = 0;
+            // Rebuild the list for the new filter now instead of waiting for the
+            // next refresh tick (the list is filter-aware tail of matching lines).
+            this.refreshQueryLog();
           })
         }, (filter: QueryActionFilter) => filter)
       }
       .width('100%')
 
-      if (this.filteredQueryEvents().length === 0) {
+      if (this.dnsFilteredCount === 0) {
         Column() {
           Text(this.t('noDnsLogs'))
             .fontSize(13)
@@ -4924,6 +5169,7 @@ struct Index {
               .onClick(() => {
                 this.dnsPage = Math.max(0, this.clampedDnsPage() - 1);
                 this.dnsListScroller.scrollEdge(Edge.Top);
+                this.refreshQueryLog();
               })
             Text(`${this.clampedDnsPage() + 1} / ${this.dnsTotalPages()}`)
               .fontSize(13)
@@ -4941,6 +5187,7 @@ struct Index {
               .onClick(() => {
                 this.dnsPage = Math.min(this.dnsTotalPages() - 1, this.clampedDnsPage() + 1);
                 this.dnsListScroller.scrollEdge(Edge.Top);
+                this.refreshQueryLog();
               })
           }
           .width('100%')
@@ -5084,7 +5331,7 @@ struct Index {
                   .fontSize(12)
                   .fontColor(this.secondaryTextColor())
                   .width('100%')
-                Text(`${this.t('domainCacheHits')}: ${item.cacheHits} · ${this.t('domainUpstreamQueries')}: ${item.upstreamQueries}`)
+                Text(`${this.t('allowed')}: ${item.allowed} · ${this.t('blocked')}: ${item.blocked}`)
                   .fontSize(12)
                   .fontColor(this.secondaryTextColor())
                   .width('100%')
@@ -6299,48 +6546,19 @@ struct Index {
               })
           }
 
-          // DNS-proxy mode: show the local TCP DNS address + active engine so the
-          // user can point their proxy app's DNS upstream at it.
+          // DNS-proxy mode: show the local DNS address (TCP + UDP) + active engine
+          // so the user can point their proxy app's DNS upstream at it.
           if (this.proxyModeEnabled) {
             Column({ space: 8 }) {
               Text(this.fullModeEnabled ? this.t('dnsProxyEngineFull') : this.t('dnsProxyEngineLite'))
                 .fontSize(12)
                 .fontColor(this.secondaryTextColor())
                 .width('100%')
-              Row({ space: 8 }) {
-                Text(`tcp://127.0.0.1:${this.displayedDnsPort()}`)
-                  .fontSize(14)
-                  .fontWeight(FontWeight.Bold)
-                  .fontColor(this.primaryTextColor())
-                Blank()
-                Button(this.t('copy'))
-                  .fontSize(12)
-                  .height(28)
-                  .backgroundColor(Color.Transparent)
-                  .fontColor('#2B5B95')
-                  .onClick(() => {
-                    this.copyText(`tcp://127.0.0.1:${this.displayedDnsPort()}`);
-                    try {
-                      this.ensurePromptAction()?.showToast({ message: this.t('dnsProxyCopied') });
-                    } catch (_) {
-                    }
-                  })
-              }
-              .width('100%')
-              .alignItems(VerticalAlign.Center)
-
-              if (this.dnsProxyRunning && this.fullModeEnabled) {
-                Button(this.t('dnsProxyDashboard'))
-                  .width('100%')
-                  .height(36)
-                  .fontSize(13)
-                  .backgroundColor(this.softGreenTone())
-                  .fontColor('#2B5B95')
-                  .borderRadius(12)
-                  .onClick(() => {
-                    this.openAghInBrowser();
-                  })
-              }
+              this.DnsProxyAddressRow('tcp')
+              this.DnsProxyAddressRow('udp')
+              // The AdGuardHome dashboard entry lives on the Settings page (it
+              // works for full-engine VPN and DNS-proxy alike), so it isn't
+              // duplicated here.
             }
             .width('100%')
             .alignItems(HorizontalAlign.Start)
@@ -6373,6 +6591,9 @@ struct Index {
           .backgroundColor(this.cardSurfaceTone())
           .borderRadius(18)
           .shadow({ radius: 14, color: this.cardShadowTone() })
+          .onClick(() => {
+            this.openDnsSheetWithFilter('allowed');
+          })
 
           Column({ space: 4 }) {
             Text(`${this.displayBlocked()}`)
@@ -6391,6 +6612,9 @@ struct Index {
           .backgroundColor(this.cardSurfaceTone())
           .borderRadius(18)
           .shadow({ radius: 14, color: this.cardShadowTone() })
+          .onClick(() => {
+            this.openDnsSheetWithFilter('blocked');
+          })
         }
         .width('100%')
 
@@ -6435,17 +6659,9 @@ struct Index {
         .borderRadius(20)
         .shadow({ radius: 14, color: this.cardShadowTone() })
         .onClick(() => {
-          this.dnsSheetFeedbackText = '';
-          this.dnsPage = 0;
-          this.showDnsSheet = true;
-        })
-        .bindSheet(this.showDnsSheet, this.DnsRequestsSheet(), {
-          height: '92%',
-          backgroundColor: this.sheetSurfaceTone(),
-          showClose: false,
-          onDisappear: () => {
-            this.showDnsSheet = false;
-          }
+          // Expanding from the "recent DNS requests" card always lands on the
+          // "All" tab (the Allowed/Blocked cards above jump to their own tab).
+          this.openDnsSheetWithFilter('all');
         })
 
         Column({ space: 12 }) {
@@ -6495,7 +6711,7 @@ struct Index {
                     .fontSize(12)
                     .fontColor(this.secondaryTextColor())
                     .width('100%')
-                  Text(`${this.t('domainCacheHits')}: ${item.cacheHits} · ${this.t('domainUpstreamQueries')}: ${item.upstreamQueries}`)
+                  Text(`${this.t('allowed')}: ${item.allowed} · ${this.t('blocked')}: ${item.blocked}`)
                     .fontSize(12)
                     .fontColor(this.secondaryTextColor())
                     .width('100%')
@@ -6540,6 +6756,17 @@ struct Index {
       .alignItems(HorizontalAlign.Start)
       .margin({ top: 0 })
       .padding({ bottom: this.contentBottomInset() })
+      // Bound on the shared parent (ancestor of the Allowed/Blocked cards and the
+      // recent-requests card) so any of them opens it reliably — a cross-component
+      // bindSheet anchored on one sibling card was flaky when triggered from another.
+      .bindSheet(this.showDnsSheet, this.DnsRequestsSheet(), {
+        height: '92%',
+        backgroundColor: this.sheetSurfaceTone(),
+        showClose: false,
+        onDisappear: () => {
+          this.showDnsSheet = false;
+        }
+      })
     }
     .width('100%')
     .height('100%')
@@ -7404,13 +7631,15 @@ struct Index {
             .width('100%')
             .padding({ top: 10, bottom: 10 })
             .alignItems(VerticalAlign.Center)
-            .opacity(this.fullModeEnabled && this.status.running ? 1 : 0.4)
+            // Enabled whenever the full engine is running, in either VPN or
+            // DNS-proxy mode (activeRunning tracks whichever is active).
+            .opacity(this.fullModeEnabled && this.activeRunning() ? 1 : 0.4)
             .onClick(() => {
               if (!this.fullModeEnabled) {
                 this.notifyFullEngineRequired();
                 return;
               }
-              if (!this.status.running) {
+              if (!this.activeRunning()) {
                 try {
                   this.ensurePromptAction()?.showToast({
                     message: this.tri('Start filtering first', '请先启动过滤', '請先啟動過濾')

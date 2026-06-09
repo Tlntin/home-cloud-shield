@@ -71,7 +71,7 @@
 
 ## 更新日志
 
-当前版本：**v0.0.4**。最新中英双语更新日志见 [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md)；历史版本见 [`docs/CHANGELOG-0.0.3.md`](./docs/CHANGELOG-0.0.3.md)。
+当前版本：**v0.0.5**。最新中英双语更新日志见 [`docs/CHANGELOG-0.0.5.md`](./docs/CHANGELOG-0.0.5.md)；历史版本见 [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md)。
 
 ## 项目概览
 
@@ -177,7 +177,7 @@
 - **近期**：持续打磨完整模式的稳定性与功耗、补充规则兼容说明与构建产物文档。
 - **中长期**：进一步对齐轻量级与完整模式的能力，优化移动端常驻体验与发布流程。
 
-> 各版本详细变更见 [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md)（及 [`docs/CHANGELOG-0.0.3.md`](./docs/CHANGELOG-0.0.3.md)）。
+> 各版本详细变更见 [`docs/CHANGELOG-0.0.5.md`](./docs/CHANGELOG-0.0.5.md)（及 [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md)）。
 
 ## 仓库结构
 

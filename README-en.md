@@ -71,7 +71,7 @@ Of course, you can also build and install the app directly with **DevEco Studio*
 
 ## Changelog
 
-Current version: **v0.0.4**. The latest bilingual changelog is in [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md); older versions are in [`docs/CHANGELOG-0.0.3.md`](./docs/CHANGELOG-0.0.3.md).
+Current version: **v0.0.5**. The latest bilingual changelog is in [`docs/CHANGELOG-0.0.5.md`](./docs/CHANGELOG-0.0.5.md); older versions are in [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md).
 
 ## Overview
 
@@ -175,7 +175,7 @@ So the more accurate description of this project today is: a **HarmonyOS local D
 - **Near term**: keep polishing full-mode stability and power usage, and add clearer rule-compatibility notes and build-artifact documentation.
 - **Mid to long term**: further align the capabilities of the lightweight and full modes, and improve the mobile background experience and release flow.
 
-> Per-version details are in [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md) (and [`docs/CHANGELOG-0.0.3.md`](./docs/CHANGELOG-0.0.3.md)).
+> Per-version details are in [`docs/CHANGELOG-0.0.5.md`](./docs/CHANGELOG-0.0.5.md) (and [`docs/CHANGELOG-0.0.4.md`](./docs/CHANGELOG-0.0.4.md)).
 
 ## Repository Layout
 

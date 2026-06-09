@@ -32,6 +32,7 @@ import (
 	"sync"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
+	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
 	"github.com/AdguardTeam/golibs/errors"
@@ -271,6 +272,11 @@ func StopEmbedded() {
 	// StartEmbedded builds a fresh mux (globalContext.mux), so re-enable it to let
 	// the client web handlers register again on the new mux.
 	webHandlersRegistered = false
+	// dnsforward.registerHandlers has its own once-flag (webRegistered) gating
+	// /control/dns_info, /control/access/list, /control/cache_clear, etc. Clear it
+	// too so those re-register on the fresh mux; otherwise the dashboard's requests
+	// for them 404 after a Stop/Start within the persistent process.
+	dnsforward.ResetWebRegistered()
 
 	embedStarted = false
 }

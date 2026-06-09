@@ -54,7 +54,7 @@ fi
 
 # The OHOS embedding/export sources live in this repo (outside the submodule)
 # so the corresponding source is tracked and the build is reproducible.
-for f in main_ohos_c_shared.go embed_ohos.go; do
+for f in main_ohos_c_shared.go embed_ohos.go reset_dnsforward_ohos.go; do
   [[ -f "$EMBED_DIR/$f" ]] || { echo "[build] missing custom source: $EMBED_DIR/$f" >&2; exit 1; }
 done
 
@@ -62,11 +62,13 @@ done
 # them again on exit so the submodule working tree stays clean.
 INJECTED_EXPORT="$AGH_DIR/main_ohos_c_shared.go"
 INJECTED_EMBED="$AGH_DIR/internal/home/embed_ohos.go"
-cleanup_injected() { rm -f "$INJECTED_EXPORT" "$INJECTED_EMBED"; }
+INJECTED_RESET="$AGH_DIR/internal/dnsforward/reset_ohos.go"
+cleanup_injected() { rm -f "$INJECTED_EXPORT" "$INJECTED_EMBED" "$INJECTED_RESET"; }
 trap cleanup_injected EXIT
 
 cp "$EMBED_DIR/main_ohos_c_shared.go" "$INJECTED_EXPORT"
 cp "$EMBED_DIR/embed_ohos.go" "$INJECTED_EMBED"
+cp "$EMBED_DIR/reset_dnsforward_ohos.go" "$INJECTED_RESET"
 
 # The full-mode web admin (AdGuardHome dashboard) is served from the embedded
 # frontend at build/static (//go:embed build in main.go). It is a generated
