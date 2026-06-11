@@ -50,7 +50,9 @@ Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **
 
 Grab a package from **Releases**: <https://github.com/Tlntin/home-cloud-shield/releases>
 
-[Auto-Installer](https://github.com/likuai2010/auto-installer/releases/latest) is the recommended way to install Release packages; you can also build the app yourself with **DevEco Studio** (see [Quick Start and Build](#quick-start-and-build)).
+It is also available from a third-party app site: <https://sydxky.cn/detail.php?id=575>
+
+[Auto-Installer](https://github.com/likuai2010/auto-installer/releases/latest) and [HO-Kit](https://sydxky.cn/hokit.php) are the recommended ways to install Release packages; you can also build the app yourself with **DevEco Studio** (see [Quick Start and Build](#quick-start-and-build)).
 
 <details>
 <summary>Auto-Installer tutorials</summary>

@@ -50,7 +50,9 @@
 
 直接从 **Releases** 获取安装包：<https://github.com/Tlntin/home-cloud-shield/releases>
 
-推荐使用 [小白调试助手（Auto-Installer）](https://github.com/likuai2010/auto-installer/releases/latest) 安装；也可以用 **DevEco Studio** 自行构建（见[快速开始与构建](#快速开始与构建)）。
+也可以从第三方应用站获取：<https://sydxky.cn/detail.php?id=575>
+
+推荐使用 [小白调试助手（Auto-Installer）](https://github.com/likuai2010/auto-installer/releases/latest) 或 [HO-Kit](https://sydxky.cn/hokit.php) 安装；也可以用 **DevEco Studio** 自行构建（见[快速开始与构建](#快速开始与构建)）。
 
 <details>
 <summary>小白调试助手使用教程</summary>
