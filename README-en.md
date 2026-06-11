@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.0.5-orange)
+![Version](https://img.shields.io/badge/Version-v0.0.6-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `home_cloud_shield` is a local DNS filtering app for **HarmonyOS 6.0+**: it intercepts DNS traffic through a **local VPN** or a **pure DNS proxy**, blocks ad and tracking domains with **AdGuard-style rules**, and ships a **dual filtering engine** (lightweight / full AdGuardHome).
 
-Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.0.5** ([Changelog](#changelog))
+Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.0.6** ([Changelog](#changelog))
 
 ## Table of Contents
 
@@ -73,14 +73,14 @@ Auto-Installer is a free, cross-platform HarmonyOS app deployment and debugging 
 
 ## Changelog
 
-Current version **v0.0.5** (2026-06-09), main changes:
+Current version **v0.0.6** (2026-06-11), main changes:
 
-- **Fixed filtering / blocking stopping after joining Wi-Fi**: Wi-Fi-provided resolvers and common public DNS are now captured too, with automatic re-adaptation on network switches.
-- **The lightweight engine's DNS server now supports UDP**: in DNS-proxy mode both engines accept `udp://` upstreams.
-- **DNS query log moved to SQLite**: faster and more accurate counts / pagination / filtering, persistent cumulative stats; query records and blocked counts now also show correctly on the full engine.
-- **AdGuardHome dashboard entry consolidated to Settings**: it opens in both VPN mode and DNS-proxy mode.
+- **Fixed severe lag / crashes opening the app with tens of thousands of DNS records**: stats are now incremental persisted counters, log files are read by appended tail only, and list queries run on demand with rate limiting.
+- **Fixed no new query records in the app on the full engine (AdGuardHome)**: the query log now flushes every entry to disk, keeping the app's list in sync with the dashboard.
+- **Fixed the "running → stopped → running" status flicker at launch**: ghost status files from a killed session are ignored, and with auto-start the first screen shows "Auto-starting…" directly.
+- **Added auto-restart for dropped services**: a background VPN / DNS proxy reclaimed by the system is restarted automatically (exponential backoff, up to 5 attempts).
 
-Full bilingual changelogs: [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
+Full bilingual changelogs: [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
 
 ## Engines and Network Modes
 

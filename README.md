@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.0.5-orange)
+![Version](https://img.shields.io/badge/Version-v0.0.6-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `栖云盾` 是一个面向 **HarmonyOS 6.0+** 的本地 DNS 过滤应用：通过**本地 VPN** 或**纯 DNS 代理**接管 DNS 流量，按 **AdGuard 风格规则**拦截广告与跟踪域名，内置**轻量级 / 完整（AdGuardHome）双过滤引擎**。
 
-项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.0.5**（[更新日志](#更新日志)）
+项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.0.6**（[更新日志](#更新日志)）
 
 ## 目录
 
@@ -73,14 +73,14 @@
 
 ## 更新日志
 
-当前版本 **v0.0.5**（2026-06-09），主要变更：
+当前版本 **v0.0.6**（2026-06-11），主要变更：
 
-- **修复连上 Wi-Fi 后过滤 / 拦截失效**：Wi-Fi 下发的解析器与常见公共 DNS 一并纳入捕获，网络切换自动适配。
-- **轻量级引擎的 DNS 服务器支持 UDP**：纯 DNS 代理模式下两种引擎都可用 `udp://`。
-- **DNS 查询日志改用 SQLite**：计数 / 分页 / 筛选更快更准，统计跨重启持久累计；完整引擎下也能正确显示查询记录与拦截统计。
-- **AdGuardHome 管理面板入口统一到设置页**：VPN 模式与纯 DNS 代理模式均可打开。
+- **修复 DNS 记录达到几万条时打开 App 卡顿甚至闪退**：统计改为增量计数器持久化、日志只读新增尾部、列表查询按需限流。
+- **修复完整引擎（AdGuardHome）下 App 看不到新查询记录**：查询日志改为每条立即落盘，App 列表与管理面板保持同步。
+- **修复启动时状态闪变「已启动 → 已停止 → 已启动」**：忽略上次会话遗留的幽灵状态，自动启动时首屏直接显示「自动启动中…」。
+- **新增服务断开自动重启**：后台 VPN / DNS 代理被系统回收后自动拉起（指数退避，最多 5 次）。
 
-完整变更（中英双语）：[v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
+完整变更（中英双语）：[v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
 
 ## 引擎与网络模式
 

@@ -11,8 +11,10 @@ import { hdsMaterial, HdsTabs } from '@kit.UIDesignKit';
 import { SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { geoLocationManager } from '@kit.LocationKit';
 import { webview } from '@kit.ArkWeb';
+import { util } from '@kit.ArkTS';
 import { BLOCKED_SERVICES, BlockedServiceDef } from '../data/BlockedServices';
-import { dnsLogDb, DnsLogRow } from '../data/DnsLogDb';
+import { dnsLogDb, DnsLogRow, DnsLogSummary } from '../data/DnsLogDb';
+import { dnsStats } from '../data/DnsStats';
 import type { PromptAction } from '@ohos.arkui.UIContext';
 import abilityAccessCtrl, { Permissions } from '@ohos.abilityAccessCtrl';
 import bundleManager from '@ohos.bundle.bundleManager';
@@ -48,6 +50,28 @@ const AGH_SCHEMA_VERSION = 29;
 // rendering them at once freezes the UI), and how many to show per page.
 const MAX_QUERY_EVENTS = 2000;
 const DNS_PAGE_SIZE = 100;
+// The recent-rows window (leaderboard source) is only re-queried when new rows
+// were ingested AND at least this long has passed since the last fetch — pulling
+// 2000 rows out of SQLite every 1.2s tick is what froze the UI on big tables.
+const RECENT_REFRESH_MIN_MS = 5000;
+// Auto-restart of a dropped filter service: minimum gap between attempts
+// (doubles per consecutive failure) and the give-up threshold.
+const AUTO_RESTART_BASE_DELAY_MS = 5000;
+const AUTO_RESTART_MAX_DELAY_MS = 60000;
+const AUTO_RESTART_MAX_ATTEMPTS = 5;
+// The debug-log preview only shows the last ~20 lines; read at most this many
+// trailing bytes instead of the whole (potentially multi-MB) file every tick.
+const DEBUG_LOG_TAIL_BYTES = 16384;
+// How long after launch a "running" status stamped BEFORE launch may stay
+// unconfirmed: a live extension stamps a post-launch write within ~1s, so past
+// this grace the snapshot is a leftover of a killed session and declared dead.
+const LAUNCH_STATUS_GRACE_MS = 2500;
+// After a start request the extension takes a while to come up and transiently
+// reports intermediate phases ('creating', even 'stopped' during a restart).
+// Within this window the watchdog must not declare the service dead (it fired a
+// duplicate start one tick after the first), and the home banner keeps showing
+// "starting" instead of flashing "stopped".
+const START_SETTLE_GRACE_MS = 15000;
 const STATUS_FILE_NAME = 'status.json';
 const RULES_FILE_NAME = 'filters.txt';
 const QUERY_LOG_FILE_NAME = 'dns_queries.jsonl';
@@ -121,7 +145,9 @@ type LanguageKey =
   | 'dnsProxyDashboard' | 'dnsProxyDashboardDesc' | 'dnsProxyRunningStatus' | 'dnsProxyStoppedStatus'
   | 'dnsProxyStopVpnFirst' | 'dnsProxyEngineLite' | 'dnsProxyEngineFull'
   | 'modeVpn' | 'modeDnsProxy' | 'dnsProxyPortTitle' | 'dnsProxyPortHint' | 'dnsProxyPortInvalid'
-  | 'aghPanelPortTitle' | 'aghPanelPortHint' | 'aghPanelPortConflict' | 'dnsProxyPortBumped';
+  | 'aghPanelPortTitle' | 'aghPanelPortHint' | 'aghPanelPortConflict' | 'dnsProxyPortBumped'
+  | 'autoRestartAttempt' | 'autoRestartGaveUp' | 'autoStarting' | 'startingStatus'
+  | 'creatingVpnNote' | 'vpnActiveNote' | 'vpnStoppedNote';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -378,6 +404,13 @@ function resolveStringResource(key: LanguageKey): number {
     case 'aghPanelPortHint': return $r('app.string.aghPanelPortHint').id;
     case 'aghPanelPortConflict': return $r('app.string.aghPanelPortConflict').id;
     case 'dnsProxyPortBumped': return $r('app.string.dnsProxyPortBumped').id;
+    case 'autoRestartAttempt': return $r('app.string.autoRestartAttempt').id;
+    case 'autoRestartGaveUp': return $r('app.string.autoRestartGaveUp').id;
+    case 'autoStarting': return $r('app.string.autoStarting').id;
+    case 'startingStatus': return $r('app.string.startingStatus').id;
+    case 'creatingVpnNote': return $r('app.string.creatingVpnNote').id;
+    case 'vpnActiveNote': return $r('app.string.vpnActiveNote').id;
+    case 'vpnStoppedNote': return $r('app.string.vpnStoppedNote').id;
   }
 }
 
@@ -669,6 +702,12 @@ function defaultQuerySummary(): QuerySummary {
   };
 }
 
+// Newly appended complete lines of a log file (see readLogTail).
+interface LogTail {
+  chunk: string;
+  nextOffset: number;
+}
+
 @Entry
 @Component
 struct Index {
@@ -787,8 +826,9 @@ struct Index {
   private refreshTimer: number = -1;
   // DNS query-log RDB ingestion state. The native layer keeps appending jsonl;
   // we incrementally ingest new lines into SQLite (DnsLogDb) and query it. Offsets
-  // are character offsets into the (ASCII) log text; lastTs is the ingest
-  // watermark used to skip already-stored rows on a full re-scan (launch/rotation).
+  // are BYTE offsets into the log file (only the appended tail is read each tick,
+  // never the whole file); lastTs is the ingest watermark used to skip
+  // already-stored rows on a full re-scan (launch/rotation).
   private dnsDbReady: boolean = false;
   private dnsDbInitStarted: boolean = false;
   private dnsRefreshing: boolean = false;
@@ -796,6 +836,35 @@ struct Index {
   private appLogLastTs: number = 0;
   private aghLogOffset: number = 0;
   private aghLogLastTs: number = 0;
+  // Query-result caches for the refresh tick: the page/count SQL only reruns when
+  // the sheet is open and either new rows arrived or the filter/search/page
+  // changed; the recent window only reruns on new rows, rate-limited.
+  private dnsLoadedQueryKey: string = '';
+  private recentRowsLoaded: boolean = false;
+  private lastRecentRefreshMs: number = 0;
+  private logTailDecoder: util.TextDecoder = util.TextDecoder.create('utf-8');
+  // Auto-restart of a dropped service. "Desired" mirrors the user's intent (set
+  // on start, cleared on manual stop); when the status pump reports the service
+  // dead while still desired, it is restarted with exponential backoff.
+  private vpnDesiredRunning: boolean = false;
+  private dnsProxyDesiredRunning: boolean = false;
+  private autoRestartAttempts: number = 0;
+  private lastAutoRestartAt: number = 0;
+  private autoRestarting: boolean = false;
+  private autoRestartGaveUp: boolean = false;
+  // When the last start request was issued (manual, auto-start, or watchdog);
+  // drives the START_SETTLE_GRACE_MS hold-off.
+  private lastStartRequestAt: number = 0;
+  // True while the auto-start permission probe briefly starts/stops the VPN, so
+  // the watchdog does not adopt that transient run and restart it afterwards.
+  private probingVpnPermission: boolean = false;
+  // When this UI process started; used to reject "ghost running" status files
+  // left behind by a killed session (see isStaleRunningSnapshot).
+  private readonly appLaunchMs: number = Date.now();
+  // True while a "running" snapshot stamped before launch is awaiting its first
+  // post-launch write (live extension) or the grace timeout (dead leftover).
+  // Auto-start and the watchdog hold off while this is set.
+  private launchStatusPending: boolean = false;
   // Locale-specific resource manager so t() reflects the in-app language choice
   // immediately, without waiting for an app restart.
   private overrideResManager?: resourceManager.ResourceManager;
@@ -1771,6 +1840,11 @@ struct Index {
       return;
     }
     this.proxyModeEnabled = proxy;
+    // The watchdog must not restart the previous mode's service after a switch.
+    this.vpnDesiredRunning = false;
+    this.dnsProxyDesiredRunning = false;
+    this.autoRestartAttempts = 0;
+    this.autoRestartGaveUp = false;
     this.savePersistState();
   }
 
@@ -2474,14 +2548,18 @@ struct Index {
     // so only post-clear entries get re-ingested.
     dnsLogDb.clear().catch(() => {
     });
+    dnsStats.reset();
     this.appLogOffset = 0;
     this.appLogLastTs = 0;
     this.aghLogLastTs = Date.now();
-    this.aghLogOffset = this.readTextFile(this.aghQueryLogPath()).length;
+    this.aghLogOffset = this.fileByteSize(this.aghQueryLogPath());
     this.queryEvents = [];
     this.recentRows = [];
     this.querySummary = defaultQuerySummary();
     this.dnsFilteredCount = 0;
+    this.dnsLoadedQueryKey = '';
+    this.recentRowsLoaded = true;
+    this.lastRecentRefreshMs = 0;
     this.dnsSheetFeedbackText = this.t('dnsRequestsCleared');
     this.keepAliveStatusText = this.t('dnsRequestsCleared');
     this.dnsSearchText = '';
@@ -3011,6 +3089,62 @@ struct Index {
     }
   }
 
+  private fileByteSize(path: string): number {
+    try {
+      return fileIo.statSync(path).size;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  // Read only the newly appended bytes of a log file (from `offset` to EOF) and
+  // return the complete lines (up to the last '\n') plus the next byte offset;
+  // undefined when there is nothing new. On shrink (clear / rotation) reading
+  // restarts from 0 and the ts watermark dedupes. Reading just the tail keeps the
+  // per-tick cost independent of the file size — the old whole-file
+  // readTextSync froze the UI once the jsonl grew to many MB.
+  private readLogTail(path: string, offset: number): LogTail | undefined {
+    const size: number = this.fileByteSize(path);
+    const from: number = size < offset ? 0 : offset;
+    if (size <= from) {
+      return undefined;
+    }
+    const buf: ArrayBuffer = new ArrayBuffer(size - from);
+    let got: number = 0;
+    let f: fileIo.File | undefined = undefined;
+    try {
+      f = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
+      got = fileIo.readSync(f.fd, buf, { offset: from });
+    } catch (_) {
+      return undefined;
+    } finally {
+      if (f !== undefined) {
+        try {
+          fileIo.closeSync(f);
+        } catch (_) {
+        }
+      }
+    }
+    if (got <= 0) {
+      return undefined;
+    }
+    // Consume up to the last newline only, leaving a partially written line for
+    // the next tick (0x0A never occurs inside a multi-byte UTF-8 sequence).
+    const bytes: Uint8Array = new Uint8Array(buf, 0, got);
+    let lastNl: number = -1;
+    for (let i: number = bytes.length - 1; i >= 0; i--) {
+      if (bytes[i] === 0x0A) {
+        lastNl = i;
+        break;
+      }
+    }
+    if (lastNl < 0) {
+      return undefined;
+    }
+    const chunk: string = this.logTailDecoder.decodeToString(new Uint8Array(buf, 0, lastNl));
+    return { chunk: chunk, nextOffset: from + lastNl + 1 };
+  }
+
   private writeTextFile(path: string, content: string): boolean {
     let f: fileIo.File | undefined = undefined;
     try {
@@ -3052,11 +3186,86 @@ struct Index {
     this.refreshStatus();
     this.refreshQueryLog();
     this.refreshDebugLog();
+    // DNS-proxy mode has no status pump; poll the in-process native flag so a
+    // dead proxy is noticed (and can be auto-restarted) instead of the toggle
+    // staying stuck on "running".
+    if (this.proxyModeEnabled && this.dnsProxyRunning) {
+      this.syncDnsProxyRunning();
+    }
+    // Re-attempt the launch auto-start once an unconfirmed launch snapshot has
+    // resolved (guarded internally: runs at most once per launch).
+    void this.tryAutoStartFilterOnLaunch();
+    this.checkAutoRestart();
+  }
+
+  // Watchdog: when the service the user started is reported dead (VPN status
+  // pump stale / native proxy flag off) while still desired, restart it
+  // automatically with exponential backoff instead of silently staying down
+  // (e.g. after the system reclaimed the extension in the background).
+  private checkAutoRestart(): void {
+    if (this.busy || this.stopping || this.autoRestarting || this.probingVpnPermission
+      || this.launchStatusPending || this.showFirstRunDisclaimer) {
+      return;
+    }
+    if (this.activeRunning()) {
+      // Adopt an externally observed running service (e.g. the UI was re-created
+      // while the extension kept running) so it gets watchdogged too.
+      if (this.proxyModeEnabled) {
+        this.dnsProxyDesiredRunning = true;
+      } else {
+        this.vpnDesiredRunning = true;
+      }
+      this.autoRestartAttempts = 0;
+      this.autoRestartGaveUp = false;
+      return;
+    }
+    const desired: boolean = this.proxyModeEnabled ? this.dnsProxyDesiredRunning : this.vpnDesiredRunning;
+    if (!desired) {
+      return;
+    }
+    // A start/stop transition is still in flight — let it settle. The settle
+    // window matters: right after a start the extension transiently reports
+    // phases like 'creating' (or 'stopped' during a restart), which previously
+    // made the watchdog fire a duplicate start one tick after the first.
+    if (Date.now() - this.lastStartRequestAt < START_SETTLE_GRACE_MS) {
+      return;
+    }
+    if (!this.proxyModeEnabled && (this.status.phase === 'starting' || this.status.phase === 'creating'
+      || this.status.phase === 'stopping')) {
+      return;
+    }
+    if (this.autoRestartAttempts >= AUTO_RESTART_MAX_ATTEMPTS) {
+      if (!this.autoRestartGaveUp) {
+        this.autoRestartGaveUp = true;
+        this.appendDebugLog('==/vpn_ui/auto_restart_gave_up/');
+        this.keepAliveStatusText = this.t('autoRestartGaveUp');
+      }
+      return;
+    }
+    const now: number = Date.now();
+    const delayMs: number = Math.min(AUTO_RESTART_MAX_DELAY_MS,
+      AUTO_RESTART_BASE_DELAY_MS * Math.pow(2, this.autoRestartAttempts));
+    if (now - this.lastAutoRestartAt < delayMs) {
+      return;
+    }
+    this.lastAutoRestartAt = now;
+    this.autoRestartAttempts += 1;
+    const mode: string = this.proxyModeEnabled ? 'proxy' : 'vpn';
+    this.appendDebugLog(`==/vpn_ui/auto_restart/ mode=${mode} attempt=${this.autoRestartAttempts}`);
+    this.keepAliveStatusText = this.t('autoRestartAttempt', `${this.autoRestartAttempts}`);
+    this.autoRestarting = true;
+    const task: Promise<void> = this.proxyModeEnabled ? this.startDnsProxy(true) : this.startVpn(true);
+    task.catch((err: BusinessError) => {
+      this.appendDebugLog(`==/vpn_ui/auto_restart_error/ ${this.errorMessage(err)}`);
+    }).finally(() => {
+      this.autoRestarting = false;
+    });
   }
 
   private refreshStatus(): void {
     const raw = this.readTextFile(this.statusFilePath);
     if (raw.trim().length === 0) {
+      this.launchStatusPending = false;
       this.suppressRuntimeArtifacts = true;
       this.status = this.buildInactiveStatus();
       this.stopping = false;
@@ -3066,10 +3275,25 @@ struct Index {
     try {
       const snapshot = JSON.parse(raw) as StatusSnapshot;
       if (this.isStaleRunningSnapshot(snapshot)) {
+        this.launchStatusPending = false;
         this.suppressRuntimeArtifacts = true;
         this.status = this.buildInactiveStatus();
         this.writeTextFile(this.statusFilePath, JSON.stringify(defaultStatus()));
+      } else if (this.isPendingLaunchSnapshot(snapshot)) {
+        // Unconfirmed pre-launch "running": don't trust it (a killed session's
+        // leftover) and don't kill it (the extension may stamp a fresh write any
+        // moment). With auto-start armed, surface "auto-starting" instead of
+        // flashing running→stopped→running; either way it resolves within
+        // LAUNCH_STATUS_GRACE_MS.
+        this.launchStatusPending = true;
+        this.suppressRuntimeArtifacts = false;
+        if (this.autoStartFilterEnabled && !this.proxyModeEnabled) {
+          this.status = this.updatedStatus('starting', this.t('autoStarting'));
+        } else {
+          this.status = this.normalizeStatusSnapshot(snapshot);
+        }
       } else {
+        this.launchStatusPending = false;
         this.suppressRuntimeArtifacts = false;
         this.status = this.normalizeStatusSnapshot(snapshot);
       }
@@ -3098,10 +3322,17 @@ struct Index {
   // the refresh timer and filter/search/page handlers can call it fire-and-forget.
   private refreshQueryLog(): void {
     if (this.suppressRuntimeArtifacts) {
-      this.queryEvents = [];
-      this.recentRows = [];
-      this.querySummary = defaultQuerySummary();
-      this.dnsFilteredCount = 0;
+      // Wipe once, not every tick — reassigning @State arrays each 1.2s forces
+      // pointless re-renders while idle.
+      if (this.queryEvents.length > 0 || this.recentRows.length > 0
+        || this.querySummary.total !== 0 || this.dnsFilteredCount !== 0) {
+        this.queryEvents = [];
+        this.recentRows = [];
+        this.querySummary = defaultQuerySummary();
+        this.dnsFilteredCount = 0;
+        this.dnsLoadedQueryKey = '';
+        this.recentRowsLoaded = false;
+      }
       return;
     }
     this.refreshDnsLogAsync().catch(() => {
@@ -3129,6 +3360,17 @@ struct Index {
     if (this.logRetentionDays > 0) {
       await dnsLogDb.pruneOlderThan(Date.now() - this.logRetentionDays * 24 * 60 * 60 * 1000);
     }
+    // Persistent stat counters: load them, and on the first run after upgrading
+    // to incremental stats seed them from the existing table contents (the only
+    // remaining full-table aggregation, off the refresh loop, once ever).
+    dnsStats.load(this.getHostContext());
+    if (!dnsStats.isSeeded()) {
+      const seed: DnsLogSummary = await dnsLogDb.summary();
+      dnsStats.seedFrom(seed);
+    }
+    if (!this.suppressRuntimeArtifacts) {
+      this.querySummary = this.statsToQuerySummary();
+    }
     this.dnsDbReady = true;
     this.refreshDnsLogAsync().catch(() => {
     });
@@ -3155,37 +3397,65 @@ struct Index {
       // every full-mode query "allowed". In lightweight mode the C++ engine writes
       // the accurate app jsonl itself. The AGH querylog path is shared by both the
       // VPN extension and the main process (same app filesDir).
-      if (this.fullModeEnabled) {
-        await this.ingestAghLog();
-      } else {
-        await this.ingestAppLog();
+      const ingested: number = this.fullModeEnabled ? await this.ingestAghLog() : await this.ingestAppLog();
+
+      // Totals come from the incrementally maintained persistent counters
+      // (DnsStats) — no COUNT/SUM aggregation over the table on the refresh tick
+      // anymore; that full-table scan froze (and could crash) the app once the
+      // log held tens of thousands of rows.
+      // recentRowsLoaded doubles as the "displays primed" flag: false right
+      // after launch or a suppression wipe, so the cached totals reappear even
+      // before any new row is ingested.
+      if (ingested > 0 || !this.recentRowsLoaded) {
+        this.querySummary = this.statsToQuerySummary();
       }
 
-      const filter: string = this.dnsActionFilter;
-      const search: string = this.dnsSearchText;
-      const summary = await dnsLogDb.summary();
-      const count: number = await dnsLogDb.countFor(filter, search);
-      const totalPages: number = Math.max(1, Math.ceil(count / DNS_PAGE_SIZE));
-      const page: number = Math.min(Math.max(0, this.dnsPage), totalPages - 1);
-      const rows: DnsLogRow[] = await dnsLogDb.page(filter, search, DNS_PAGE_SIZE, page * DNS_PAGE_SIZE);
-      const recent: DnsLogRow[] = await dnsLogDb.recentRows(MAX_QUERY_EVENTS);
+      // The filtered count + current page only matter while the requests sheet
+      // is open; rerun that SQL only when it is AND either new rows arrived or
+      // the filter/search/page changed.
+      if (this.showDnsSheet) {
+        const filter: string = this.dnsActionFilter;
+        const search: string = this.dnsSearchText;
+        const queryKey: string = `${filter}|${search}|${this.dnsPage}`;
+        if (ingested > 0 || queryKey !== this.dnsLoadedQueryKey) {
+          const count: number = await dnsLogDb.countFor(filter, search);
+          const totalPages: number = Math.max(1, Math.ceil(count / DNS_PAGE_SIZE));
+          const page: number = Math.min(Math.max(0, this.dnsPage), totalPages - 1);
+          const rows: DnsLogRow[] = await dnsLogDb.page(filter, search, DNS_PAGE_SIZE, page * DNS_PAGE_SIZE);
+          this.dnsFilteredCount = count;
+          this.queryEvents = rows.map((r: DnsLogRow) => this.rowToEntry(r));
+          this.dnsLoadedQueryKey = queryKey;
+        }
+      }
 
-      this.querySummary = {
-        total: summary.total,
-        allowed: summary.allowed,
-        blocked: summary.blocked,
-        lastDomain: summary.lastDomain,
-        lastRule: summary.lastRule,
-        requestBytes: summary.requestBytes,
-        responseBytes: summary.responseBytes,
-        totalDnsBytes: summary.totalDnsBytes,
-      };
-      this.dnsFilteredCount = count;
-      this.queryEvents = rows.map((r: DnsLogRow) => this.rowToEntry(r));
-      this.recentRows = recent.map((r: DnsLogRow) => this.rowToEntry(r));
+      // The recent-rows window (domain leaderboard source) is loaded once and
+      // then re-queried only when new rows arrived, rate-limited — pulling 2000
+      // rows plus a 2000-element @State reassignment every tick was the other
+      // big-table freeze.
+      const now: number = Date.now();
+      if (!this.recentRowsLoaded || (ingested > 0 && now - this.lastRecentRefreshMs >= RECENT_REFRESH_MIN_MS)) {
+        const recent: DnsLogRow[] = await dnsLogDb.recentRows(MAX_QUERY_EVENTS);
+        this.recentRows = recent.map((r: DnsLogRow) => this.rowToEntry(r));
+        this.recentRowsLoaded = true;
+        this.lastRecentRefreshMs = now;
+      }
     } finally {
       this.dnsRefreshing = false;
     }
+  }
+
+  private statsToQuerySummary(): QuerySummary {
+    const s: DnsLogSummary = dnsStats.toSummary();
+    return {
+      total: s.total,
+      allowed: s.allowed,
+      blocked: s.blocked,
+      lastDomain: s.lastDomain,
+      lastRule: s.lastRule,
+      requestBytes: s.requestBytes,
+      responseBytes: s.responseBytes,
+      totalDnsBytes: s.totalDnsBytes,
+    };
   }
 
   private rowToEntry(r: DnsLogRow): QueryLogEntry {
@@ -3209,25 +3479,15 @@ struct Index {
 
   // Read the appended tail of the app jsonl and insert new rows. On shrink (clear
   // / rotation) the whole file is re-scanned but the ts watermark skips rows
-  // already stored, so no duplicates.
-  private async ingestAppLog(): Promise<void> {
-    const raw: string = this.readTextFile(this.queryLogFilePath);
-    if (raw.length < this.appLogOffset) {
-      this.appLogOffset = 0;  // file shrank: cleared or rotated
+  // already stored, so no duplicates. Returns how many rows were inserted.
+  private async ingestAppLog(): Promise<number> {
+    const tail: LogTail | undefined = this.readLogTail(this.queryLogFilePath, this.appLogOffset);
+    if (tail === undefined) {
+      return 0;
     }
-    if (raw.length <= this.appLogOffset) {
-      return;
-    }
-    const slice: string = raw.substring(this.appLogOffset);
-    const lastNl: number = slice.lastIndexOf('\n');
-    if (lastNl < 0) {
-      return;  // no complete new line yet
-    }
-    const chunk: string = slice.substring(0, lastNl);
-    const newOffset: number = this.appLogOffset + lastNl + 1;
     const rows: DnsLogRow[] = [];
     let maxTs: number = this.appLogLastTs;
-    for (const line of chunk.split('\n')) {
+    for (const line of tail.chunk.split('\n')) {
       const t: string = line.trim();
       if (t.length === 0) {
         continue;
@@ -3241,31 +3501,23 @@ struct Index {
         maxTs = row.ts;
       }
     }
-    this.appLogOffset = newOffset;
+    this.appLogOffset = tail.nextOffset;
     if (rows.length > 0) {
       await dnsLogDb.insertRows(rows, 'app');
       this.appLogLastTs = maxTs;
+      dnsStats.addRows(rows);
     }
+    return rows.length;
   }
 
-  private async ingestAghLog(): Promise<void> {
-    const raw: string = this.readTextFile(this.aghQueryLogPath());
-    if (raw.length < this.aghLogOffset) {
-      this.aghLogOffset = 0;
+  private async ingestAghLog(): Promise<number> {
+    const tail: LogTail | undefined = this.readLogTail(this.aghQueryLogPath(), this.aghLogOffset);
+    if (tail === undefined) {
+      return 0;
     }
-    if (raw.length <= this.aghLogOffset) {
-      return;
-    }
-    const slice: string = raw.substring(this.aghLogOffset);
-    const lastNl: number = slice.lastIndexOf('\n');
-    if (lastNl < 0) {
-      return;
-    }
-    const chunk: string = slice.substring(0, lastNl);
-    const newOffset: number = this.aghLogOffset + lastNl + 1;
     const rows: DnsLogRow[] = [];
     let maxTs: number = this.aghLogLastTs;
-    for (const line of chunk.split('\n')) {
+    for (const line of tail.chunk.split('\n')) {
       const t: string = line.trim();
       if (t.length === 0) {
         continue;
@@ -3279,11 +3531,13 @@ struct Index {
         maxTs = row.ts;
       }
     }
-    this.aghLogOffset = newOffset;
+    this.aghLogOffset = tail.nextOffset;
     if (rows.length > 0) {
       await dnsLogDb.insertRows(rows, 'agh');
       this.aghLogLastTs = maxTs;
+      dnsStats.addRows(rows);
     }
+    return rows.length;
   }
 
   private parseAppLogLine(line: string): DnsLogRow | undefined {
@@ -3349,10 +3603,58 @@ struct Index {
     }
   }
 
+  // Read at most the trailing maxBytes of a text file, starting at the first
+  // complete line. The debug-log preview only needs the last ~20 lines; reading
+  // the whole (potentially multi-MB, never-rotated-by-default) file every 1.2s
+  // tick caused launch jank and steady-state stutter.
+  private readTextFileTail(path: string, maxBytes: number): string {
+    const size: number = this.fileByteSize(path);
+    if (size <= 0) {
+      return '';
+    }
+    const from: number = size > maxBytes ? size - maxBytes : 0;
+    const buf: ArrayBuffer = new ArrayBuffer(size - from);
+    let got: number = 0;
+    let f: fileIo.File | undefined = undefined;
+    try {
+      f = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
+      got = fileIo.readSync(f.fd, buf, { offset: from });
+    } catch (_) {
+      return '';
+    } finally {
+      if (f !== undefined) {
+        try {
+          fileIo.closeSync(f);
+        } catch (_) {
+        }
+      }
+    }
+    if (got <= 0) {
+      return '';
+    }
+    const bytes: Uint8Array = new Uint8Array(buf, 0, got);
+    let start: number = 0;
+    if (from > 0) {
+      // Skip the partial (possibly mid-UTF-8) first line of the window.
+      for (let i: number = 0; i < bytes.length; i++) {
+        if (bytes[i] === 0x0A) {
+          start = i + 1;
+          break;
+        }
+      }
+    }
+    if (start >= got) {
+      return '';
+    }
+    return this.logTailDecoder.decodeToString(new Uint8Array(buf, start, got - start));
+  }
+
   private refreshDebugLog(): void {
-    const raw = this.readTextFile(this.debugLogFilePath);
+    const raw = this.readTextFileTail(this.debugLogFilePath, DEBUG_LOG_TAIL_BYTES);
     if (raw.trim().length === 0) {
-      this.debugLines = [];
+      if (this.debugLines.length > 0) {
+        this.debugLines = [];
+      }
       return;
     }
 
@@ -3365,6 +3667,20 @@ struct Index {
         items.push(line);
       }
       index -= 1;
+    }
+    // Skip the @State reassignment when nothing changed — reassigning forces a
+    // re-render every tick even while idle.
+    if (items.length === this.debugLines.length) {
+      let same: boolean = true;
+      for (let i: number = 0; i < items.length; i++) {
+        if (items[i] !== this.debugLines[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        return;
+      }
     }
     this.debugLines = items;
   }
@@ -3394,15 +3710,20 @@ struct Index {
     }
   }
 
-  private async startVpn(): Promise<void> {
+  private async startVpn(auto: boolean = false): Promise<void> {
     if (this.busy) {
       return;
     }
 
     // Warn (and let the user decide) when no background keep-alive is enabled —
     // in either mode filtering can be killed once the app is backgrounded.
-    if (!(await this.confirmStartWithoutKeepAlive())) {
+    // Watchdog restarts reuse the original consent and skip the dialog.
+    if (!auto && !(await this.confirmStartWithoutKeepAlive())) {
       return;
+    }
+    if (!auto) {
+      this.autoRestartAttempts = 0;
+      this.autoRestartGaveUp = false;
     }
 
     // Free the loopback DNS port if the experimental DNS-proxy server is running
@@ -3428,9 +3749,11 @@ struct Index {
         this.queryLogFilePath
       );
       this.appendDebugLog(`==/vpn_ui/start_request/ rules=${this.rulesFilePath} query=${this.queryLogFilePath}`);
+      this.lastStartRequestAt = Date.now();
       await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
       hilog.info(DOMAIN, TAG, '%{public}s', '==/vpn_ui/start_resolved/');
       this.appendDebugLog('==/vpn_ui/start_resolved/');
+      this.vpnDesiredRunning = true;
       const requestMessage: string = wasRunning ? this.t('restartRequested') : this.t('startRequested');
       this.status = this.updatedStatus(
         'starting',
@@ -3450,6 +3773,13 @@ struct Index {
       this.errorText = message;
       hilog.error(DOMAIN, TAG, '==/vpn_ui/start_error/ %{public}s', message);
       this.appendDebugLog(`==/vpn_ui/start_error/ ${message}`);
+      // Don't leave a locally written "starting" status (or an open settle
+      // window) behind when the start failed.
+      this.lastStartRequestAt = 0;
+      if (!wasRunning) {
+        this.status = this.buildInactiveStatus();
+        this.writeTextFile(this.statusFilePath, JSON.stringify(defaultStatus()));
+      }
     } finally {
       this.busy = false;
       this.refreshAll();
@@ -3462,10 +3792,12 @@ struct Index {
     if (this.proxyModeEnabled) {
       return true;
     }
+    this.probingVpnPermission = true;
     try {
       await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
       this.appendDebugLog('==/vpn_ui/auto_start_permission_granted/');
       await vpnExtension.stopVpnExtensionAbility(this.buildVpnWant());
+      this.vpnDesiredRunning = false;
       this.refreshAll();
       return true;
     } catch (err) {
@@ -3477,6 +3809,14 @@ struct Index {
       this.savePersistState();
       this.refreshAll();
       return false;
+    } finally {
+      // Keep the guard up briefly after the probe: the extension's status pump
+      // can still report "running" for a tick or two while it shuts down, and
+      // the watchdog must not adopt that transient run.
+      setTimeout(() => {
+        this.probingVpnPermission = false;
+        this.vpnDesiredRunning = false;
+      }, 5000);
     }
   }
 
@@ -3494,13 +3834,24 @@ struct Index {
   private async tryAutoStartFilterOnLaunch(): Promise<void> {
     // Resume whichever network mode was last selected (persisted), not always
     // VPN. activeRunning() is mode-aware so we don't re-start something already up.
-    if (this.autoStartAttempted || !this.autoStartFilterEnabled || this.busy || this.activeRunning()) {
+    // While the launch snapshot is unconfirmed, hold the decision (re-invoked by
+    // the refresh ticks): starting now could double-start a live extension.
+    if (this.autoStartAttempted || !this.autoStartFilterEnabled || this.busy || this.activeRunning()
+      || this.launchStatusPending) {
       return;
     }
     this.autoStartAttempted = true;
     if (this.proxyModeEnabled) {
       await this.startDnsProxy();
     } else {
+      // Surface "auto-starting" right away (and persist it so the refresh ticks
+      // agree until the extension's own status pump takes over) instead of
+      // sitting on "stopped" while the extension spins up. Skipped when the
+      // keep-alive confirm dialog will block the start anyway.
+      if (this.keepAliveModeList().length > 0) {
+        this.status = this.updatedStatus('starting', this.t('autoStarting'));
+        this.writeTextFile(this.statusFilePath, JSON.stringify(this.status));
+      }
       await this.startVpn();
     }
   }
@@ -3510,6 +3861,8 @@ struct Index {
       return;
     }
 
+    this.vpnDesiredRunning = false;  // user intent: stay down, no watchdog restart
+    this.lastStartRequestAt = 0;  // close the start-settle window
     this.busy = true;
     // Surface the teardown immediately: the system VPN takes a moment to close,
     // so flag `stopping` now and keep it until the status file reports not
@@ -4007,6 +4360,15 @@ struct Index {
       // The proxy app funnels every query through the single 127.0.0.1 source, so
       // AdGuardHome's per-client rate limit would otherwise throttle the device.
       '  ratelimit: 0',
+      // Flush each querylog entry to data/querylog.json immediately (default
+      // size_memory=1000 buffers in RAM, leaving the file — which the app's DNS
+      // list ingests — stale while the web panel looks live). 24h rotation keeps
+      // the shared file small; the app copies rows into its own DB anyway.
+      'querylog:',
+      '  enabled: true',
+      '  file_enabled: true',
+      '  size_memory: 1',
+      '  interval: 24h',
       filtersBlock,
       userRulesBlock,
       '',
@@ -4052,7 +4414,7 @@ struct Index {
     });
   }
 
-  private async startDnsProxy(): Promise<void> {
+  private async startDnsProxy(auto: boolean = false): Promise<void> {
     if (this.busy) {
       return;
     }
@@ -4070,8 +4432,13 @@ struct Index {
 
     // No VPN extension keeps this process alive in DNS-proxy mode, so a
     // continuous task must. Warn (and let the user decide) when none is enabled.
-    if (!(await this.confirmStartWithoutKeepAlive())) {
+    // Watchdog restarts reuse the original consent and skip the dialog.
+    if (!auto && !(await this.confirmStartWithoutKeepAlive())) {
       return;
+    }
+    if (!auto) {
+      this.autoRestartAttempts = 0;
+      this.autoRestartGaveUp = false;
     }
 
     this.busy = true;
@@ -4097,6 +4464,7 @@ struct Index {
         }
       }
 
+      this.lastStartRequestAt = Date.now();
       let err: string | undefined;
       if (this.fullModeEnabled) {
         // Full engine: AdGuardHome as a standalone DNS server (serves UDP + TCP).
@@ -4128,6 +4496,7 @@ struct Index {
       this.dnsProxyActivePort = port;
       this.aghActiveHttpPort = this.fullModeEnabled ? httpPort : 0;
       this.dnsProxyRunning = true;
+      this.dnsProxyDesiredRunning = true;
       this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${port}`);
       this.appendDebugLog(`==/vpn_ui/dns_proxy_started/ engine=${this.fullModeEnabled ? 'full' : 'lite'} port=${port} http=${httpPort}`);
       if (port !== configuredPort) {
@@ -4141,6 +4510,7 @@ struct Index {
       this.errorText = message;
       this.dnsProxyRunning = false;
       this.dnsProxyStatusText = message;
+      this.lastStartRequestAt = 0;  // failed start: close the settle window
       this.appendDebugLog(`==/vpn_ui/dns_proxy_error/ ${message}`);
     } finally {
       this.busy = false;
@@ -4168,6 +4538,8 @@ struct Index {
     if (this.busy) {
       return;
     }
+    this.dnsProxyDesiredRunning = false;  // user intent: stay down, no watchdog restart
+    this.lastStartRequestAt = 0;  // close the start-settle window
     this.busy = true;
     try {
       const err: string | undefined = vpnclientbridge.stopDnsFilter();
@@ -4440,6 +4812,36 @@ struct Index {
     };
   }
 
+  // True while a start is in flight (locally initiated, auto-start, or reported
+  // by the VPN extension's status pump) — the home banner shows a third
+  // "starting" face for it instead of pretending the filter is stopped.
+  private homeStarting(): boolean {
+    if (this.activeRunning() || this.stopping) {
+      return false;
+    }
+    if (this.busy) {
+      return true;
+    }
+    // Within the settle window after a start request, keep the "starting" face
+    // through the extension's transient intermediate phases ('creating', or
+    // 'stopped' while a restart tears the old instance down).
+    if (Date.now() - this.lastStartRequestAt < START_SETTLE_GRACE_MS) {
+      return true;
+    }
+    return !this.proxyModeEnabled
+      && (this.status.phase === 'starting' || this.status.phase === 'creating');
+  }
+
+  // Hint line under the home banner while starting: prefer the live status note
+  // (auto-starting / start requested), falling back to the generic label.
+  private homeStartingHint(): string {
+    const note: string = this.status.note.trim();
+    if (!this.proxyModeEnabled && note.length > 0) {
+      return note;
+    }
+    return this.t('working');
+  }
+
   private buildInactiveStatus(): StatusSnapshot {
     return {
       phase: 'idle',
@@ -4452,9 +4854,28 @@ struct Index {
   }
 
   private normalizeStatusSnapshot(snapshot: StatusSnapshot): StatusSnapshot {
-    const localizedNote = snapshot.note === 'DNS filter has not been started yet.'
-      ? this.t('dnsFilterNotStarted')
-      : snapshot.note;
+    // The extension writes its status notes as fixed English strings (it has no
+    // access to the in-app language override); map every known one here.
+    let localizedNote = snapshot.note;
+    switch (snapshot.note) {
+      case 'DNS filter has not been started yet.':
+        localizedNote = this.t('dnsFilterNotStarted');
+        break;
+      case 'Preparing DNS filter runtime.':
+        localizedNote = this.t('startingStatus');
+        break;
+      case 'Creating DNS-only VPN and preparing the local filter engine.':
+        localizedNote = this.t('creatingVpnNote');
+        break;
+      case 'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.':
+        localizedNote = this.t('vpnActiveNote');
+        break;
+      case 'DNS-only VPN has been stopped.':
+        localizedNote = this.t('vpnStoppedNote');
+        break;
+      default:
+        break;
+    }
     const normalizedTunFd = snapshot.tunFd >= 0
       ? snapshot.tunFd
       : snapshot.nativeStats.tunFd;
@@ -4482,7 +4903,31 @@ struct Index {
     if (!Number.isFinite(updatedAtMs)) {
       return true;
     }
-    return Date.now() - updatedAtMs > STATUS_STALE_TIMEOUT_MS;
+    const now: number = Date.now();
+    // A live extension rewrites the file every second, so a "running" snapshot
+    // stamped BEFORE this UI process launched is suspect: declare it dead right
+    // away when it predates launch by more than a pump period, or after a short
+    // grace with no post-launch write. Without this, a quick app relaunch
+    // flashed "running" for up to the 4s timeout before flipping to stopped
+    // (and only then auto-starting).
+    if (updatedAtMs < this.appLaunchMs) {
+      if (updatedAtMs < this.appLaunchMs - 1500 || now - this.appLaunchMs >= LAUNCH_STATUS_GRACE_MS) {
+        return true;
+      }
+    }
+    return now - updatedAtMs > STATUS_STALE_TIMEOUT_MS;
+  }
+
+  // A not-yet-stale "running" snapshot stamped before launch: either a live
+  // extension that hasn't written since this process started (~1s away from
+  // confirming itself) or the leftover of a session killed moments ago. Only
+  // meaningful when isStaleRunningSnapshot() returned false.
+  private isPendingLaunchSnapshot(snapshot: StatusSnapshot): boolean {
+    if (!snapshot.running) {
+      return false;
+    }
+    const updatedAtMs = Date.parse(snapshot.updatedAt);
+    return Number.isFinite(updatedAtMs) && updatedAtMs < this.appLaunchMs;
   }
 
   // Allowed/blocked come from the SQLite summary (cumulative across restarts and
@@ -6466,11 +6911,15 @@ struct Index {
                     : [['#00D9FF', 0.0], ['#0099CC', 1.0]])
             })
 
-            Text(this.activeRunning() ? this.t('running') : this.t('stopped'))
+            Text(this.activeRunning()
+              ? this.t('running')
+              : (this.homeStarting() ? this.t('startingStatus') : this.t('stopped')))
               .fontSize(23)
               .fontWeight(FontWeight.Bold)
               .fontColor(this.primaryTextColor())
-            Text(this.activeRunning() ? this.t('runningHint') : this.t('stoppedHint'))
+            Text(this.activeRunning()
+              ? this.t('runningHint')
+              : (this.homeStarting() ? this.homeStartingHint() : this.t('stoppedHint')))
               .fontSize(13)
               .lineHeight(19)
               .fontColor(this.secondaryTextColor())

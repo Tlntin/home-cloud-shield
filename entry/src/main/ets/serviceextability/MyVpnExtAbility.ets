@@ -991,6 +991,17 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       `  cache_size: ${cacheSize}`,
       `  cache_optimistic: ${cacheOptimistic ? 'true' : 'false'}`,
       `  ratelimit: ${ratelimit}`,
+      // The app's query list is fed by ingesting data/querylog.json. By default
+      // AdGuardHome buffers up to size_memory=1000 entries in RAM and only then
+      // appends them to the file (the web panel reads RAM+file, so it looks live
+      // while the file — and the app — stays stale). size_memory: 1 flushes each
+      // entry immediately; interval: 24h keeps the shared file small (the app
+      // copies rows into its own DB anyway).
+      'querylog:',
+      '  enabled: true',
+      '  file_enabled: true',
+      '  size_memory: 1',
+      '  interval: 24h',
       filtersBlock,
       filteringBlock,
       userRulesBlock,
@@ -1228,6 +1239,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     }
   }
 
+  // NOTE: `note` strings are fixed English (this process has no access to the
+  // in-app language override); the UI localizes them by exact match in
+  // Index.normalizeStatusSnapshot. When adding/changing a note here, add the
+  // matching i18n mapping there too, or it will surface in English.
   private writeStatus(phase: string, running: boolean, note: string): void {
     this.lastPhase = phase;
     this.lastRunning = running;
