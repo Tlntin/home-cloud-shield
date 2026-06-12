@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.0.6-orange)
+![Version](https://img.shields.io/badge/Version-v0.0.7-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `home_cloud_shield` is a local DNS filtering app for **HarmonyOS 6.0+**: it intercepts DNS traffic through a **local VPN** or a **pure DNS proxy**, blocks ad and tracking domains with **AdGuard-style rules**, and ships a **dual filtering engine** (lightweight / full AdGuardHome).
 
-Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.0.6** ([Changelog](#changelog))
+Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.0.7** ([Changelog](#changelog))
 
 ## Table of Contents
 
@@ -75,14 +75,14 @@ Auto-Installer is a free, cross-platform HarmonyOS app deployment and debugging 
 
 ## Changelog
 
-Current version **v0.0.6** (2026-06-11), main changes:
+Current version **v0.0.7** (2026-06-12), themed around **lower battery drain for long-running filtering (especially the full engine)**:
 
-- **Fixed severe lag / crashes opening the app with tens of thousands of DNS records**: stats are now incremental persisted counters, log files are read by appended tail only, and list queries run on demand with rate limiting.
-- **Fixed no new query records in the app on the full engine (AdGuardHome)**: the query log now flushes every entry to disk, keeping the app's list in sync with the dashboard.
-- **Fixed the "running → stopped → running" status flicker at launch**: ghost status files from a killed session are ignored, and with auto-start the first screen shows "Auto-starting…" directly.
-- **Added auto-restart for dropped services**: a background VPN / DNS proxy reclaimed by the system is restarted automatically (exponential backoff, up to 5 attempts).
+- **Adaptive status refresh in the background**: once the UI is hidden / screen off, the status file drops from one write per second to a ~30 s heartbeat, restoring real-time updates within 1–2 s of returning to the foreground; the home-page polling loop also pauses while hidden.
+- **Removed duplicate per-query disk writes on the full engine**: one fewer file operation per DNS query; per-query native system logs are silent by default; the TUN reader thread now uses event-driven wakeup with zero idle wakeups.
+- **New "Web dashboard service" toggle (off by default)**: no resident HTTP server when the panel isn't needed; enable it under Settings → Filter engine (the filter restarts automatically to apply).
+- **AdGuardHome's built-in statistics module disabled** (in-app stats unaffected; the dashboard's front-page charts will be empty); **optimistic cache on by default**, reducing synchronous upstream round-trips and radio wakeups.
 
-Full bilingual changelogs: [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
+Full bilingual changelogs: [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
 
 ## Engines and Network Modes
 

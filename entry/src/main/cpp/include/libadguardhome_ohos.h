@@ -86,9 +86,11 @@ extern char* AdGuardHomeVersion();
 
 // AdGuardHomeStart starts the embedded AdGuard Home instance.  It returns an
 // empty string on success, or an error message on failure.  clientBuildFS is
-// the embedded web client filesystem declared in main.go.
+// the embedded web client filesystem declared in main.go.  startWeb != 0
+// serves the web admin dashboard; 0 skips it entirely (no HTTP listener, no
+// server goroutines — the battery-friendly default for the mobile host).
 //
-extern char* AdGuardHomeStart(char* configPath, char* workDir, char* logPath);
+extern char* AdGuardHomeStart(char* configPath, char* workDir, char* logPath, int startWeb);
 
 // AdGuardHomeStop stops the embedded AdGuard Home instance.  It returns an empty
 // string (reserved for a future error channel) and is safe to call when nothing

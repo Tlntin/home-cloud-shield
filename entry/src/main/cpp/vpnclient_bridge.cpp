@@ -17,6 +17,7 @@
 #include <poll.h>
 #include <sstream>
 #include <string>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <thread>
@@ -50,12 +51,14 @@ std::string AdGuardHomeVersionString()
 }
 
 // Starts the embedded AdGuardHome engine (full mode) with the given config
-// file, working dir, and log path. Returns the Go layer's error string (empty
-// on success).
-std::string StartAdGuardHome(const std::string &configPath, const std::string &workDir, const std::string &logPath)
+// file, working dir, and log path. startWeb controls whether the web admin
+// dashboard HTTP server is served (off saves battery: no listener, no HTTP
+// goroutines). Returns the Go layer's error string (empty on success).
+std::string StartAdGuardHome(const std::string &configPath, const std::string &workDir, const std::string &logPath,
+    bool startWeb)
 {
     char *raw = AdGuardHomeStart(const_cast<char *>(configPath.c_str()),
-        const_cast<char *>(workDir.c_str()), const_cast<char *>(logPath.c_str()));
+        const_cast<char *>(workDir.c_str()), const_cast<char *>(logPath.c_str()), startWeb ? 1 : 0);
     std::string out = (raw != nullptr) ? raw : "";
     if (raw != nullptr) {
         AdGuardHomeFreeCString(raw);
@@ -159,6 +162,11 @@ struct StatsState {
     std::shared_ptr<const std::vector<RuleEntry>> activeRules;
     uint32_t dnsCacheTtlSeconds = 3600;
     std::unordered_map<std::string, DnsCacheEntry> dnsResponseCache;
+    // Wakes the TUN reader's poll() immediately on stop, so the loop can sleep
+    // indefinitely instead of waking every 200ms to re-check stopRequested
+    // (5 wakeups/s on an idle, screen-off device adds up). -1 means creation
+    // failed and the reader falls back to the old short-timeout polling.
+    int stopEventFd = -1;
     std::thread worker;
     // Lightweight DNS-over-TCP server (DNS-proxy / coexist mode, no VPN): the
     // listening socket and its accept thread. listenFd == -1 means not running.
@@ -190,6 +198,12 @@ std::atomic<int> g_lwConnCount{0};
 // server, mirroring the TCP connection cap above.
 constexpr int kLwMaxUdpInflight = 64;
 std::atomic<int> g_lwUdpInflight{0};
+
+// Gates the per-DNS-query and periodic packet-counter hilog lines. A phone
+// easily makes tens of thousands of DNS queries a day; one hilog call per query
+// keeps the log daemon busy and costs battery, so this is off unless a
+// debugging session turns it on via setNativeVerboseLog.
+std::atomic<bool> g_verboseLog{false};
 
 // A DNS query that passed the filter and must be resolved upstream. Forwarding
 // is the slow part (a network round-trip), so it runs on a worker pool instead
@@ -309,6 +323,11 @@ bool StartsWith(const std::string &value, const std::string &prefix)
 bool ReadArgInt32(napi_env env, napi_value value, int32_t &out)
 {
     return napi_get_value_int32(env, value, &out) == napi_ok;
+}
+
+bool ReadArgBool(napi_env env, napi_value value, bool &out)
+{
+    return napi_get_value_bool(env, value, &out) == napi_ok;
 }
 
 bool ReadArgString(napi_env env, napi_value value, std::string &out)
@@ -1326,22 +1345,29 @@ void UpdatePacketStatsLocked(StatsState &state, const uint8_t *packet, ssize_t l
 void LogDnsEvent(const std::string &path, const std::string &domain, uint16_t qtype, bool blocked,
     const std::string &rule, const std::string &source, size_t requestBytes, size_t responseBytes)
 {
-    std::ostringstream out;
-    out << '{'
-        << "\"ts\":" << NowMs() << ','
-        << "\"domain\":\"" << EscapeJson(domain) << "\"," 
-        << "\"qtype\":\"" << QuestionTypeName(qtype) << "\"," 
-        << "\"action\":\"" << (blocked ? "blocked" : "allowed") << "\"," 
-        << "\"rule\":\"" << EscapeJson(rule) << "\"," 
-        << "\"source\":\"" << EscapeJson(source) << "\"," 
-        << "\"requestBytes\":" << requestBytes << ','
-        << "\"responseBytes\":" << responseBytes << ','
-        << "\"totalDnsBytes\":" << (requestBytes + responseBytes)
-        << '}';
-    AppendTextLine(path, out.str());
-    LogInfo("==/vpn_native/dns/ domain=%{public}s qtype=%{public}s action=%{public}s source=%{public}s rule=%{public}s req=%{public}zu resp=%{public}zu",
-        domain.c_str(), QuestionTypeName(qtype), blocked ? "blocked" : "allowed", source.c_str(), rule.c_str(),
-        requestBytes, responseBytes);
+    // An empty path means this mode keeps no app-side jsonl (full mode: the
+    // embedded AdGuardHome querylog is the single source of truth, so writing a
+    // second per-query file here would just burn battery).
+    if (!path.empty()) {
+        std::ostringstream out;
+        out << '{'
+            << "\"ts\":" << NowMs() << ','
+            << "\"domain\":\"" << EscapeJson(domain) << "\","
+            << "\"qtype\":\"" << QuestionTypeName(qtype) << "\","
+            << "\"action\":\"" << (blocked ? "blocked" : "allowed") << "\","
+            << "\"rule\":\"" << EscapeJson(rule) << "\","
+            << "\"source\":\"" << EscapeJson(source) << "\","
+            << "\"requestBytes\":" << requestBytes << ','
+            << "\"responseBytes\":" << responseBytes << ','
+            << "\"totalDnsBytes\":" << (requestBytes + responseBytes)
+            << '}';
+        AppendTextLine(path, out.str());
+    }
+    if (g_verboseLog.load(std::memory_order_relaxed)) {
+        LogInfo("==/vpn_native/dns/ domain=%{public}s qtype=%{public}s action=%{public}s source=%{public}s rule=%{public}s req=%{public}zu resp=%{public}zu",
+            domain.c_str(), QuestionTypeName(qtype), blocked ? "blocked" : "allowed", source.c_str(), rule.c_str(),
+            requestBytes, responseBytes);
+    }
 }
 
 // Resolve a filtered-through query upstream (or from cache) and write the
@@ -2280,9 +2306,21 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
 void ReaderLoop(int tunFd)
 {
     uint8_t buffer[65536];
-    pollfd pfd {};
-    pfd.fd = tunFd;
-    pfd.events = POLLIN;
+    int stopFd = -1;
+    {
+        std::lock_guard<std::mutex> lock(g_state.mu);
+        stopFd = g_state.stopEventFd;
+    }
+    pollfd pfds[2] {};
+    pfds[0].fd = tunFd;
+    pfds[0].events = POLLIN;
+    pfds[1].fd = stopFd;
+    pfds[1].events = POLLIN;
+    const nfds_t pollCount = stopFd >= 0 ? 2 : 1;
+    // With a stop eventfd the poll can sleep for long stretches (the eventfd
+    // wakes it on stop; 30s is only a safety net). Without one, fall back to
+    // the short timeout so stopRequested is still observed promptly.
+    const int pollTimeoutMs = stopFd >= 0 ? 30000 : 200;
 
     for (;;) {
         {
@@ -2292,9 +2330,7 @@ void ReaderLoop(int tunFd)
             }
         }
 
-        // Wake immediately when a packet arrives; the timeout only bounds how
-        // often we re-check the stop flag.
-        const int ready = poll(&pfd, 1, 200);
+        const int ready = poll(pfds, pollCount, pollTimeoutMs);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -2309,13 +2345,22 @@ void ReaderLoop(int tunFd)
         if (ready == 0) {
             continue;
         }
+        if (pfds[1].revents != 0) {
+            continue;  // stop signal: the top-of-loop check exits
+        }
+        if (pfds[0].revents == 0) {
+            continue;
+        }
 
         const ssize_t readBytes = read(tunFd, buffer, sizeof(buffer));
         if (readBytes > 0) {
             {
                 std::lock_guard<std::mutex> lock(g_state.mu);
                 UpdatePacketStatsLocked(g_state, buffer, readBytes);
-                if (g_state.totalPackets <= 5 || g_state.totalPackets % 50 == 0) {
+                // First packets confirm the relay is alive (cheap, bounded);
+                // the steady-state every-50 counter line is verbose-only.
+                if (g_state.totalPackets <= 5
+                    || (g_verboseLog.load(std::memory_order_relaxed) && g_state.totalPackets % 50 == 0)) {
                     LogInfo("==/vpn_native/packets/ total=%{public}llu bytes=%{public}llu dns=%{public}llu"
                         " ipv4=%{public}llu ipv6=%{public}llu",
                         static_cast<unsigned long long>(g_state.totalPackets),
@@ -2391,6 +2436,7 @@ std::string StopDnsFilter()
     std::thread dnsUdp;
     int listenToClose = -1;
     int udpToClose = -1;
+    int stopEventToClose = -1;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         g_state.stopRequested = true;
@@ -2402,6 +2448,14 @@ std::string StopDnsFilter()
         g_state.dnsServerListenFd = -1;
         udpToClose = g_state.dnsServerUdpFd;
         g_state.dnsServerUdpFd = -1;
+        // Wake the reader's long poll right away; the fd itself is closed only
+        // after the reader has been joined (it still polls on it until exit).
+        stopEventToClose = g_state.stopEventFd;
+        g_state.stopEventFd = -1;
+        if (stopEventToClose >= 0) {
+            const uint64_t one = 1;
+            (void)write(stopEventToClose, &one, sizeof(one));
+        }
     }
     // Close the TCP listening socket first so the accept loop unblocks and exits.
     // The UDP loop instead exits via its SO_RCVTIMEO wakeup observing
@@ -2414,6 +2468,9 @@ std::string StopDnsFilter()
     }
     if (reader.joinable()) {
         reader.join();
+    }
+    if (stopEventToClose >= 0) {
+        close(stopEventToClose);
     }
     if (dnsServer.joinable()) {
         dnsServer.join();
@@ -2491,6 +2548,7 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         ResetStatsLocked(g_state, dupFd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds);
+        g_state.stopEventFd = eventfd(0, EFD_NONBLOCK);
         g_state.worker = std::thread(ReaderLoop, dupFd);
     }
 
@@ -2503,7 +2561,7 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
 // run the TUN reader as a thin relay that forwards every DNS query to it.
 std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std::string &aghConfigPath,
     const std::string &aghWorkDir, const std::string &aghLogPath, uint16_t aghDnsPort,
-    const std::string &queryLogPath)
+    const std::string &queryLogPath, bool aghWebEnabled)
 {
     if (fd < 0) {
         return "invalid tun fd";
@@ -2520,9 +2578,6 @@ std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std
     if (aghDnsPort == 0) {
         return "adguardhome dns port is required";
     }
-    if (queryLogPath.empty()) {
-        return "query log path is required";
-    }
 
     LogInfo("==/vpn_native/start_full/ fd=%{public}d dns=%{public}s agh_cfg=%{public}s agh_dir=%{public}s agh_port=%{public}u query=%{public}s",
         fd, dnsServerIp.c_str(), aghConfigPath.c_str(), aghWorkDir.c_str(), static_cast<unsigned>(aghDnsPort),
@@ -2533,7 +2588,7 @@ std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std
     // Start AdGuardHome before taking over the TUN; StartEmbedded binds the DNS
     // listener synchronously, so once this returns the loopback port is ready.
     // A bad config is surfaced here instead of leaving a half-started filter.
-    const std::string aghErr = StartAdGuardHome(aghConfigPath, aghWorkDir, aghLogPath);
+    const std::string aghErr = StartAdGuardHome(aghConfigPath, aghWorkDir, aghLogPath, aghWebEnabled);
     if (!aghErr.empty()) {
         LogError("==/vpn_native/agh_start_error/ %{public}s", aghErr.c_str());
         return std::string("adguardhome start failed: ") + aghErr;
@@ -2556,9 +2611,13 @@ std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std
         std::lock_guard<std::mutex> lock(g_state.mu);
         // No local rules in full mode (AGH owns filtering); upstream points at
         // the loopback AGH DNS listener and the C++ cache is disabled per-query.
-        ResetStatsLocked(g_state, dupFd, dnsServerIp, "127.0.0.1", "", queryLogPath, 0);
+        // The app jsonl path is deliberately empty: the UI ingests AdGuardHome's
+        // own querylog in full mode, so the relay writing dns_queries.jsonl too
+        // would be a second per-query disk write that nothing reads.
+        ResetStatsLocked(g_state, dupFd, dnsServerIp, "127.0.0.1", "", "", 0);
         g_state.fullMode = true;
         g_state.aghDnsPort = aghDnsPort;
+        g_state.stopEventFd = eventfd(0, EFD_NONBLOCK);
         g_state.worker = std::thread(ReaderLoop, dupFd);
     }
 
@@ -2574,7 +2633,7 @@ std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std
 // the socket and does all serving. Teardown goes through StopDnsFilter(), which
 // stops AdGuardHome whenever fullMode is set.
 std::string StartAghServerOnly(const std::string &aghConfigPath, const std::string &aghWorkDir,
-    const std::string &aghLogPath, uint16_t aghDnsPort)
+    const std::string &aghLogPath, uint16_t aghDnsPort, bool aghWebEnabled)
 {
     if (aghConfigPath.empty()) {
         return "adguardhome config path is required";
@@ -2594,7 +2653,7 @@ std::string StartAghServerOnly(const std::string &aghConfigPath, const std::stri
     // StartEmbedded binds the DNS listener synchronously, so once this returns the
     // loopback port is ready. A bad config surfaces here instead of leaving a
     // half-started server behind.
-    const std::string aghErr = StartAdGuardHome(aghConfigPath, aghWorkDir, aghLogPath);
+    const std::string aghErr = StartAdGuardHome(aghConfigPath, aghWorkDir, aghLogPath, aghWebEnabled);
     if (!aghErr.empty()) {
         LogError("==/vpn_native/agh_start_error/ %{public}s", aghErr.c_str());
         return std::string("adguardhome start failed: ") + aghErr;
@@ -3040,8 +3099,8 @@ napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
 
 napi_value JsStartFullDnsFilter(napi_env env, napi_callback_info info)
 {
-    size_t argc = 7;
-    napi_value argv[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    size_t argc = 8;
+    napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 7) {
         return MakeUtf8(env,
@@ -3076,16 +3135,21 @@ napi_value JsStartFullDnsFilter(napi_env env, napi_callback_info info)
     if (!ReadArgString(env, argv[6], queryLogPath) || queryLogPath.empty()) {
         return MakeUtf8(env, "invalid query log path");
     }
+    // Optional trailing flag; defaults to no web dashboard (battery).
+    bool aghWebEnabled = false;
+    if (argc >= 8) {
+        (void)ReadArgBool(env, argv[7], aghWebEnabled);
+    }
 
     return ReturnErrOrUndefined(env,
         StartFullDnsFilter(fd, dnsServerIp, aghConfigPath, aghWorkDir, aghLogPath,
-            static_cast<uint16_t>(aghDnsPort), queryLogPath));
+            static_cast<uint16_t>(aghDnsPort), queryLogPath, aghWebEnabled));
 }
 
 napi_value JsStartAghServerOnly(napi_env env, napi_callback_info info)
 {
-    size_t argc = 4;
-    napi_value argv[4] = {nullptr, nullptr, nullptr, nullptr};
+    size_t argc = 5;
+    napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 4) {
         return MakeUtf8(env, "agh config path, agh work dir, agh log path, and agh dns port are required");
@@ -3107,9 +3171,14 @@ napi_value JsStartAghServerOnly(napi_env env, napi_callback_info info)
     if (!ReadArgInt32(env, argv[3], aghDnsPort) || aghDnsPort <= 0 || aghDnsPort > 65535) {
         return MakeUtf8(env, "invalid agh dns port");
     }
+    // Optional trailing flag; defaults to no web dashboard (battery).
+    bool aghWebEnabled = false;
+    if (argc >= 5) {
+        (void)ReadArgBool(env, argv[4], aghWebEnabled);
+    }
 
     return ReturnErrOrUndefined(env,
-        StartAghServerOnly(aghConfigPath, aghWorkDir, aghLogPath, static_cast<uint16_t>(aghDnsPort)));
+        StartAghServerOnly(aghConfigPath, aghWorkDir, aghLogPath, static_cast<uint16_t>(aghDnsPort), aghWebEnabled));
 }
 
 napi_value JsStartLwDnsServer(napi_env env, napi_callback_info info)
@@ -3196,6 +3265,24 @@ napi_value JsGetStats(napi_env env, napi_callback_info info)
     return MakeUtf8(env, GetStatsJson());
 }
 
+// Toggles the per-query / packet-counter hilog lines (default off, see
+// g_verboseLog). Safe to call at any time, including while a filter runs.
+napi_value JsSetNativeVerboseLog(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    bool enabled = false;
+    if (argc >= 1) {
+        (void)napi_get_value_bool(env, argv[0], &enabled);
+    }
+    g_verboseLog.store(enabled, std::memory_order_relaxed);
+    LogInfo("==/vpn_native/verbose_log/ enabled=%{public}d", enabled ? 1 : 0);
+    napi_value undefined = nullptr;
+    napi_get_undefined(env, &undefined);
+    return undefined;
+}
+
 // Smoke test for full mode: confirms the prebuilt AdGuardHome .so links and
 // loads inside this NAPI module by returning its version string.
 napi_value JsAghVersion(napi_env env, napi_callback_info info)
@@ -3215,6 +3302,7 @@ napi_value Init(napi_env env, napi_value exports)
         {"reloadDnsRules", nullptr, JsReloadDnsRules, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setUpstreamDns", nullptr, JsSetUpstreamDns, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getStats", nullptr, JsGetStats, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setNativeVerboseLog", nullptr, JsSetNativeVerboseLog, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"aghVersion", nullptr, JsAghVersion, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

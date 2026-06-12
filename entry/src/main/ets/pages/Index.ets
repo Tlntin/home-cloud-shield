@@ -63,9 +63,11 @@ const AUTO_RESTART_MAX_ATTEMPTS = 5;
 // trailing bytes instead of the whole (potentially multi-MB) file every tick.
 const DEBUG_LOG_TAIL_BYTES = 16384;
 // How long after launch a "running" status stamped BEFORE launch may stay
-// unconfirmed: a live extension stamps a post-launch write within ~1s, so past
-// this grace the snapshot is a leftover of a killed session and declared dead.
-const LAUNCH_STATUS_GRACE_MS = 2500;
+// unconfirmed: the extension's pump may be idling at its slow heartbeat and
+// only returns to the 1s cadence after noticing our ui_watch touch (≤1s) and
+// stamping a write on its next tick; past this grace with no post-launch write
+// the snapshot is a leftover of a killed session and declared dead.
+const LAUNCH_STATUS_GRACE_MS = 5000;
 // After a start request the extension takes a while to come up and transiently
 // reports intermediate phases ('creating', even 'stopped' during a restart).
 // Within this window the watchdog must not declare the service dead (it fired a
@@ -78,6 +80,21 @@ const QUERY_LOG_FILE_NAME = 'dns_queries.jsonl';
 const DEBUG_LOG_FILE_NAME = 'debug.log';
 const UPSTREAM_DNS_FILE_NAME = 'upstream.txt';
 const STATE_FILE_NAME = 'ui_state.json';
+// Touched (mtime refreshed) while this page is visible so the VPN extension's
+// status pump knows someone is reading status.json and keeps its 1s cadence;
+// when the marker goes stale the pump drops to IDLE_STATUS_HEARTBEAT_MS to
+// save battery. Must match UI_WATCH_FILE_NAME in MyVpnExtAbility.
+const UI_WATCH_FILE_NAME = 'ui_watch';
+const UI_WATCH_TOUCH_INTERVAL_MS = 4000;
+// Mirror of the extension's idle heartbeat. While the extension may still be
+// idling (right after this page becomes visible, before it notices ui_watch),
+// a "running" snapshot is allowed to be up to a heartbeat old; only once the
+// fast cadence has had time to resume does the tight staleness limit apply.
+const IDLE_STATUS_HEARTBEAT_MS = 30000;
+const STATUS_IDLE_STALE_TIMEOUT_MS = IDLE_STATUS_HEARTBEAT_MS + 5000;
+// How long after the page becomes visible the extension is expected to be back
+// on the 1s cadence (ui_watch noticed ≤1s + a pump tick + our read tick).
+const UI_WATCH_RESUME_GRACE_MS = 10000;
 const WANT_STATUS_FILE_PATH = 'statusFilePath';
 const WANT_RULES_FILE_PATH = 'rulesFilePath';
 const WANT_QUERY_LOG_FILE_PATH = 'queryLogFilePath';
@@ -609,7 +626,10 @@ function defaultAdvancedDnsConfig(): AdvancedDnsConfig {
     enableDnssec: false,
     cacheEnabled: true,
     cacheSizeMb: 4,
-    cacheOptimistic: false,
+    // Optimistic caching answers from an expired entry and refreshes in the
+    // background: fewer synchronous upstream round-trips means fewer radio
+    // wakeups, which on a phone outweighs the marginally staler answers.
+    cacheOptimistic: true,
     ratelimit: 0,
   };
 }
@@ -647,6 +667,7 @@ interface PersistState {
   proxyModeEnabled?: boolean;
   dnsProxyPort?: string;
   aghHttpPort?: string;
+  aghWebEnabled?: boolean;
   blockedServiceIds?: string[];
   filterSubscriptions?: FilterSubscription[];
   dnsRewrites?: DnsRewriteRule[];
@@ -787,6 +808,11 @@ struct Index {
   // full-mode DNS proxy.
   @State aghHttpPort: string = `${AGH_HTTP_PORT}`;
   @State aghHttpPortFeedback: string = '';
+  // Whether the embedded AdGuardHome serves its web admin dashboard. Off by
+  // default: the HTTP server (listener + serve goroutines) costs battery and
+  // most sessions never open the panel. Applies to both full-mode VPN and
+  // full-mode DNS proxy; changes restart the running engine.
+  @State aghWebEnabled: boolean = false;
   // Actual bound ports while the DNS proxy runs (may differ from the configured
   // values when those were busy and auto-incremented). 0 = use the configured.
   @State dnsProxyActivePort: number = 0;
@@ -861,6 +887,14 @@ struct Index {
   // When this UI process started; used to reject "ghost running" status files
   // left behind by a killed session (see isStaleRunningSnapshot).
   private readonly appLaunchMs: number = Date.now();
+  // ui_watch marker plumbing (see UI_WATCH_FILE_NAME): touched while visible,
+  // throttled to one write per UI_WATCH_TOUCH_INTERVAL_MS.
+  private uiWatchFilePath: string = '';
+  private lastUiWatchTouchMs: number = 0;
+  // When this page last became visible; until UI_WATCH_RESUME_GRACE_MS has
+  // passed the extension may legitimately still be on its slow idle heartbeat.
+  private uiWatchSinceMs: number = Date.now();
+  private pageVisible: boolean = true;
   // True while a "running" snapshot stamped before launch is awaiting its first
   // post-launch write (live extension) or the grace timeout (dead leftover).
   // Auto-start and the watchdog hold off while this is set.
@@ -1934,6 +1968,16 @@ struct Index {
     return startPort;
   }
 
+  // Toggle the embedded AdGuardHome web dashboard. Applies at engine start, so
+  // restart a running full engine the same way other full-mode config does.
+  private updateAghWebEnabled(value: boolean): void {
+    if (this.aghWebEnabled === value) {
+      return;
+    }
+    this.aghWebEnabled = value;
+    this.applyFullModeConfigChange();
+  }
+
   // Persist an edited panel port, with inline validation feedback (range + must
   // differ from the DNS-proxy port).
   private onAghHttpPortChange(value: string): void {
@@ -2805,16 +2849,58 @@ struct Index {
     this.initDnsDb().catch(() => {
     });
     void this.tryAutoStartFilterOnLaunch();
+    this.touchUiWatch(true);
+    this.startRefreshTimer();
+  }
+
+  aboutToDisappear(): void {
+    this.stopRefreshTimer();
+  }
+
+  // Pause the 1.2s refresh loop (and stop touching ui_watch) while this page is
+  // not visible: nothing it computes can be seen, and the stale ui_watch lets
+  // the VPN extension drop its status pump to the slow idle heartbeat.
+  onPageShow(): void {
+    this.pageVisible = true;
+    this.uiWatchSinceMs = Date.now();
+    this.touchUiWatch(true);
+    this.startRefreshTimer();
+    this.refreshAll();
+  }
+
+  onPageHide(): void {
+    this.pageVisible = false;
+    this.stopRefreshTimer();
+  }
+
+  private startRefreshTimer(): void {
+    if (this.refreshTimer >= 0) {
+      return;
+    }
     this.refreshTimer = setInterval(() => {
       this.refreshAll();
     }, 1200);
   }
 
-  aboutToDisappear(): void {
+  private stopRefreshTimer(): void {
     if (this.refreshTimer >= 0) {
       clearInterval(this.refreshTimer);
       this.refreshTimer = -1;
     }
+  }
+
+  // Refresh the ui_watch marker's mtime (throttled) so the extension keeps the
+  // fast status cadence only while this page is actually visible.
+  private touchUiWatch(force: boolean = false): void {
+    if (!this.pageVisible && !force) {
+      return;
+    }
+    const now: number = Date.now();
+    if (!force && now - this.lastUiWatchTouchMs < UI_WATCH_TOUCH_INTERVAL_MS) {
+      return;
+    }
+    this.lastUiWatchTouchMs = now;
+    this.writeTextFile(this.uiWatchFilePath, '1');
   }
 
   private ensureRuntimeFiles(): void {
@@ -2826,6 +2912,7 @@ struct Index {
     this.debugLogFilePath = `${vpnDir}/${DEBUG_LOG_FILE_NAME}`;
     this.upstreamDnsFilePath = `${vpnDir}/${UPSTREAM_DNS_FILE_NAME}`;
     this.stateFilePath = `${vpnDir}/${STATE_FILE_NAME}`;
+    this.uiWatchFilePath = `${vpnDir}/${UI_WATCH_FILE_NAME}`;
     try {
       fileIo.mkdirSync(vpnDir, true);
     } catch (_) {
@@ -2872,6 +2959,7 @@ struct Index {
         aghRewritesJson: JSON.stringify(this.dnsRewrites),
         aghAdvancedJson: JSON.stringify(this.advancedDns),
         aghHttpPort: this.aghHttpPortNumber(),
+        aghWebEnabled: this.aghWebEnabled,
       },
     };
   }
@@ -2962,6 +3050,9 @@ struct Index {
       }
       if (typeof state.aghHttpPort === 'string' && state.aghHttpPort.length > 0) {
         this.aghHttpPort = state.aghHttpPort;
+      }
+      if (typeof state.aghWebEnabled === 'boolean') {
+        this.aghWebEnabled = state.aghWebEnabled;
       }
       if (Array.isArray(state.blockedServiceIds)) {
         const ids: string[] = [];
@@ -3058,6 +3149,7 @@ struct Index {
       proxyModeEnabled: this.proxyModeEnabled,
       dnsProxyPort: this.dnsProxyPort,
       aghHttpPort: this.aghHttpPort,
+      aghWebEnabled: this.aghWebEnabled,
       blockedServiceIds: this.blockedServiceIds,
       filterSubscriptions: this.filterSubscriptions,
       dnsRewrites: this.dnsRewrites,
@@ -3183,6 +3275,7 @@ struct Index {
   }
 
   private refreshAll(): void {
+    this.touchUiWatch();
     this.refreshStatus();
     this.refreshQueryLog();
     this.refreshDebugLog();
@@ -4369,6 +4462,11 @@ struct Index {
       '  file_enabled: true',
       '  size_memory: 1',
       '  interval: 24h',
+      // The app keeps its own persistent counters; AGH's statistics module
+      // would redundantly maintain stats.db on disk (web panel dashboard
+      // charts go empty, its query log page still works).
+      'statistics:',
+      '  enabled: false',
       filtersBlock,
       userRulesBlock,
       '',
@@ -4477,8 +4575,8 @@ struct Index {
           fileIo.mkdirSync(workDir, true);
         } catch (_) {
         }
-        this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=full cfg=${cfgPath} port=${port}`);
-        err = vpnclientbridge.startAghServerOnly(cfgPath, workDir, logPath, port);
+        this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=full cfg=${cfgPath} port=${port} web=${this.aghWebEnabled}`);
+        err = vpnclientbridge.startAghServerOnly(cfgPath, workDir, logPath, port, this.aghWebEnabled);
       } else {
         // Lightweight engine: a DNS server (TCP + UDP) backed by the local matcher.
         this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=lite port=${port} upstream=${upstream}`);
@@ -4631,7 +4729,7 @@ struct Index {
             .width('100%')
         }
 
-        if (this.dnsProxyRunning && this.fullModeEnabled) {
+        if (this.dnsProxyRunning && this.fullModeEnabled && this.aghWebEnabled) {
           Row({ space: 12 }) {
             this.SettingsIconText({ glyph: '⌘', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA',
               iconFg: '#2B5B95',
@@ -4904,18 +5002,25 @@ struct Index {
       return true;
     }
     const now: number = Date.now();
-    // A live extension rewrites the file every second, so a "running" snapshot
-    // stamped BEFORE this UI process launched is suspect: declare it dead right
-    // away when it predates launch by more than a pump period, or after a short
-    // grace with no post-launch write. Without this, a quick app relaunch
-    // flashed "running" for up to the 4s timeout before flipping to stopped
-    // (and only then auto-starting).
+    // A "running" snapshot stamped BEFORE this UI process launched is suspect.
+    // A live extension idling at the slow heartbeat may legitimately be up to
+    // IDLE_STATUS_HEARTBEAT_MS behind, so only a stamp older than that is
+    // declared dead right away; anything newer gets a short grace to confirm
+    // itself with a post-launch write (the extension returns to the 1s cadence
+    // once it notices our ui_watch touch).
     if (updatedAtMs < this.appLaunchMs) {
-      if (updatedAtMs < this.appLaunchMs - 1500 || now - this.appLaunchMs >= LAUNCH_STATUS_GRACE_MS) {
+      if (updatedAtMs < this.appLaunchMs - STATUS_IDLE_STALE_TIMEOUT_MS
+        || now - this.appLaunchMs >= LAUNCH_STATUS_GRACE_MS) {
         return true;
       }
     }
-    return now - updatedAtMs > STATUS_STALE_TIMEOUT_MS;
+    // Steady state: with the page visible long enough for the extension to be
+    // back on the 1s cadence, expect fresh stamps; right after becoming
+    // visible, tolerate one idle heartbeat.
+    const staleLimitMs: number = now - this.uiWatchSinceMs >= UI_WATCH_RESUME_GRACE_MS
+      ? STATUS_STALE_TIMEOUT_MS
+      : STATUS_IDLE_STALE_TIMEOUT_MS;
+    return now - updatedAtMs > staleLimitMs;
   }
 
   // A not-yet-stale "running" snapshot stamped before launch: either a live
@@ -8068,7 +8173,27 @@ struct Index {
 
             Divider().strokeWidth(1).color(this.cardBorderTone())
 
-            // AdGuardHome dashboard — full engine + running.
+            // AdGuardHome web dashboard service — full engine only. Off by
+            // default: the panel's HTTP server costs battery while running.
+            Row({ space: 12 }) {
+              this.SettingsIconText({ glyph: '🌐', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+                title: this.tri('Web dashboard service', 'Web 管理面板服务', 'Web 管理面板服務'),
+                desc: this.tri('Off saves battery · toggling restarts the filter',
+                  '默认关闭更省电 · 切换后自动重启过滤', '預設關閉更省電 · 切換後自動重啟過濾') })
+              Toggle({ type: ToggleType.Switch, isOn: this.aghWebEnabled })
+                .enabled(this.fullModeEnabled)
+                .onChange((value: boolean) => {
+                  this.updateAghWebEnabled(value);
+                })
+            }
+            .width('100%')
+            .padding({ top: 10, bottom: 10 })
+            .alignItems(VerticalAlign.Center)
+            .opacity(this.fullModeEnabled ? 1 : 0.4)
+
+            Divider().strokeWidth(1).color(this.cardBorderTone())
+
+            // AdGuardHome dashboard — full engine + dashboard service + running.
             Row({ space: 12 }) {
               this.SettingsIconText({ glyph: '⌘', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
                 title: this.tri('AdGuardHome dashboard', 'AdGuardHome 管理面板', 'AdGuardHome 管理面板'),
@@ -8080,12 +8205,22 @@ struct Index {
             .width('100%')
             .padding({ top: 10, bottom: 10 })
             .alignItems(VerticalAlign.Center)
-            // Enabled whenever the full engine is running, in either VPN or
-            // DNS-proxy mode (activeRunning tracks whichever is active).
-            .opacity(this.fullModeEnabled && this.activeRunning() ? 1 : 0.4)
+            // Enabled whenever the full engine is running with the dashboard
+            // service on, in either VPN or DNS-proxy mode.
+            .opacity(this.fullModeEnabled && this.aghWebEnabled && this.activeRunning() ? 1 : 0.4)
             .onClick(() => {
               if (!this.fullModeEnabled) {
                 this.notifyFullEngineRequired();
+                return;
+              }
+              if (!this.aghWebEnabled) {
+                try {
+                  this.ensurePromptAction()?.showToast({
+                    message: this.tri('Turn on the web dashboard service first',
+                      '请先开启 Web 管理面板服务', '請先開啟 Web 管理面板服務')
+                  });
+                } catch (_) {
+                }
                 return;
               }
               if (!this.activeRunning()) {

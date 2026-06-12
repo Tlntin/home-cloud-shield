@@ -42,6 +42,12 @@ git submodule update --init --recursive
 
 并在指定 `--app-root` 时复制到应用工程。
 
+本机(Windows + WSL Ubuntu-20.04)可直接用封装脚本,内置工具链环境变量(GOROOT / OHOS_NDK / GOPROXY,见 TOOLCHAIN.md)并自动 `--app-root` 到本仓库:
+
+```powershell
+wsl -d Ubuntu-20.04 -u tlntin -- bash native/adguardhome-ohos-lib/scripts/wsl_build.sh
+```
+
 ## 许可证说明
 
 上游 `AdGuardHome` 采用 `GPL-3.0`。本目录中的移植与修改部分随主仓库一起按 GPL 条件分发。

@@ -24,6 +24,15 @@ const WANT_LOG_RETENTION_DAYS = 'logRetentionDays';
 const WANT_LOG_MAX_SIZE_MB = 'logMaxSizeMb';
 const WANT_CLEAR_DNS_LOG_ON_START = 'clearDnsLogOnStart';
 const WANT_CLEAR_DEBUG_LOG_ON_START = 'clearDebugLogOnStart';
+const WANT_NATIVE_VERBOSE_LOG = 'nativeVerboseLog';
+// The UI touches vpn/ui_watch while it is visible (foreground). While that
+// marker is fresh the status pump keeps its 1s cadence so the overview feels
+// live; once it goes stale (screen off, app backgrounded or killed) the pump
+// drops to a slow heartbeat — writing status.json every second 24/7 was a
+// constant CPU + flash wakeup with nobody reading the file.
+const UI_WATCH_FILE_NAME = 'ui_watch';
+const UI_WATCH_FRESH_MS = 10000;
+const IDLE_STATUS_HEARTBEAT_MS = 30000;
 const DEFAULT_DNS_CACHE_TTL_SECONDS = 3600;
 const DEFAULT_LOG_RETENTION_DAYS = 0;
 const DEFAULT_LOG_MAX_SIZE_MB = 0;
@@ -77,6 +86,9 @@ const AGH_LOG_FILE_NAME = 'agh.log';
 const AGH_DNS_PORT = 5354;
 const AGH_HTTP_PORT_DEFAULT = 3000;
 const WANT_AGH_HTTP_PORT = 'aghHttpPort';
+// Whether the embedded AdGuardHome serves its web admin dashboard. Off by
+// default: the HTTP server costs battery and most sessions never open it.
+const WANT_AGH_WEB_ENABLED = 'aghWebEnabled';
 const AGH_SCHEMA_VERSION = 29;
 const WANT_FILTER_MODE = 'filterMode';
 const FILTER_MODE_FULL = 'full';
@@ -168,11 +180,14 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private aghRewritesJson: string = '[]';
   private aghAdvancedJson: string = '';
   private aghHttpPort: number = AGH_HTTP_PORT_DEFAULT;
+  private aghWebEnabled: boolean = false;
   private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   private logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   private logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
   private clearDnsLogOnStart: boolean = false;
   private clearDebugLogOnStart: boolean = false;
+  private uiWatchFilePath: string = '';
+  private lastStatusWriteMs: number = 0;
   private statusTimer: number = -1;
   private lastPhase: string = 'idle';
   private lastRunning: boolean = false;
@@ -249,11 +264,18 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.aghAdvancedJson = this.wantStringParam(want, WANT_AGH_ADVANCED_JSON);
     const httpPort: number = this.wantNumberParam(want, WANT_AGH_HTTP_PORT, AGH_HTTP_PORT_DEFAULT);
     this.aghHttpPort = (httpPort >= 1024 && httpPort <= 65535) ? httpPort : AGH_HTTP_PORT_DEFAULT;
+    this.aghWebEnabled = this.wantBooleanParam(want, WANT_AGH_WEB_ENABLED, false);
     this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
     this.logRetentionDays = this.wantNumberParam(want, WANT_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS);
     this.logMaxSizeMb = this.wantNumberParam(want, WANT_LOG_MAX_SIZE_MB, DEFAULT_LOG_MAX_SIZE_MB);
     this.clearDnsLogOnStart = this.wantBooleanParam(want, WANT_CLEAR_DNS_LOG_ON_START, false);
     this.clearDebugLogOnStart = this.wantBooleanParam(want, WANT_CLEAR_DEBUG_LOG_ON_START, false);
+    this.uiWatchFilePath = `${vpnDir}/${UI_WATCH_FILE_NAME}`;
+    // Native per-query hilog is off unless explicitly requested (battery).
+    try {
+      vpnclientbridge.setNativeVerboseLog(this.wantBooleanParam(want, WANT_NATIVE_VERBOSE_LOG, false));
+    } catch (_) {
+    }
     try {
       fileIo.mkdirSync(vpnDir, true);
     } catch (_) {
@@ -640,7 +662,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
           this.aghWorkDirPath,
           this.aghLogFilePath,
           AGH_DNS_PORT,
-          this.queryLogFilePath
+          this.queryLogFilePath,
+          this.aghWebEnabled
         );
         hilog.info(
           DOMAIN,
@@ -832,12 +855,31 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.statusTimer = setInterval(() => {
       this.checkRulesReload();
       this.checkUpstreamReload();
+      // Repeat the steady-state "running" stamp every second only while the UI
+      // is actually watching; otherwise a slow heartbeat keeps the snapshot
+      // alive for the watchdog without waking flash every second all day.
+      // Phase transitions elsewhere still call writeStatus directly and are
+      // never deferred.
+      if (!this.isUiWatching() && Date.now() - this.lastStatusWriteMs < IDLE_STATUS_HEARTBEAT_MS) {
+        return;
+      }
       this.writeStatus(
         'running',
         true,
         'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.'
       );
     }, 1000);
+  }
+
+  // True while the UI marks itself visible by touching vpn/ui_watch (it stops
+  // touching it when hidden, so staleness means nobody reads status.json).
+  private isUiWatching(): boolean {
+    try {
+      const stat = fileIo.statSync(this.uiWatchFilePath);
+      return Date.now() - stat.mtime * 1000 <= UI_WATCH_FRESH_MS;
+    } catch (_) {
+      return false;
+    }
   }
 
   private isLikelyIpAddress(value: string): boolean {
@@ -1002,6 +1044,12 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       '  file_enabled: true',
       '  size_memory: 1',
       '  interval: 24h',
+      // The app keeps its own persistent counters (DnsStats); AdGuardHome's
+      // statistics module would redundantly maintain stats.db on disk. Disabling
+      // it saves that I/O — the web panel's dashboard charts go empty, but its
+      // query log page still works.
+      'statistics:',
+      '  enabled: false',
       filtersBlock,
       filteringBlock,
       userRulesBlock,
@@ -1074,7 +1122,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       enableDnssec: false,
       cacheEnabled: true,
       cacheSizeMb: 4,
-      cacheOptimistic: false,
+      // Default on: answering from an expired entry with a background refresh
+      // avoids synchronous upstream round-trips (= radio wakeups). Must match
+      // defaultAdvancedDnsConfig in Index.ets.
+      cacheOptimistic: true,
       ratelimit: 0,
     };
     if (this.aghAdvancedJson.trim().length === 0) {
@@ -1247,6 +1298,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.lastPhase = phase;
     this.lastRunning = running;
     this.lastNote = note;
+    this.lastStatusWriteMs = Date.now();
     const snapshot: StatusSnapshot = {
       phase: phase,
       running: running,

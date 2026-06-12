@@ -57,7 +57,14 @@ var (
 // bind the DNS and HTTP servers to free, unprivileged loopback ports, since the
 // host app cannot bind privileged ports and the web server aborts the process
 // if its address is unavailable.
-func StartEmbedded(confPath, workDir, logPath string, clientBuildFS fs.FS) (err error) {
+//
+// startWeb controls whether the web admin (dashboard) HTTP server actually
+// serves.  The webAPI object is always constructed (tlsManager and the control
+// handlers hold references to it), but with startWeb false its blocking serve
+// loop is never launched: no listener is bound and no HTTP server goroutines
+// run, which saves battery on the mobile host.  cleanup() handles a
+// never-started webAPI fine (shutdownSrv is nil-safe on its nil servers).
+func StartEmbedded(confPath, workDir, logPath string, clientBuildFS fs.FS, startWeb bool) (err error) {
 	embedMu.Lock()
 	defer embedMu.Unlock()
 
@@ -235,8 +242,12 @@ func StartEmbedded(confPath, workDir, logPath string, clientBuildFS fs.FS) (err 
 	}
 
 	// web.start blocks until the web server is shut down, so run it in the
-	// background and return control to the host.
-	go web.start(ctx)
+	// background and return control to the host.  With startWeb false the
+	// dashboard is simply never served: handlers stay registered on the mux,
+	// but no listener binds and no serve goroutines run.
+	if startWeb {
+		go web.start(ctx)
+	}
 
 	embedStarted = true
 

@@ -12,7 +12,7 @@
 //
 //	void  AdGuardHomeFreeCString(char* str);
 //	char* AdGuardHomeVersion();
-//	char* AdGuardHomeStart(char* configPath, char* workDir, char* logPath);
+//	char* AdGuardHomeStart(char* configPath, char* workDir, char* logPath, int startWeb);
 //	char* AdGuardHomeStop();
 //
 // All returned char* are heap-allocated with C.CString and MUST be released by
@@ -42,15 +42,18 @@ func AdGuardHomeVersion() *C.char {
 
 // AdGuardHomeStart starts the embedded AdGuard Home instance.  It returns an
 // empty string on success, or an error message on failure.  clientBuildFS is
-// the embedded web client filesystem declared in main.go.
+// the embedded web client filesystem declared in main.go.  startWeb != 0
+// serves the web admin dashboard; 0 skips it entirely (no HTTP listener, no
+// server goroutines — the battery-friendly default for the mobile host).
 //
 //export AdGuardHomeStart
-func AdGuardHomeStart(configPath, workDir, logPath *C.char) *C.char {
+func AdGuardHomeStart(configPath, workDir, logPath *C.char, startWeb C.int) *C.char {
 	err := home.StartEmbedded(
 		C.GoString(configPath),
 		C.GoString(workDir),
 		C.GoString(logPath),
 		clientBuildFS,
+		startWeb != 0,
 	)
 	if err != nil {
 		return C.CString(err.Error())

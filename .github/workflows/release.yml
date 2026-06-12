@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tag against AppScope/app.json5
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          APP_VERSION=$(grep -oP '"versionName"\s*:\s*"\K[^"]+' AppScope/app.json5)
+          echo "Tag version:        $VERSION"
+          echo "app.json5 version:  $APP_VERSION"
+          if [ "$VERSION" != "$APP_VERSION" ]; then
+            echo "::error::Tag v$VERSION does not match versionName $APP_VERSION in AppScope/app.json5"
+            exit 1
+          fi
+
+      - name: Create release with changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="docs/CHANGELOG-${VERSION}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "::error::Changelog file $NOTES not found"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "v${VERSION}" \
+            --notes-file "$NOTES" \
+            --verify-tag

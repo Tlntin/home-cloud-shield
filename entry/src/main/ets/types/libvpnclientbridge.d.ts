@@ -9,6 +9,8 @@ declare module 'libvpnclientbridge.so' {
   ): string | undefined;
   // Full mode: boot the embedded AdGuardHome engine on 127.0.0.1:aghDnsPort and
   // relay every TUN DNS query to it (AGH does all filtering/upstream/caching).
+  // aghWebEnabled serves the web admin dashboard; omitted/false skips it
+  // entirely (no HTTP listener / server goroutines — saves battery).
   export function startFullDnsFilter(
     fd: number,
     dnsServerIp: string,
@@ -16,7 +18,8 @@ declare module 'libvpnclientbridge.so' {
     aghWorkDir: string,
     aghLogPath: string,
     aghDnsPort: number,
-    queryLogPath: string
+    queryLogPath: string,
+    aghWebEnabled?: boolean
   ): string | undefined;
   // DNS server / coexist mode: boot the embedded AdGuardHome engine as a
   // standalone loopback DNS server on 127.0.0.1:aghDnsPort, with NO VPN/TUN.
@@ -27,7 +30,8 @@ declare module 'libvpnclientbridge.so' {
     aghConfigPath: string,
     aghWorkDir: string,
     aghLogPath: string,
-    aghDnsPort: number
+    aghDnsPort: number,
+    aghWebEnabled?: boolean
   ): string | undefined;
   // DNS server / coexist mode with the lightweight engine: bind matching DNS
   // listeners on bindIp:port over both TCP and UDP (no VPN/TUN) and resolve each
@@ -46,6 +50,10 @@ declare module 'libvpnclientbridge.so' {
   export function reloadDnsRules(rulesPath: string): string | undefined;
   export function setUpstreamDns(upstreamDnsIp: string): string | undefined;
   export function getStats(): string;
+  // Toggles the native per-query / packet-counter hilog lines. Default off:
+  // one hilog call per DNS query is a measurable battery cost. Turn on only
+  // for debugging sessions.
+  export function setNativeVerboseLog(enabled: boolean): void;
   // Smoke test for the full-mode engine: returns the linked AdGuardHome
   // version string (proves the prebuilt .so loads inside the native module).
   export function aghVersion(): string;
