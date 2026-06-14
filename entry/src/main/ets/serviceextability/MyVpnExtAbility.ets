@@ -911,13 +911,37 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   // newlines/commas), keeping only valid, de-duplicated entries. Falls back to
   // the built-in default when nothing valid is found. The native layer applies
   // them in order with failover.
+  // AdGuardHome upstream forms only the full engine understands: scheme URLs
+  // (DoH/DoT/DoQ/...), domain-specific [/example.com/]server syntax, and bare
+  // hostname[:port]. The lightweight native engine handles plain IPs only.
+  private isAdvancedUpstream(value: string): boolean {
+    const v: string = value.trim();
+    if (v.length === 0) {
+      return false;
+    }
+    if (/^(udp|tcp|tls|https|h3|quic|sdns):\/\/\S+$/i.test(v)) {
+      return true;
+    }
+    if (/^\[\/.*\/\].+$/.test(v)) {
+      return true;
+    }
+    return /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(:\d{1,5})?$/.test(v);
+  }
+
   private readUpstreamDnsFromFile(): string {
     const content: string = this.readTextFile(this.upstreamDnsFilePath);
+    // Full mode hands upstreams to AdGuardHome, which accepts DoH/DoT/DoQ and
+    // hostnames; the lightweight native engine only speaks plain Do53, so it is
+    // restricted to IP literals.
+    const allowAdvanced: boolean = this.filterMode === FILTER_MODE_FULL;
     const valid: string[] = [];
     for (const raw of content.split(/[\s,;]+/)) {
-      const ip: string = raw.trim();
-      if (ip.length > 0 && this.isLikelyIpAddress(ip) && !valid.includes(ip)) {
-        valid.push(ip);
+      const entry: string = raw.trim();
+      if (entry.length === 0 || valid.includes(entry)) {
+        continue;
+      }
+      if (this.isLikelyIpAddress(entry) || (allowAdvanced && this.isAdvancedUpstream(entry))) {
+        valid.push(entry);
       }
     }
     return valid.length > 0 ? valid.join('\n') : UPSTREAM_DNS_IP;
@@ -965,7 +989,14 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
 
   private buildAghConfigYaml(upstreams: string[], rules: string[]): string {
     const upstreamLines: string = upstreams.map((u: string) => `    - ${this.yamlQuote(u)}`).join('\n');
-    const bootstrapLines: string = upstreams.map((u: string) => `    - ${this.yamlQuote(u)}`).join('\n');
+    // bootstrap_dns must be plain IPs — it is what resolves DoH/DoT hostnames, so
+    // feeding it a DoH URL would deadlock the bootstrap. Keep only IP upstreams and
+    // fall back to the default resolver when every upstream is encrypted.
+    const bootstrapIps: string[] = upstreams.filter((u: string) => this.isLikelyIpAddress(u));
+    if (bootstrapIps.length === 0) {
+      bootstrapIps.push(UPSTREAM_DNS_IP);
+    }
+    const bootstrapLines: string = bootstrapIps.map((u: string) => `    - ${this.yamlQuote(u)}`).join('\n');
     const userRulesBlock: string = rules.length > 0
       ? `user_rules:\n${rules.map((r: string) => `  - ${this.yamlQuote(r)}`).join('\n')}`
       : 'user_rules: []';

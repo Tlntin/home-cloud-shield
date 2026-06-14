@@ -16,3 +16,4 @@ entry/src/main/libs/arm64-v8a/libadguardhome_ohos.so
 design
 /*.txt
 /todo*.md
+build-profile.json5

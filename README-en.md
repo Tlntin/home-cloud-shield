@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.0.7-orange)
+![Version](https://img.shields.io/badge/Version-v0.0.8-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `home_cloud_shield` is a local DNS filtering app for **HarmonyOS 6.0+**: it intercepts DNS traffic through a **local VPN** or a **pure DNS proxy**, blocks ad and tracking domains with **AdGuard-style rules**, and ships a **dual filtering engine** (lightweight / full AdGuardHome).
 
-Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.0.7** ([Changelog](#changelog))
+Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.0.8** ([Changelog](#changelog))
 
 ## Table of Contents
 
@@ -38,7 +38,7 @@ Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **
 - **Rule management**: import / edit / toggle / export AdGuard-style DNS rules.
 - **Full-mode-only capabilities**: blocked services (one-tap block of common services), online rule subscriptions (with a recommended library), DNS rewrites, advanced DNS settings (blocking mode / upstream mode / cache / DNSSEC / rate limit), and the AdGuardHome dashboard.
 - **Logs and stats**: SQLite-backed persistent DNS query log; "allowed / blocked" counters accumulate across restarts; tapping a card jumps straight to the matching filtered list; plus domain rankings and debug logs.
-- **More**: custom upstream DNS (with AliDNS / DNSPod / Baidu / AdGuard presets), background keep-alive, light/dark theme, and instant in-app switching between Simplified Chinese / English / Traditional Chinese.
+- **More**: custom upstream DNS (IP presets AliDNS / DNSPod / Baidu / AdGuard, plus DoH / DoT and other encrypted upstreams on the full engine), background keep-alive, light/dark theme, and instant in-app switching between Simplified Chinese / English / Traditional Chinese.
 
 ## Screenshots
 
@@ -75,14 +75,14 @@ Auto-Installer is a free, cross-platform HarmonyOS app deployment and debugging 
 
 ## Changelog
 
-Current version **v0.0.7** (2026-06-12), themed around **lower battery drain for long-running filtering (especially the full engine)**:
+Current version **v0.0.8** (2026-06-14), themed around **encrypted upstream DNS (DoH/DoT and more), gated per engine**:
 
-- **Adaptive status refresh in the background**: once the UI is hidden / screen off, the status file drops from one write per second to a ~30 s heartbeat, restoring real-time updates within 1–2 s of returning to the foreground; the home-page polling loop also pauses while hidden.
-- **Removed duplicate per-query disk writes on the full engine**: one fewer file operation per DNS query; per-query native system logs are silent by default; the TUN reader thread now uses event-driven wakeup with zero idle wakeups.
-- **New "Web dashboard service" toggle (off by default)**: no resident HTTP server when the panel isn't needed; enable it under Settings → Filter engine (the filter restarts automatically to apply).
-- **AdGuardHome's built-in statistics module disabled** (in-app stats unaffected; the dashboard's front-page charts will be empty); **optimistic cache on by default**, reducing synchronous upstream round-trips and radio wakeups.
+- **Encrypted upstream DNS (full engine only)**: beyond IPv4 / IPv6, you can now enter DoH (`https://`), DoT (`tls://`), DoQ (`quic://`), `h3://`, `sdns://`, `tcp/udp://`, plus the `[/domain/]server` per-domain syntax and hostnames with a port; with new AliDNS DoH / DNSPod DoH / AdGuard DoH / AliDNS DoT preset buttons.
+- **Capability gated per engine**: the lightweight engine only speaks plain Do53, so the encrypted presets are **greyed out and disabled** on lightweight mode, and leftover encrypted upstreams show a hint and a precise "switch to full mode" error on Apply.
+- **`bootstrap_dns` now uses plain IPs only** (it resolves DoH/DoT hostnames): both AdGuardHome config builders keep only the IP subset, falling back to the default resolver when every upstream is encrypted — preventing a bootstrap deadlock.
+- **Fixes**: full mode no longer silently drops non-IP upstream entries; before starting the DNS proxy (lightweight) the upstream list is filtered to plain IPs, so a leftover DoH URL can't break every lookup.
 
-Full bilingual changelogs: [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
+Full bilingual changelogs: [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
 
 ## Engines and Network Modes
 

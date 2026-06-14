@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.0.7-orange)
+![Version](https://img.shields.io/badge/Version-v0.0.8-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `栖云盾` 是一个面向 **HarmonyOS 6.0+** 的本地 DNS 过滤应用：通过**本地 VPN** 或**纯 DNS 代理**接管 DNS 流量，按 **AdGuard 风格规则**拦截广告与跟踪域名，内置**轻量级 / 完整（AdGuardHome）双过滤引擎**。
 
-项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.0.7**（[更新日志](#更新日志)）
+项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.0.8**（[更新日志](#更新日志)）
 
 ## 目录
 
@@ -38,7 +38,7 @@
 - **规则管理**：导入 / 编辑 / 启停 / 导出 AdGuard 风格 DNS 规则。
 - **完整模式专属**：服务屏蔽（一键屏蔽常见服务）、在线规则订阅（含推荐规则库）、DNS 重写、DNS 高级设置（拦截方式 / 上游模式 / 缓存 / DNSSEC / 限速）、AdGuardHome 管理面板。
 - **日志与统计**：DNS 查询日志基于 SQLite 持久存储，「已放行 / 已拦截」跨重启累计，卡片点击直达对应筛选列表，另有域名排行与调试日志。
-- **其他**：自定义上游 DNS（含 AliDNS / DNSPod / Baidu / AdGuard 预设）、后台保活、深浅色主题、简中 / English / 繁中三语即时切换。
+- **其他**：自定义上游 DNS（IP 预设 AliDNS / DNSPod / Baidu / AdGuard，完整引擎还支持 DoH / DoT 等加密上游）、后台保活、深浅色主题、简中 / English / 繁中三语即时切换。
 
 ## 应用截图
 
@@ -75,14 +75,14 @@
 
 ## 更新日志
 
-当前版本 **v0.0.7**（2026-06-12），主题为**降低长期运行（尤其是完整引擎）的耗电**：
+当前版本 **v0.0.8**（2026-06-14），主题为**上游 DNS 支持加密格式（DoH/DoT 等），并按引擎区分能力**：
 
-- **后台状态刷新自适应降频**：界面退到后台 / 灭屏后，状态文件从每秒一写降为约 30 秒心跳，回到前台 1~2 秒恢复实时；界面不可见时首页轮询同步暂停。
-- **完整引擎去掉重复的逐查询写盘**：每条 DNS 查询少一次文件操作；native 逐查询系统日志默认静音；TUN 读取线程改事件唤醒，空闲零唤醒。
-- **新增「Web 管理面板服务」开关（默认关闭）**：不需要面板时不再常驻 HTTP 服务，需要时到 设置 → 过滤引擎 打开（过滤自动重启生效）。
-- **关闭 AdGuardHome 内置统计模块**（App 自有统计不受影响，面板首页图表将为空）；**乐观缓存默认开启**，减少同步上游请求与射频唤醒。
+- **上游 DNS 支持加密格式（仅完整引擎）**：除 IPv4 / IPv6 外，现可填写 DoH（`https://`）、DoT（`tls://`）、DoQ（`quic://`）、`h3://`、`sdns://`、`tcp/udp://`，以及 `[/domain/]server` 分流语法和带端口主机名；并新增 AliDNS DoH / DNSPod DoH / AdGuard DoH / AliDNS DoT 预设按钮。
+- **按引擎区分能力**：轻量引擎仅支持纯 IP 明文 DNS，因此加密预设按钮在轻量模式下**置灰禁用**，残留加密上游会显示提示并在应用时明确报「请切换完整模式」。
+- **`bootstrap_dns` 只用纯 IP**（解析 DoH/DoT 主机名）：两处 AdGuardHome 配置生成均只取 IP 子集，全加密时回退默认解析器，避免 bootstrap 死锁。
+- **修复**：完整模式读取上游时不再静默丢弃非 IP 条目；从完整模式切回轻量启动 DNS 代理前自动过滤为纯 IP，避免把 DoH URL 喂给底层导致解析全部失败。
 
-完整变更（中英双语）：[v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
+完整变更（中英双语）：[v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
 
 ## 引擎与网络模式
 

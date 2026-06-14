@@ -147,6 +147,7 @@ type LanguageKey =
   | 'exportLog' | 'dnsSearchPlaceholder' | 'clickToExpand' | 'clickViewDebugAndCopy' | 'exportDebugLogsFailed'
   | 'exportRulesFailed' | 'exportFileFailed' | 'dnsCacheTitle' | 'dnsCacheHint' | 'dnsCacheTtlLabel'
   | 'upstreamDnsTitle' | 'upstreamDnsHint' | 'upstreamDnsApply' | 'upstreamDnsApplied' | 'upstreamDnsInvalid'
+  | 'upstreamDnsEncryptedLabel' | 'upstreamDnsLiteOnlyIp'
   | 'logRetentionTitle' | 'logRetentionHint' | 'clearDnsLogOnStart' | 'clearDnsLogOnStartHint'
   | 'clearDebugLogOnStart' | 'clearDebugLogOnStartHint' | 'logRetentionDaysLabel' | 'logRetentionDaysHint'
   | 'logMaxSizeMbLabel' | 'logMaxSizeMbHint' | 'settingsEntry' | 'settingsEntryHint'
@@ -360,6 +361,8 @@ function resolveStringResource(key: LanguageKey): number {
     case 'upstreamDnsApply': return $r('app.string.upstreamDnsApply').id;
     case 'upstreamDnsApplied': return $r('app.string.upstreamDnsApplied').id;
     case 'upstreamDnsInvalid': return $r('app.string.upstreamDnsInvalid').id;
+    case 'upstreamDnsEncryptedLabel': return $r('app.string.upstreamDnsEncryptedLabel').id;
+    case 'upstreamDnsLiteOnlyIp': return $r('app.string.upstreamDnsLiteOnlyIp').id;
     case 'dnsCacheTtlLabel': return $r('app.string.dnsCacheTtlLabel').id;
     case 'logRetentionTitle': return $r('app.string.logRetentionTitle').id;
     case 'logRetentionHint': return $r('app.string.logRetentionHint').id;
@@ -561,6 +564,13 @@ interface FilterSubscription {
   name: string;
   url: string;
   enabled: boolean;
+}
+
+// An upstream-DNS quick-fill chip. Encrypted (DoH/DoT) presets only work on the
+// full AdGuardHome engine, so their chips are disabled on the lightweight engine.
+interface UpstreamPreset {
+  label: string;
+  value: string;
 }
 
 // Lightweight view of the native getStats() JSON. In the main app process this
@@ -1700,6 +1710,8 @@ struct Index {
     this.savePersistState();
   }
 
+  // Plain IPv4/IPv6 literal — the only upstream form the lightweight C++ engine
+  // accepts (it inet_pton()s the string and talks plain Do53 over UDP/TCP).
   private isValidUpstreamIp(value: string): boolean {
     const v: string = value.trim();
     if (v.length === 0) {
@@ -1723,6 +1735,45 @@ struct Index {
     return true;
   }
 
+  // AdGuardHome upstream forms only the full engine understands: scheme URLs
+  // (DoH https://, DoT tls://, DoQ quic://, h3://, sdns://, tcp/udp://),
+  // domain-specific [/example.com/]server syntax, and bare hostname[:port].
+  private isAdvancedUpstream(value: string): boolean {
+    const v: string = value.trim();
+    if (v.length === 0) {
+      return false;
+    }
+    if (/^(udp|tcp|tls|https|h3|quic|sdns):\/\/\S+$/i.test(v)) {
+      return true;
+    }
+    if (/^\[\/.*\/\].+$/.test(v)) {
+      return true;
+    }
+    // hostname (must contain a dot) with optional :port, e.g. dns.google:853
+    if (/^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(:\d{1,5})?$/.test(v)) {
+      return true;
+    }
+    return false;
+  }
+
+  // An upstream entry is valid for the active engine: full mode also accepts the
+  // encrypted/advanced forms above; the lightweight engine is restricted to IPs.
+  private isValidUpstreamEntry(value: string, allowAdvanced: boolean): boolean {
+    if (this.isValidUpstreamIp(value)) {
+      return true;
+    }
+    return allowAdvanced && this.isAdvancedUpstream(value);
+  }
+
+  // Whether the current input holds entries the lightweight engine cannot use.
+  // Drives the inline warning shown when DoH/DoT is left in place on lite mode.
+  private upstreamInputHasUnsupportedForLite(): boolean {
+    if (this.fullModeEnabled) {
+      return false;
+    }
+    return this.splitUpstreamEntries(this.upstreamDnsInput).some((e: string) => !this.isValidUpstreamIp(e));
+  }
+
   private splitUpstreamEntries(value: string): string[] {
     return value.split(/[\s,;]+/).map((s: string) => s.trim()).filter((s: string) => s.length > 0);
   }
@@ -1730,6 +1781,17 @@ struct Index {
   private onUpstreamDnsInputChange(value: string): void {
     this.upstreamDnsInput = value;
     this.savePersistState();
+  }
+
+  // Encrypted upstream quick-fills (DoH/DoT). Full engine only — the chips are
+  // disabled when the lightweight engine is active.
+  private upstreamEncryptedPresets(): UpstreamPreset[] {
+    return [
+      { label: 'AliDNS DoH', value: 'https://dns.alidns.com/dns-query' },
+      { label: 'DNSPod DoH', value: 'https://doh.pub/dns-query' },
+      { label: 'AdGuard DoH', value: 'https://dns.adguard-dns.com/dns-query' },
+      { label: 'AliDNS DoT', value: 'tls://dns.alidns.com' },
+    ];
   }
 
   // Tap a preset to append it to the failover list (deduped), then apply.
@@ -1746,9 +1808,14 @@ struct Index {
   // within ~1s; otherwise it is read at next start. Empty restores the default.
   private applyUpstreamDns(value: string): void {
     const entries: string[] = this.splitUpstreamEntries(value);
+    const allowAdvanced: boolean = this.fullModeEnabled;
     for (const entry of entries) {
-      if (!this.isValidUpstreamIp(entry)) {
-        this.errorText = this.t('upstreamDnsInvalid');
+      if (!this.isValidUpstreamEntry(entry, allowAdvanced)) {
+        // Distinguish "wrong format" from "right format, wrong engine" so a user
+        // who pastes a DoH URL on the lightweight engine knows to switch modes.
+        this.errorText = (!allowAdvanced && this.isAdvancedUpstream(entry))
+          ? this.t('upstreamDnsLiteOnlyIp')
+          : this.t('upstreamDnsInvalid');
         return;
       }
     }
@@ -4409,6 +4476,14 @@ struct Index {
       upstreams.push(DEFAULT_UPSTREAM_DNS_IP);
     }
     const upstreamLines: string = upstreams.map((u: string) => `    - ${yamlQuote(u)}`).join('\n');
+    // bootstrap_dns must be plain IPs — it is what resolves DoH/DoT hostnames.
+    // Feeding it a DoH URL would deadlock the bootstrap, so keep only IP upstreams
+    // and fall back to the default resolver when every upstream is encrypted.
+    const bootstrapIps: string[] = upstreams.filter((u: string) => this.isValidUpstreamIp(u));
+    if (bootstrapIps.length === 0) {
+      bootstrapIps.push(DEFAULT_UPSTREAM_DNS_IP);
+    }
+    const bootstrapLines: string = bootstrapIps.map((u: string) => `    - ${yamlQuote(u)}`).join('\n');
 
     const rules: string[] = [];
     for (const rawLine of this.rulesText.split('\n')) {
@@ -4449,7 +4524,7 @@ struct Index {
       '  upstream_dns:',
       upstreamLines,
       '  bootstrap_dns:',
-      upstreamLines,
+      bootstrapLines,
       // The proxy app funnels every query through the single 127.0.0.1 source, so
       // AdGuardHome's per-client rate limit would otherwise throttle the device.
       '  ratelimit: 0',
@@ -4544,8 +4619,13 @@ struct Index {
     try {
       this.writeTextFile(this.rulesFilePath, this.rulesText);
       this.writeTextFile(this.upstreamDnsFilePath, this.upstreamDnsInput.trim());
-      const upstream: string = this.upstreamDnsInput.trim().length > 0
-        ? this.upstreamDnsInput.trim()
+      // The lightweight native engine only speaks plain Do53, so strip any
+      // encrypted/advanced entries left over from full mode before handing the
+      // list to it; full mode reads upstreamDnsInput directly via buildAghProxyYaml.
+      const liteUpstreams: string[] = this.splitUpstreamEntries(this.upstreamDnsInput)
+        .filter((e: string) => this.isValidUpstreamIp(e));
+      const upstream: string = liteUpstreams.length > 0
+        ? liteUpstreams.join('\n')
         : DEFAULT_UPSTREAM_DNS_IP;
       // Auto-skip busy ports: probe from the configured port upward for a free
       // loopback TCP port, so a port conflict doesn't fail the start. Full mode
@@ -8338,6 +8418,41 @@ struct Index {
                 })
             }
             .width('100%')
+
+            // Encrypted upstreams (DoH/DoT) — only the full AdGuardHome engine can
+            // resolve these, so the row is greyed out and disabled on lite mode.
+            Text(this.t('upstreamDnsEncryptedLabel'))
+              .fontSize(12)
+              .fontColor(this.secondaryTextColor())
+              .opacity(this.fullModeEnabled ? 1 : 0.4)
+              .width('100%')
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(this.upstreamEncryptedPresets(), (preset: UpstreamPreset) => {
+                Button(preset.label)
+                  .type(ButtonType.Normal)
+                  .fontSize(13)
+                  .fontColor(this.primaryTextColor())
+                  .backgroundColor(this.softPanelTone())
+                  .borderRadius(10)
+                  .border({ width: 1, color: this.cardBorderTone() })
+                  .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                  .margin({ right: 8, bottom: 8 })
+                  .enabled(this.fullModeEnabled)
+                  .opacity(this.fullModeEnabled ? 1 : 0.4)
+                  .onClick(() => {
+                    this.addUpstreamPreset(preset.value);
+                  })
+              }, (preset: UpstreamPreset) => preset.value)
+            }
+            .width('100%')
+
+            if (this.upstreamInputHasUnsupportedForLite()) {
+              Text(this.t('upstreamDnsLiteOnlyIp'))
+                .fontSize(12)
+                .lineHeight(18)
+                .fontColor(this.isDarkModeActive() ? '#F5A524' : '#B54708')
+                .width('100%')
+            }
 
             Button(this.t('upstreamDnsApply'))
               .type(ButtonType.Normal)
