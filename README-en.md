@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.0.8-orange)
+![Version](https://img.shields.io/badge/Version-v0.0.9-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `home_cloud_shield` is a local DNS filtering app for **HarmonyOS 6.0+**: it intercepts DNS traffic through a **local VPN** or a **pure DNS proxy**, blocks ad and tracking domains with **AdGuard-style rules**, and ships a **dual filtering engine** (lightweight / full AdGuardHome).
 
-Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.0.8** ([Changelog](#changelog))
+Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.0.9** ([Changelog](#changelog))
 
 ## Table of Contents
 
@@ -35,10 +35,10 @@ Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **
 - **Dual filtering engine**: lightweight (default, low power) / full (embedded AdGuardHome core), switchable from a dropdown on the home page.
 - **Dual network mode**: VPN mode (device-wide DNS takeover) / pure DNS proxy mode (no VPN slot used, **coexists with another VPN / proxy app**).
 - **Works on Wi-Fi too**: Wi-Fi-provided resolvers and common public DNS are captured automatically, with re-adaptation on Wi-Fi ↔ cellular switches (fixed in v0.0.5).
-- **Rule management**: import / edit / toggle / export AdGuard-style DNS rules.
-- **Full-mode-only capabilities**: blocked services (one-tap block of common services), online rule subscriptions (with a recommended library), DNS rewrites, advanced DNS settings (blocking mode / upstream mode / cache / DNSSEC / rate limit), and the AdGuardHome dashboard.
-- **Logs and stats**: SQLite-backed persistent DNS query log; "allowed / blocked" counters accumulate across restarts; tapping a card jumps straight to the matching filtered list; plus domain rankings and debug logs.
-- **More**: custom upstream DNS (IP presets AliDNS / DNSPod / Baidu / AdGuard, plus DoH / DoT and other encrypted upstreams on the full engine), background keep-alive, light/dark theme, and instant in-app switching between Simplified Chinese / English / Traditional Chinese.
+- **Rule management**: import / edit / toggle / export AdGuard-style DNS rules; plus **whole-config JSON import / export** (compatible with the `adguard.json` of the "AdGuard content blocker" app).
+- **Full-mode-only capabilities**: blocked services (one-tap block of common services), **local management of online subscriptions** (subscribing / importing downloads the list to a local cache and validates it; view content, one-tap refresh, check usability; with a recommended library), DNS rewrites, advanced DNS settings (blocking mode / upstream mode / cache / DNSSEC / rate limit), and the AdGuardHome dashboard.
+- **Logs and stats**: SQLite-backed persistent DNS query log; "allowed / blocked" counters accumulate across restarts; tapping a card jumps straight to the matching filtered list; plus domain rankings, debug logs, and a **persistent status-bar notification** (live Blocked / Allowed / Total counts, off by default to save battery).
+- **More**: custom upstream DNS (IP presets AliDNS / DNSPod / Baidu / AdGuard, plus DoH / DoT and other encrypted upstreams on the full engine), **automatic upstream that follows the system / router** (VPN mode), background keep-alive, light/dark theme, and instant in-app switching between Simplified Chinese / English / Traditional Chinese.
 
 ## Screenshots
 
@@ -75,14 +75,14 @@ Auto-Installer is a free, cross-platform HarmonyOS app deployment and debugging 
 
 ## Changelog
 
-Current version **v0.0.8** (2026-06-14), themed around **encrypted upstream DNS (DoH/DoT and more), gated per engine**:
+Current version **v0.0.9** (2026-06-15), themed around **local rule-subscription management, config import/export, a persistent stats notification, and automatic upstream DNS**:
 
-- **Encrypted upstream DNS (full engine only)**: beyond IPv4 / IPv6, you can now enter DoH (`https://`), DoT (`tls://`), DoQ (`quic://`), `h3://`, `sdns://`, `tcp/udp://`, plus the `[/domain/]server` per-domain syntax and hostnames with a port; with new AliDNS DoH / DNSPod DoH / AdGuard DoH / AliDNS DoT preset buttons.
-- **Capability gated per engine**: the lightweight engine only speaks plain Do53, so the encrypted presets are **greyed out and disabled** on lightweight mode, and leftover encrypted upstreams show a hint and a precise "switch to full mode" error on Apply.
-- **`bootstrap_dns` now uses plain IPs only** (it resolves DoH/DoT hostnames): both AdGuardHome config builders keep only the IP subset, falling back to the default resolver when every upstream is encrypted — preventing a bootstrap deadlock.
-- **Fixes**: full mode no longer silently drops non-IP upstream entries; before starting the DNS proxy (lightweight) the upstream list is filtered to plain IPs, so a leftover DoH URL can't break every lookup.
+- **Config import / export** (Config → "💾 Config backup"): one-tap import / export of a JSON config, compatible with the `adguard.json` of the "AdGuard content blocker" app (subscriptions / blocked / allowed / rewrites), extended into this app's superset; import is a merge-and-dedupe and applies immediately.
+- **Local management of online subscriptions** (Config → "📡 My subscriptions"): subscribing / importing downloads the list to a local cache and validates it as a real rule list; a list that can't be downloaded or isn't a rule list (e.g. a web-page link) is marked **✗ unusable**, its toggle defaults off, and it's excluded from the engine; each shows **✓ N / ✗ unusable / ⏳ downloading**; tap a card to **view its content** (local cache first, with one-tap refresh in the viewer); the toggle enables / disables, a 🗑 Delete button confirms first; the header's "🔄 Refresh / 🩺 Check" re-downloads all and reports usability.
+- **Persistent stats notification**: a sticky notification with cumulative Blocked / Allowed / Total (matching the home page), 1–5 s refresh interval, tap to open the app, silent (no vibration); **off by default** to save battery.
+- **Automatic upstream DNS** (Settings → Upstream DNS, VPN mode only): follows the system / router DNS, which helps resolve LAN hostnames and lowers latency, updating across Wi-Fi ↔ cellular switches; off by default, and greyed out in pure DNS-proxy mode.
 
-Full bilingual changelogs: [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
+Full bilingual changelogs: [v0.0.9](./docs/CHANGELOG-0.0.9.md) | [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
 
 ## Engines and Network Modes
 

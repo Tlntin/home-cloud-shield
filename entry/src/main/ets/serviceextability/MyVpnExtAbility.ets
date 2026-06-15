@@ -1,8 +1,9 @@
-import { Want } from '@kit.AbilityKit';
+import { Want, wantAgent, WantAgent } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { connection, vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { notificationManager } from '@kit.NotificationKit';
 import vpnclientbridge from 'libvpnclientbridge.so';
 
 const DOMAIN = 0x0000;
@@ -33,6 +34,25 @@ const WANT_NATIVE_VERBOSE_LOG = 'nativeVerboseLog';
 const UI_WATCH_FILE_NAME = 'ui_watch';
 const UI_WATCH_FRESH_MS = 10000;
 const IDLE_STATUS_HEARTBEAT_MS = 30000;
+// Persistent status-bar notification ("常驻通知栏"): the UI writes vpn/notify.json
+// (enable flag, refresh interval, and the localized labels) and this process
+// publishes/updates an ongoing notification showing live filtered / allowed /
+// total DNS counts. It is owned here (not the UI) so the notification lives
+// exactly as long as the filter runs, even while the app is backgrounded/killed.
+const NOTIFY_CONFIG_FILE_NAME = 'notify.json';
+// Live cumulative baseline written by the UI: the home-page cumulative counts
+// (dnsStats) plus the native session counts observed at that instant. The
+// notification shows base + max(0, nativeNow - baseNative) so it matches the
+// home page (foreground re-baselines continuously) yet keeps ticking in the
+// background off the live native session delta.
+const NOTIFY_COUNTS_FILE_NAME = 'notify_counts.json';
+const STATS_NOTIFICATION_ID = 10010;
+const DEFAULT_NOTIFICATION_REFRESH_SECONDS = 2;
+const MAX_NOTIFICATION_REFRESH_SECONDS = 60;
+// Stage-model ability name = the bare "name" from module.json5 ("EntryAbility"),
+// NOT the bundle-prefixed form. The prefixed form packages into a WantAgent fine but
+// fails to resolve when the notification is tapped, so the app wouldn't open.
+const ENTRY_ABILITY_NAME = 'EntryAbility';
 const DEFAULT_DNS_CACHE_TTL_SECONDS = 3600;
 const DEFAULT_LOG_RETENTION_DAYS = 0;
 const DEFAULT_LOG_MAX_SIZE_MB = 0;
@@ -45,6 +65,11 @@ const DNS_SERVER_IPV6 = 'fd00:ad00::1';
 const IPV6_ROUTE = 'fd00:ad00::';
 const IPV6_PREFIX_LENGTH = 64;
 const UPSTREAM_DNS_IP = '119.29.29.29';
+// First line of upstream.txt when the UI has enabled "auto upstream": follow the
+// system/router-provided resolvers (read from the underlying network), falling
+// back to the manual list on the remaining lines when none are usable. Must
+// match UPSTREAM_AUTO_MARKER in Index.ets.
+const UPSTREAM_AUTO_MARKER = '__AUTO__';
 // Host-route prefix lengths used to pull individual DNS resolver IPs into the
 // tun (see PUBLIC_DNS_RESOLVERS / dnsCaptureRouteIps).
 const IPV4_HOST_PREFIX_LENGTH = 32;
@@ -138,6 +163,31 @@ interface StatusSnapshot {
   updatedAt: string;
   tunFd: number;
   nativeStats: NativeStats;
+  // The resolver actually in use (newline-joined) and whether it was auto-derived
+  // from the system/router. Lets the UI show "Auto: 192.168.1.1".
+  effectiveUpstream: string;
+  upstreamAuto: boolean;
+}
+
+// Persistent-notification config written by the UI (vpn/notify.json). Labels are
+// resolved against the in-app language override on the UI side and passed through
+// verbatim, so this process never needs to localize.
+interface NotifyConfig {
+  enabled: boolean;
+  refreshSeconds: number;
+  title: string;
+  blockedLabel: string;
+  allowedLabel: string;
+  totalLabel: string;
+}
+
+// Cumulative baseline + the native session counts captured at the same instant
+// (see NOTIFY_COUNTS_FILE_NAME).
+interface NotifyCounts {
+  cumAllowed: number;
+  cumBlocked: number;
+  natAllowed: number;
+  natBlocked: number;
 }
 
 // Full-mode AdGuardHome extras decoded from the Want JSON params.
@@ -172,6 +222,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private debugLogFilePath: string = '';
   private upstreamDnsFilePath: string = '';
   private upstreamDnsIp: string = UPSTREAM_DNS_IP;
+  // When upstreamAuto is on, upstreamDnsIp is derived from the live network and
+  // upstreamManual is the fallback list; otherwise upstreamDnsIp == upstreamManual.
+  private upstreamAuto: boolean = false;
+  private upstreamManual: string = UPSTREAM_DNS_IP;
   private filterMode: string = FILTER_MODE_LIGHTWEIGHT;
   private aghConfigFilePath: string = '';
   private aghWorkDirPath: string = '';
@@ -189,6 +243,25 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private uiWatchFilePath: string = '';
   private lastStatusWriteMs: number = 0;
   private statusTimer: number = -1;
+  // Persistent stats notification state (see NOTIFY_CONFIG_FILE_NAME).
+  private notifyConfigFilePath: string = '';
+  private lastNotifyConfigSignature: string = '';
+  private notifyCountsFilePath: string = '';
+  private lastNotifyCountsSignature: string = '';
+  private notifyBaseCumAllowed: number = 0;
+  private notifyBaseCumBlocked: number = 0;
+  private notifyBaseNatAllowed: number = 0;
+  private notifyBaseNatBlocked: number = 0;
+  private notificationEnabled: boolean = false;
+  private notificationRefreshMs: number = DEFAULT_NOTIFICATION_REFRESH_SECONDS * 1000;
+  private notificationTitle: string = '';
+  private notificationBlockedLabel: string = 'Blocked';
+  private notificationAllowedLabel: string = 'Allowed';
+  private notificationTotalLabel: string = 'Total';
+  private lastNotificationText: string = '';
+  private lastNotificationPublishMs: number = 0;
+  private notificationActive: boolean = false;
+  private notificationWantAgent?: WantAgent;
   private lastPhase: string = 'idle';
   private lastRunning: boolean = false;
   private lastNote: string = 'DNS filter has not been started yet.';
@@ -271,6 +344,12 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.clearDnsLogOnStart = this.wantBooleanParam(want, WANT_CLEAR_DNS_LOG_ON_START, false);
     this.clearDebugLogOnStart = this.wantBooleanParam(want, WANT_CLEAR_DEBUG_LOG_ON_START, false);
     this.uiWatchFilePath = `${vpnDir}/${UI_WATCH_FILE_NAME}`;
+    this.notifyConfigFilePath = `${vpnDir}/${NOTIFY_CONFIG_FILE_NAME}`;
+    this.notifyCountsFilePath = `${vpnDir}/${NOTIFY_COUNTS_FILE_NAME}`;
+    this.loadNotifyConfig();
+    this.loadNotifyCounts();
+    this.lastNotifyConfigSignature = this.notifyConfigSignature();
+    this.lastNotifyCountsSignature = this.notifyCountsSignature();
     // Native per-query hilog is off unless explicitly requested (battery).
     try {
       vpnclientbridge.setNativeVerboseLog(this.wantBooleanParam(want, WANT_NATIVE_VERBOSE_LOG, false));
@@ -285,7 +364,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     if (this.isLegacyDefaultRulesText(existingRules)) {
       this.writeTextFile(this.rulesFilePath, '');
     }
-    this.upstreamDnsIp = this.readUpstreamDnsFromFile();
+    this.parseUpstreamConfig();
+    // Provisional until createTunAndStartFilter resolves it against the live
+    // network (auto mode). In manual mode this is already the final value.
+    this.upstreamDnsIp = this.upstreamManual;
     this.prepareLogFile(this.queryLogFilePath, this.clearDnsLogOnStart, this.logRetentionDays, this.logMaxSizeMb, true);
     this.prepareLogFile(this.debugLogFilePath, this.clearDebugLogOnStart, this.logRetentionDays, this.logMaxSizeMb, false);
     hilog.info(
@@ -616,6 +698,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       true,
       'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.'
     );
+    // Show the persistent stats notification right away (if enabled) instead of
+    // waiting for the first pump tick.
+    this.updateStatsNotification(true);
     hilog.info(DOMAIN, TAG, '==/vpn_ext/running/ tun_fd=%{public}d', this.tunFd);
     this.appendDebugLog(`==/vpn_ext/running/ tun_fd=${this.tunFd}`);
   }
@@ -634,6 +719,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       // Capture DNS sent to the underlying network's resolvers and common public
       // resolvers (not just our advertised 10.8.0.1) so filtering survives Wi-Fi.
       const underlyingDns: string[] = await this.queryUnderlyingDnsServers();
+      // Auto mode: resolve the effective upstream from the live system/router DNS
+      // (falls back to the manual list). Both engines read this.upstreamDnsIp below.
+      this.upstreamDnsIp = this.computeEffectiveUpstream(underlyingDns);
+      this.appendDebugLog(`==/vpn_ext/upstream_effective/ auto=${this.upstreamAuto} upstream=${this.upstreamDnsIp.replace(/\n/g, ',')}`);
       const dnsCaptureIps: string[] = this.dnsCaptureRouteIps(underlyingDns);
       this.lastDnsCaptureSignature = dnsCaptureIps.join(',');
       this.appendDebugLog(`==/vpn_ext/dns_capture_routes/ underlying=[${underlyingDns.join(',')}] captured=${dnsCaptureIps.length}`);
@@ -855,6 +944,12 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.statusTimer = setInterval(() => {
       this.checkRulesReload();
       this.checkUpstreamReload();
+      // Pick up live notify.json edits (toggle / interval / language) and refresh
+      // the persistent stats notification. Runs before the idle early-return
+      // below so the notification stays live even while the UI isn't watching.
+      this.checkNotifyConfigReload();
+      this.checkNotifyCountsReload();
+      this.updateStatsNotification(false);
       // Repeat the steady-state "running" stamp every second only while the UI
       // is actually watching; otherwise a slow heartbeat keeps the snapshot
       // alive for the watchdog without waking flash every second all day.
@@ -880,6 +975,210 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     } catch (_) {
       return false;
     }
+  }
+
+  // ---- Persistent stats notification ---------------------------------------
+
+  private notifyConfigSignature(): string {
+    try {
+      const stat = fileIo.statSync(this.notifyConfigFilePath);
+      return `${stat.mtime}:${stat.size}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // (Re)load vpn/notify.json into the notification config fields. A missing or
+  // garbled file means "no stats notification" rather than a half-localized one.
+  private loadNotifyConfig(): void {
+    const content: string = this.readTextFile(this.notifyConfigFilePath);
+    if (content.trim().length === 0) {
+      this.notificationEnabled = false;
+      return;
+    }
+    try {
+      const cfg = JSON.parse(content) as NotifyConfig;
+      this.notificationEnabled = cfg?.enabled === true;
+      const secs: number = typeof cfg?.refreshSeconds === 'number' && cfg.refreshSeconds >= 1
+        ? Math.min(MAX_NOTIFICATION_REFRESH_SECONDS, Math.floor(cfg.refreshSeconds))
+        : DEFAULT_NOTIFICATION_REFRESH_SECONDS;
+      this.notificationRefreshMs = secs * 1000;
+      this.notificationTitle = typeof cfg?.title === 'string' && cfg.title.length > 0 ? cfg.title : 'DNS';
+      this.notificationBlockedLabel = typeof cfg?.blockedLabel === 'string' && cfg.blockedLabel.length > 0
+        ? cfg.blockedLabel : 'Blocked';
+      this.notificationAllowedLabel = typeof cfg?.allowedLabel === 'string' && cfg.allowedLabel.length > 0
+        ? cfg.allowedLabel : 'Allowed';
+      this.notificationTotalLabel = typeof cfg?.totalLabel === 'string' && cfg.totalLabel.length > 0
+        ? cfg.totalLabel : 'Total';
+    } catch (_) {
+      this.notificationEnabled = false;
+    }
+  }
+
+  // Detect live edits to notify.json (toggle / interval / language) and apply
+  // them: turning the feature off cancels the notification; any other change
+  // forces an immediate refresh so new labels/interval show without a restart.
+  private checkNotifyConfigReload(): void {
+    const signature: string = this.notifyConfigSignature();
+    if (signature === this.lastNotifyConfigSignature) {
+      return;
+    }
+    this.lastNotifyConfigSignature = signature;
+    this.loadNotifyConfig();
+    this.appendDebugLog(`==/vpn_ext/notify_config_reload/ enabled=${this.notificationEnabled} refresh_ms=${this.notificationRefreshMs}`);
+    if (!this.notificationEnabled) {
+      if (this.notificationActive) {
+        this.cancelStatsNotification();
+      }
+      return;
+    }
+    this.updateStatsNotification(true);
+  }
+
+  private notifyCountsSignature(): string {
+    try {
+      const stat = fileIo.statSync(this.notifyCountsFilePath);
+      return `${stat.mtime}:${stat.size}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // Load the cumulative baseline the UI captured. Absent file => all zeros, which
+  // degrades to showing the pure native session counts.
+  private loadNotifyCounts(): void {
+    const content: string = this.readTextFile(this.notifyCountsFilePath);
+    if (content.trim().length === 0) {
+      return;
+    }
+    try {
+      const c = JSON.parse(content) as NotifyCounts;
+      this.notifyBaseCumAllowed = this.safeCount(c?.cumAllowed);
+      this.notifyBaseCumBlocked = this.safeCount(c?.cumBlocked);
+      this.notifyBaseNatAllowed = this.safeCount(c?.natAllowed);
+      this.notifyBaseNatBlocked = this.safeCount(c?.natBlocked);
+    } catch (_) {
+    }
+  }
+
+  private safeCount(value: number): number {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+  }
+
+  // Pick up a fresh baseline from the UI and refresh the notification with it.
+  private checkNotifyCountsReload(): void {
+    const signature: string = this.notifyCountsSignature();
+    if (signature === this.lastNotifyCountsSignature) {
+      return;
+    }
+    this.lastNotifyCountsSignature = signature;
+    this.loadNotifyCounts();
+    this.updateStatsNotification(true);
+  }
+
+  // Recompute the notification text from the live native counters and republish
+  // when it changed (and the refresh interval has elapsed). Dedup-on-text means
+  // an idle device with no new queries causes no flash/CPU wakeups.
+  private updateStatsNotification(force: boolean): void {
+    if (this.tunFd < 0) {
+      return;
+    }
+    if (!this.notificationEnabled) {
+      if (this.notificationActive) {
+        this.cancelStatsNotification();
+      }
+      return;
+    }
+    const now: number = Date.now();
+    if (!force && now - this.lastNotificationPublishMs < this.notificationRefreshMs) {
+      return;
+    }
+    // Cumulative (matches the home page) = UI baseline + the live native session
+    // delta since that baseline was captured. The delta is clamped at 0 so a
+    // native restart (counters reset to 0) can't make the total go backwards; the
+    // UI re-baselines to the true cumulative on its next foreground refresh.
+    const stats: NativeStats = this.parseNativeStats();
+    const allowed: number =
+      this.notifyBaseCumAllowed + Math.max(0, Math.max(0, stats.allowedQueries) - this.notifyBaseNatAllowed);
+    const blocked: number =
+      this.notifyBaseCumBlocked + Math.max(0, Math.max(0, stats.blockedQueries) - this.notifyBaseNatBlocked);
+    const total: number = allowed + blocked;
+    const text: string =
+      `${this.notificationBlockedLabel} ${this.formatCount(blocked)}    ` +
+      `${this.notificationAllowedLabel} ${this.formatCount(allowed)}    ` +
+      `${this.notificationTotalLabel} ${this.formatCount(total)}`;
+    if (!force && text === this.lastNotificationText) {
+      return;
+    }
+    this.lastNotificationText = text;
+    this.lastNotificationPublishMs = now;
+    void this.publishStatsNotification(this.notificationTitle, text);
+  }
+
+  private async ensureNotificationWantAgent(): Promise<WantAgent | undefined> {
+    if (this.notificationWantAgent !== undefined) {
+      return this.notificationWantAgent;
+    }
+    try {
+      const info: wantAgent.WantAgentInfo = {
+        wants: [{ bundleName: APP_BUNDLE_NAME, moduleName: 'entry', abilityName: ENTRY_ABILITY_NAME }],
+        actionType: wantAgent.OperationType.START_ABILITY,
+        requestCode: 0,
+        wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG],
+      };
+      this.notificationWantAgent = await wantAgent.getWantAgent(info);
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ext/notify_wantagent_error/ ${this.errorMessage(err)}`);
+    }
+    return this.notificationWantAgent;
+  }
+
+  private async publishStatsNotification(title: string, text: string): Promise<void> {
+    try {
+      const agent: WantAgent | undefined = await this.ensureNotificationWantAgent();
+      const request: notificationManager.NotificationRequest = {
+        id: STATS_NOTIFICATION_ID,
+        // CONTENT_INFORMATION defaults to a silent LEVEL_MIN slot, so the
+        // every-N-seconds republish doesn't sound/vibrate. (SERVICE_INFORMATION
+        // is LEVEL_HIGH and re-alerts on every update — the reported buzzing.)
+        notificationSlotType: notificationManager.SlotType.CONTENT_INFORMATION,
+        content: {
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          normal: {
+            title: title,
+            text: text,
+          },
+        },
+        // Ongoing = sticky "running" notification the user can't casually swipe
+        // away; cleared explicitly when the filter stops or the feature is off.
+        isOngoing: true,
+        isUnremovable: false,
+        tapDismissed: false,
+        wantAgent: agent,
+      };
+      await notificationManager.publish(request);
+      this.notificationActive = true;
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ext/notify_publish_error/ ${this.errorMessage(err)}`);
+    }
+  }
+
+  private cancelStatsNotification(): void {
+    this.lastNotificationText = '';
+    this.lastNotificationPublishMs = 0;
+    if (!this.notificationActive) {
+      return;
+    }
+    this.notificationActive = false;
+    notificationManager.cancel(STATS_NOTIFICATION_ID).catch((err: BusinessError) => {
+      this.appendDebugLog(`==/vpn_ext/notify_cancel_error/ ${this.errorMessage(err)}`);
+    });
+  }
+
+  // Group digits with thin separators (e.g. 12,345) for the notification line.
+  private formatCount(value: number): string {
+    const digits: string = `${Math.max(0, Math.floor(value))}`;
+    return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
 
   private isLikelyIpAddress(value: string): boolean {
@@ -928,16 +1227,28 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     return /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(:\d{1,5})?$/.test(v);
   }
 
-  private readUpstreamDnsFromFile(): string {
+  // Parse upstream.txt into the auto flag + the manual/fallback resolver list. An
+  // "__AUTO__" first line turns on auto mode; the rest is the fallback.
+  private parseUpstreamConfig(): void {
     const content: string = this.readTextFile(this.upstreamDnsFilePath);
-    // Full mode hands upstreams to AdGuardHome, which accepts DoH/DoT/DoQ and
-    // hostnames; the lightweight native engine only speaks plain Do53, so it is
-    // restricted to IP literals.
+    const lines: string[] = content.split(/[\r\n]+/).map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+    if (lines.length > 0 && lines[0] === UPSTREAM_AUTO_MARKER) {
+      this.upstreamAuto = true;
+      this.upstreamManual = this.parseUpstreamList(lines.slice(1).join('\n'));
+    } else {
+      this.upstreamAuto = false;
+      this.upstreamManual = this.parseUpstreamList(content);
+    }
+  }
+
+  // Keep only valid, de-duplicated resolver entries. Full mode also allows
+  // DoH/DoT/hostname forms; the lightweight engine is restricted to IP literals.
+  private parseUpstreamList(content: string): string {
     const allowAdvanced: boolean = this.filterMode === FILTER_MODE_FULL;
     const valid: string[] = [];
     for (const raw of content.split(/[\s,;]+/)) {
       const entry: string = raw.trim();
-      if (entry.length === 0 || valid.includes(entry)) {
+      if (entry.length === 0 || entry === UPSTREAM_AUTO_MARKER || valid.includes(entry)) {
         continue;
       }
       if (this.isLikelyIpAddress(entry) || (allowAdvanced && this.isAdvancedUpstream(entry))) {
@@ -945,6 +1256,41 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       }
     }
     return valid.length > 0 ? valid.join('\n') : UPSTREAM_DNS_IP;
+  }
+
+  // Filter the system/router resolvers down to ones usable as a plain upstream:
+  // drop our own tun/dns addresses, loopback, and IPv6 link-local (no scope id).
+  private upstreamFromUnderlyingDns(underlyingDns: string[]): string {
+    const skip: string[] = [DNS_SERVER_IP, DNS_SERVER_IPV6, TUN_ADDRESS_IP, TUN_ADDRESS_IPV6];
+    const out: string[] = [];
+    underlyingDns.forEach((raw: string) => {
+      const ip: string = raw.trim();
+      if (ip.length === 0 || skip.includes(ip) || out.includes(ip)) {
+        return;
+      }
+      if (ip.startsWith('127.') || ip === '::1' || ip === '0.0.0.0' || ip === '::') {
+        return;
+      }
+      const lower: string = ip.toLowerCase();
+      if (lower.startsWith('fe80') || lower.includes('%')) {
+        return;  // IPv6 link-local / scoped — unusable as a bare upstream
+      }
+      if (!this.isLikelyIpAddress(ip)) {
+        return;
+      }
+      out.push(ip);
+    });
+    return out.join('\n');
+  }
+
+  // The resolver(s) actually used: in auto mode the live system/router DNS, with
+  // the manual list as the fallback when none are usable.
+  private computeEffectiveUpstream(underlyingDns: string[]): string {
+    if (!this.upstreamAuto) {
+      return this.upstreamManual;
+    }
+    const fromSystem: string = this.upstreamFromUnderlyingDns(underlyingDns);
+    return fromSystem.length > 0 ? fromSystem : this.upstreamManual;
   }
 
   // Full mode: (re)generate AdGuardHome.yaml from the current upstream resolvers
@@ -1211,13 +1557,21 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       return;
     }
     this.lastUpstreamSignature = signature;
+    this.parseUpstreamConfig();
+    // Auto mode needs the live underlying DNS (async); manual is immediate.
+    void this.applyUpstreamLive();
+  }
 
-    const nextUpstream: string = this.readUpstreamDnsFromFile();
+  private async applyUpstreamLive(): Promise<void> {
+    if (this.filterMode === FILTER_MODE_FULL) {
+      return;
+    }
+    const underlyingDns: string[] = this.upstreamAuto ? await this.queryUnderlyingDnsServers() : [];
+    const nextUpstream: string = this.computeEffectiveUpstream(underlyingDns);
     if (nextUpstream === this.upstreamDnsIp) {
       return;
     }
     this.upstreamDnsIp = nextUpstream;
-
     try {
       const err: string | undefined = vpnclientbridge.setUpstreamDns(nextUpstream);
       if (err !== undefined) {
@@ -1225,7 +1579,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
         this.appendDebugLog(`==/vpn_ext/upstream_set_error/ ${err}`);
       } else {
         hilog.info(DOMAIN, TAG, '==/vpn_ext/upstream_set/ upstream=%{public}s', nextUpstream);
-        this.appendDebugLog(`==/vpn_ext/upstream_set/ upstream=${nextUpstream}`);
+        this.appendDebugLog(`==/vpn_ext/upstream_set/ auto=${this.upstreamAuto} upstream=${nextUpstream.replace(/\n/g, ',')}`);
       }
     } catch (err) {
       this.appendDebugLog(`==/vpn_ext/upstream_set_exception/ ${this.errorMessage(err)}`);
@@ -1262,6 +1616,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
 
   private async destroyVpn(): Promise<void> {
     this.unregisterNetworkListener();
+    this.cancelStatsNotification();
     if (this.statusTimer >= 0) {
       clearInterval(this.statusTimer);
       this.statusTimer = -1;
@@ -1337,6 +1692,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       updatedAt: new Date().toISOString(),
       tunFd: this.tunFd,
       nativeStats: this.parseNativeStats(),
+      effectiveUpstream: this.upstreamDnsIp,
+      upstreamAuto: this.upstreamAuto,
     };
     this.writeTextFile(this.statusFilePath, JSON.stringify(snapshot));
   }

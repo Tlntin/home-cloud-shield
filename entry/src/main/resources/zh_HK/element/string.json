@@ -265,6 +265,26 @@
     { "name": "customAllowRulePlaceholder", "value": "輸入網域或完整規則，網域會自動轉成 @@||domain^" },
     { "name": "confirmDeleteRuleLine", "value": "確定清理這條規則嗎？" },
     { "name": "noCustomRulesHint", "value": "暫無規則，輸入網域後點擊添加。右側按鈕可刪除單條規則。" },
-    { "name": "swipeAgainToExit", "value": "再按一次退出應用" }
+    { "name": "swipeAgainToExit", "value": "再按一次退出應用" },
+    { "name": "notificationGroup", "value": "🔔 通知欄" },
+    { "name": "persistentNotification", "value": "常駐通知欄" },
+    { "name": "persistentNotificationHint", "value": "在通知欄常駐顯示已攔截 / 已放行 / 總解析次數" },
+    { "name": "notificationRefreshInterval", "value": "刷新間隔" },
+    { "name": "notificationRefreshIntervalHint", "value": "通知欄資料多久刷新一次" },
+    { "name": "notificationTitle", "value": "棲雲盾 · DNS 防護運行中" },
+    { "name": "notificationTotal", "value": "總解析" },
+    { "name": "configBackupGroup", "value": "💾 設定備份" },
+    { "name": "importConfig", "value": "匯入設定" },
+    { "name": "importConfigHint", "value": "從 JSON 匯入訂閱/攔截/放行/重寫（相容 AdGuard），合併去重" },
+    { "name": "exportConfig", "value": "匯出設定" },
+    { "name": "exportConfigHint", "value": "將目前設定匯出為 JSON 檔案" },
+    { "name": "configImportInvalid", "value": "設定檔無法解析" },
+    { "name": "configImportedSummary", "value": "已匯入：訂閱 %d · 攔截 %d · 放行 %d · 重寫 %d · 規則檔 %d" },
+    { "name": "configImportSkipped", "value": "（已略過 %d 個無法使用的訂閱 URL）" },
+    { "name": "upstreamAutoTitle", "value": "自動取得上游 DNS" },
+    { "name": "upstreamAutoHint", "value": "跟隨系統/路由器下發的 DNS，利於內網網域解析、降低延遲；取得不到時用下方手動 DNS 兜底（VPN 模式生效）" },
+    { "name": "upstreamAutoCurrent", "value": "目前上游：%s" },
+    { "name": "upstreamAutoWaiting", "value": "啟動過濾後顯示實際使用的 DNS" },
+    { "name": "importRuleInvalid", "value": "檔案不是有效的規則列表；若是設定 JSON，請用「匯入設定」" }
   ]
 }

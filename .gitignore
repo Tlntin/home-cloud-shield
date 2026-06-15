@@ -17,3 +17,4 @@ design
 /*.txt
 /todo*.md
 build-profile.json5
+/*.json

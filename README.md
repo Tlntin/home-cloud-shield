@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.0.8-orange)
+![Version](https://img.shields.io/badge/Version-v0.0.9-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `栖云盾` 是一个面向 **HarmonyOS 6.0+** 的本地 DNS 过滤应用：通过**本地 VPN** 或**纯 DNS 代理**接管 DNS 流量，按 **AdGuard 风格规则**拦截广告与跟踪域名，内置**轻量级 / 完整（AdGuardHome）双过滤引擎**。
 
-项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.0.8**（[更新日志](#更新日志)）
+项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.0.9**（[更新日志](#更新日志)）
 
 ## 目录
 
@@ -35,10 +35,10 @@
 - **双过滤引擎**：轻量级（默认，低功耗）/ 完整（AdGuardHome 内核），首页下拉一键切换。
 - **双网络模式**：VPN 模式（接管全设备 DNS）/ 纯 DNS 代理模式（不占用 VPN，**可与其他 VPN / 代理 App 共存**）。
 - **Wi-Fi 下同样有效**：自动捕获 Wi-Fi 下发的解析器与常见公共 DNS，Wi-Fi ↔ 蜂窝切换时自动适配（v0.0.5 修复）。
-- **规则管理**：导入 / 编辑 / 启停 / 导出 AdGuard 风格 DNS 规则。
-- **完整模式专属**：服务屏蔽（一键屏蔽常见服务）、在线规则订阅（含推荐规则库）、DNS 重写、DNS 高级设置（拦截方式 / 上游模式 / 缓存 / DNSSEC / 限速）、AdGuardHome 管理面板。
-- **日志与统计**：DNS 查询日志基于 SQLite 持久存储，「已放行 / 已拦截」跨重启累计，卡片点击直达对应筛选列表，另有域名排行与调试日志。
-- **其他**：自定义上游 DNS（IP 预设 AliDNS / DNSPod / Baidu / AdGuard，完整引擎还支持 DoH / DoT 等加密上游）、后台保活、深浅色主题、简中 / English / 繁中三语即时切换。
+- **规则管理**：导入 / 编辑 / 启停 / 导出 AdGuard 风格 DNS 规则；还支持**整体配置的 JSON 导入 / 导出**（兼容「AdGuard 内容拦截」App 的 `adguard.json`）。
+- **完整模式专属**：服务屏蔽（一键屏蔽常见服务）、**在线规则订阅本地化管理**（订阅 / 导入即下载到本地缓存并校验，可查看内容、一键刷新、检测可用性，含推荐规则库）、DNS 重写、DNS 高级设置（拦截方式 / 上游模式 / 缓存 / DNSSEC / 限速）、AdGuardHome 管理面板。
+- **日志与统计**：DNS 查询日志基于 SQLite 持久存储，「已放行 / 已拦截」跨重启累计，卡片点击直达对应筛选列表，另有域名排行、调试日志，以及**常驻通知栏**（实时显示已拦截 / 已放行 / 总解析，默认关闭以省电）。
+- **其他**：自定义上游 DNS（IP 预设 AliDNS / DNSPod / Baidu / AdGuard，完整引擎还支持 DoH / DoT 等加密上游）、**自动跟随系统 / 路由器上游**（VPN 模式）、后台保活、深浅色主题、简中 / English / 繁中三语即时切换。
 
 ## 应用截图
 
@@ -75,14 +75,14 @@
 
 ## 更新日志
 
-当前版本 **v0.0.8**（2026-06-14），主题为**上游 DNS 支持加密格式（DoH/DoT 等），并按引擎区分能力**：
+当前版本 **v0.0.9**（2026-06-15），主题为**规则订阅的本地化管理、配置导入导出、常驻通知栏与自动上游 DNS**：
 
-- **上游 DNS 支持加密格式（仅完整引擎）**：除 IPv4 / IPv6 外，现可填写 DoH（`https://`）、DoT（`tls://`）、DoQ（`quic://`）、`h3://`、`sdns://`、`tcp/udp://`，以及 `[/domain/]server` 分流语法和带端口主机名；并新增 AliDNS DoH / DNSPod DoH / AdGuard DoH / AliDNS DoT 预设按钮。
-- **按引擎区分能力**：轻量引擎仅支持纯 IP 明文 DNS，因此加密预设按钮在轻量模式下**置灰禁用**，残留加密上游会显示提示并在应用时明确报「请切换完整模式」。
-- **`bootstrap_dns` 只用纯 IP**（解析 DoH/DoT 主机名）：两处 AdGuardHome 配置生成均只取 IP 子集，全加密时回退默认解析器，避免 bootstrap 死锁。
-- **修复**：完整模式读取上游时不再静默丢弃非 IP 条目；从完整模式切回轻量启动 DNS 代理前自动过滤为纯 IP，避免把 DoH URL 喂给底层导致解析全部失败。
+- **配置导入 / 导出**（配置 → 「💾 配置备份」）：一键导入 / 导出 JSON 配置，兼容「AdGuard 内容拦截」App 的 `adguard.json`（订阅 / 拦截 / 放行 / 重写），并扩展为本 App 超集；导入为合并去重并自动生效。
+- **在线订阅本地化管理**（配置 → 「📡 我的订阅」）：订阅 / 导入即把列表下载到本地缓存并校验是否为有效规则列表；下载失败或非规则列表（如网页链接）标记 **✗ 无法使用**、开关默认关闭、不进过滤引擎；每条显示 **✓ N 条 / ✗ 无法使用 / ⏳ 下载中**；点卡片**查看内容**（优先读本地缓存，查看器内可一键刷新重下）；开关启用 / 停用，🗑 删除带二次确认；标题栏「🔄 刷新 / 🩺 检测」可批量重下与可用性检测。
+- **常驻通知栏**：常驻显示已拦截 / 已放行 / 总解析累计（与首页一致），刷新间隔 1–5 秒，点击进入 App，静默不震动；**默认关闭**以省电。
+- **自动获取上游 DNS**（设置 → 上游 DNS，仅 VPN 模式）：跟随系统 / 路由器下发的 DNS，利于内网域名解析与降低延迟，Wi-Fi ↔ 蜂窝切换时自动更新；默认关闭，纯 DNS 代理模式下置灰不可用。
 
-完整变更（中英双语）：[v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
+完整变更（中英双语）：[v0.0.9](./docs/CHANGELOG-0.0.9.md) ｜ [v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
 
 ## 引擎与网络模式
 

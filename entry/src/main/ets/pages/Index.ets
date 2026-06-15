@@ -3,8 +3,9 @@ import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { picker, fileIo } from '@kit.CoreFileKit';
 import { i18n, resourceManager } from '@kit.LocalizationKit';
-import { vpnExtension, socket } from '@kit.NetworkKit';
+import { connection, vpnExtension, socket, http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { notificationManager } from '@kit.NotificationKit';
 import { media } from '@kit.MediaKit';
 import { audio } from '@kit.AudioKit';
 import { hdsMaterial, HdsTabs } from '@kit.UIDesignKit';
@@ -27,7 +28,12 @@ const TAG = 'vpn_demo_ui';
 const VPN_BUNDLE_NAME = 'com.tlntin.home_cloud_shield';
 const VPN_MODULE_NAME = 'entry';
 const VPN_ABILITY_NAME = 'MyVpnExtAbility';
-const ENTRY_ABILITY_NAME = `${VPN_BUNDLE_NAME}.EntryAbility`;
+// Stage-model ability name = the bare "name" from module.json5 ("EntryAbility"),
+// NOT the bundle-prefixed form. A prefixed name still packages into a WantAgent
+// (creation isn't validated), so keep-alive worked, but it FAILS to resolve when the
+// notification's WantAgent is actually tapped — that's why tapping the persistent
+// notification didn't open the app.
+const ENTRY_ABILITY_NAME = 'EntryAbility';
 const VPN_DIR_NAME = 'vpn';
 // AdGuardHome (full mode) web admin panel — default port. The effective port is
 // user-configurable (aghHttpPort) and passed to the VPN extension via the Want.
@@ -86,6 +92,20 @@ const STATE_FILE_NAME = 'ui_state.json';
 // save battery. Must match UI_WATCH_FILE_NAME in MyVpnExtAbility.
 const UI_WATCH_FILE_NAME = 'ui_watch';
 const UI_WATCH_TOUCH_INTERVAL_MS = 4000;
+// Persistent stats-notification config consumed by the VPN extension. Must match
+// NOTIFY_CONFIG_FILE_NAME in MyVpnExtAbility. The UI rewrites it on every settings
+// change so the extension can apply toggle/interval/language live.
+const NOTIFY_CONFIG_FILE_NAME = 'notify.json';
+// Live cumulative baseline for the notification (see MyVpnExtAbility). Holds the
+// home-page cumulative counts + the native session counts at capture time, so
+// the VPN extension can show cumulative numbers that keep ticking in background.
+const NOTIFY_COUNTS_FILE_NAME = 'notify_counts.json';
+// Must match STATS_NOTIFICATION_ID in MyVpnExtAbility so proxy-mode (UI) and
+// VPN-mode (extension) publish/cancel the same notification.
+const STATS_NOTIFICATION_ID = 10010;
+const DEFAULT_NOTIFICATION_REFRESH_SECONDS = 2;
+const NOTIFICATION_REFRESH_MIN_SECONDS = 1;
+const NOTIFICATION_REFRESH_MAX_SECONDS = 5;
 // Mirror of the extension's idle heartbeat. While the extension may still be
 // idling (right after this page becomes visible, before it notices ui_watch),
 // a "running" snapshot is allowed to be up to a heartbeat old; only once the
@@ -101,6 +121,9 @@ const WANT_QUERY_LOG_FILE_PATH = 'queryLogFilePath';
 const WANT_DEBUG_LOG_FILE_PATH = 'debugLogFilePath';
 const WANT_UPSTREAM_DNS_FILE_PATH = 'upstreamDnsFilePath';
 const DEFAULT_UPSTREAM_DNS_IP = '119.29.29.29';
+// Sentinel first line of upstream.txt that turns on auto upstream (follow the
+// system/router DNS). Must match UPSTREAM_AUTO_MARKER in MyVpnExtAbility.
+const UPSTREAM_AUTO_MARKER = '__AUTO__';
 const WANT_DNS_CACHE_TTL_SECONDS = 'dnsCacheTtlSeconds';
 const WANT_LOG_RETENTION_DAYS = 'logRetentionDays';
 const WANT_LOG_MAX_SIZE_MB = 'logMaxSizeMb';
@@ -165,7 +188,14 @@ type LanguageKey =
   | 'modeVpn' | 'modeDnsProxy' | 'dnsProxyPortTitle' | 'dnsProxyPortHint' | 'dnsProxyPortInvalid'
   | 'aghPanelPortTitle' | 'aghPanelPortHint' | 'aghPanelPortConflict' | 'dnsProxyPortBumped'
   | 'autoRestartAttempt' | 'autoRestartGaveUp' | 'autoStarting' | 'startingStatus'
-  | 'creatingVpnNote' | 'vpnActiveNote' | 'vpnStoppedNote';
+  | 'creatingVpnNote' | 'vpnActiveNote' | 'vpnStoppedNote'
+  | 'notificationGroup' | 'persistentNotification' | 'persistentNotificationHint'
+  | 'notificationRefreshInterval' | 'notificationRefreshIntervalHint'
+  | 'notificationTitle' | 'notificationTotal'
+  | 'configBackupGroup' | 'importConfig' | 'importConfigHint' | 'exportConfig' | 'exportConfigHint'
+  | 'configImportInvalid' | 'configImportedSummary' | 'configImportSkipped'
+  | 'upstreamAutoTitle' | 'upstreamAutoHint' | 'upstreamAutoCurrent' | 'upstreamAutoWaiting'
+  | 'importRuleInvalid';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -431,6 +461,26 @@ function resolveStringResource(key: LanguageKey): number {
     case 'creatingVpnNote': return $r('app.string.creatingVpnNote').id;
     case 'vpnActiveNote': return $r('app.string.vpnActiveNote').id;
     case 'vpnStoppedNote': return $r('app.string.vpnStoppedNote').id;
+    case 'notificationGroup': return $r('app.string.notificationGroup').id;
+    case 'persistentNotification': return $r('app.string.persistentNotification').id;
+    case 'persistentNotificationHint': return $r('app.string.persistentNotificationHint').id;
+    case 'notificationRefreshInterval': return $r('app.string.notificationRefreshInterval').id;
+    case 'notificationRefreshIntervalHint': return $r('app.string.notificationRefreshIntervalHint').id;
+    case 'notificationTitle': return $r('app.string.notificationTitle').id;
+    case 'notificationTotal': return $r('app.string.notificationTotal').id;
+    case 'configBackupGroup': return $r('app.string.configBackupGroup').id;
+    case 'importConfig': return $r('app.string.importConfig').id;
+    case 'importConfigHint': return $r('app.string.importConfigHint').id;
+    case 'exportConfig': return $r('app.string.exportConfig').id;
+    case 'exportConfigHint': return $r('app.string.exportConfigHint').id;
+    case 'configImportInvalid': return $r('app.string.configImportInvalid').id;
+    case 'configImportedSummary': return $r('app.string.configImportedSummary').id;
+    case 'configImportSkipped': return $r('app.string.configImportSkipped').id;
+    case 'upstreamAutoTitle': return $r('app.string.upstreamAutoTitle').id;
+    case 'upstreamAutoHint': return $r('app.string.upstreamAutoHint').id;
+    case 'upstreamAutoCurrent': return $r('app.string.upstreamAutoCurrent').id;
+    case 'upstreamAutoWaiting': return $r('app.string.upstreamAutoWaiting').id;
+    case 'importRuleInvalid': return $r('app.string.importRuleInvalid').id;
   }
 }
 
@@ -475,6 +525,10 @@ interface StatusSnapshot {
   updatedAt: string;
   tunFd: number;
   nativeStats: NativeStats;
+  // Resolver actually in use (newline-joined) + whether auto-derived. Optional
+  // for backward compat with snapshots written before this field existed.
+  effectiveUpstream?: string;
+  upstreamAuto?: boolean;
 }
 
 interface QueryLogEntry {
@@ -564,6 +618,21 @@ interface FilterSubscription {
   name: string;
   url: string;
   enabled: boolean;
+  // Local download/validation status. The app fetches each enabled list, validates
+  // it looks like a rule list, and caches it on disk: 'ok' (downloaded + valid),
+  // 'failed' (unreachable or not a rule list — force-disabled), 'loading', or
+  // undefined (not fetched yet). `lines` is the cached rule-line count.
+  state?: string;
+  lines?: number;
+  err?: string;
+}
+
+// Result of fetching a URL's text body.
+interface UrlFetchResult {
+  ok: boolean;
+  code: number;
+  text: string;
+  error: string;
 }
 
 // An upstream-DNS quick-fill chip. Encrypted (DoH/DoT) presets only work on the
@@ -664,11 +733,14 @@ interface PersistState {
   audioKeepAliveEnabled?: boolean;
   locationKeepAliveEnabled?: boolean;
   autoStartFilterEnabled?: boolean;
+  persistentNotificationEnabled?: boolean;
+  notificationRefreshSeconds?: number;
   language?: LangCode;
   themeMode?: number;
   ruleProfiles?: RuleProfile[];
   dnsCacheTtlSeconds?: number;
   upstreamDnsIp?: string;
+  upstreamAutoEnabled?: boolean;
   logRetentionDays?: number;
   logMaxSizeMb?: number;
   clearDnsLogOnStart?: boolean;
@@ -684,6 +756,100 @@ interface PersistState {
   advancedDns?: AdvancedDnsConfig;
   disclaimerAccepted?: boolean;
   currentTab: number;
+}
+
+// Mirror of NotifyConfig in MyVpnExtAbility — the on-disk shape of notify.json.
+interface NotifyConfigFile {
+  enabled: boolean;
+  refreshSeconds: number;
+  title: string;
+  blockedLabel: string;
+  allowedLabel: string;
+  totalLabel: string;
+}
+
+// Mirror of NotifyCounts in MyVpnExtAbility — the on-disk shape of
+// notify_counts.json.
+interface NotifyCountsFile {
+  cumAllowed: number;
+  cumBlocked: number;
+  natAllowed: number;
+  natBlocked: number;
+}
+
+// Import/export config JSON. The four list sections are compatible with the
+// AdGuard-style adguard.json (sources / blocked / allowed / redirected); `app`
+// is this app's extra settings and is ignored by other apps. Import accepts a
+// plain adguard.json (no `app`); export always writes the superset.
+// `sources[].allow` / `redirect` are AdGuard per-source flags this app doesn't
+// model — kept for round-trip only. The list URLs themselves can be in any
+// format (hosts / AdGuard / plain-domain): the full engine (AdGuardHome) fetches
+// and parses them, so they're stored verbatim and only take effect in full mode.
+interface ConfigSource {
+  label: string;
+  url: string;
+  enabled: boolean;
+  allow: boolean;
+  redirect: boolean;
+}
+
+interface ConfigHostRule {
+  host: string;
+  enabled: boolean;
+}
+
+interface ConfigRedirect {
+  host: string;
+  redirect: string;
+  enabled: boolean;
+}
+
+// An imported local rule list (a .txt/.conf snapshot, stored inline as content —
+// distinct from `sources`, which are URLs the full engine re-downloads).
+interface ConfigRuleProfile {
+  name: string;
+  content: string;
+  enabled: boolean;
+}
+
+interface ConfigAppSettings {
+  upstreamDns?: string;
+  upstreamAuto?: boolean;
+  fullMode?: boolean;
+  proxyModeEnabled?: boolean;
+  dnsProxyPort?: string;
+  aghHttpPort?: string;
+  aghWebEnabled?: boolean;
+  blockedServiceIds?: string[];
+  advancedDns?: AdvancedDnsConfig;
+  dnsCacheTtlSeconds?: number;
+  logRetentionDays?: number;
+  logMaxSizeMb?: number;
+  ruleProfiles?: ConfigRuleProfile[];
+}
+
+interface ConfigExport {
+  sources: ConfigSource[];
+  blocked: ConfigHostRule[];
+  allowed: ConfigHostRule[];
+  redirected: ConfigRedirect[];
+  app?: ConfigAppSettings;
+}
+
+// Per-section import tallies for the result toast.
+interface ConfigImportResult {
+  sources: number;
+  blocked: number;
+  allowed: number;
+  redirected: number;
+  ruleFiles: number;
+  skippedSources: number;
+}
+
+// mergeImportedSources outcome: added vs skipped (unusable, non-http(s) URLs).
+interface SourceMergeResult {
+  added: number;
+  skipped: number;
 }
 
 function defaultStats(): NativeStats {
@@ -752,6 +918,11 @@ struct Index {
   @State audioKeepAliveEnabled: boolean = true;
   @State locationKeepAliveEnabled: boolean = false;
   @State autoStartFilterEnabled: boolean = false;
+  // Persistent status-bar notification ("常驻通知栏") showing live filtered /
+  // allowed / total DNS counts. Default OFF to save battery (republishing wakes
+  // the device every few seconds); the refresh interval is 1-5s when enabled.
+  @State persistentNotificationEnabled: boolean = false;
+  @State notificationRefreshSeconds: number = DEFAULT_NOTIFICATION_REFRESH_SECONDS;
   @State keepAliveRunning: boolean = false;
   @State keepAliveStatusText: string = '';
   @State status: StatusSnapshot = defaultStatus();
@@ -793,6 +964,9 @@ struct Index {
   @State dnsCacheTtlInput: string = `${DEFAULT_DNS_CACHE_TTL_SECONDS}`;
   @State dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   @State upstreamDnsInput: string = '';
+  // Auto upstream: follow the system/router-provided DNS (default off). The
+  // manual list above stays editable and serves as the fallback.
+  @State upstreamAutoEnabled: boolean = false;
   @State logRetentionDaysInput: string = `${DEFAULT_LOG_RETENTION_DAYS}`;
   @State logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   @State logMaxSizeMbInput: string = `${DEFAULT_LOG_MAX_SIZE_MB}`;
@@ -840,6 +1014,15 @@ struct Index {
   @State subAddNameInput: string = '';
   @State subAddUrlInput: string = '';
   @State subFeedbackText: string = '';
+  // Subscription content viewer (tap a subscription to fetch and browse its list).
+  @State showSubContentSheet: boolean = false;
+  @State subContentTitle: string = '';
+  @State subContentUrl: string = '';
+  @State subContentText: string = '';
+  @State subContentLineCount: number = 0;
+  @State subContentLoading: boolean = false;
+  @State subContentError: string = '';
+  private subContentRequestSeq: number = 0;
   @State showRewritesSheet: boolean = false;
   @State rewriteAddDomainInput: string = '';
   @State rewriteAddAnswerInput: string = '';
@@ -851,6 +1034,7 @@ struct Index {
   @State showSettingsPage: boolean = false;
   @State showImportMenu: boolean = false;
   @State showRecommendedLibrary: boolean = false;
+  @State showAllMySubscriptions: boolean = false;
   @State showDisclaimerSheet: boolean = false;
   @State showFirstRunDisclaimer: boolean = false;
   private disclaimerAccepted: boolean = false;
@@ -901,6 +1085,18 @@ struct Index {
   // throttled to one write per UI_WATCH_TOUCH_INTERVAL_MS.
   private uiWatchFilePath: string = '';
   private lastUiWatchTouchMs: number = 0;
+  private notifyConfigFilePath: string = '';
+  private notifyCountsFilePath: string = '';
+  private lastNotifyCountsSignature: string = '';
+  // Proxy-mode notification: published by THIS process (no VPN extension exists in
+  // DNS-proxy mode). Driven by a timer that runs regardless of page visibility so
+  // it keeps updating while backgrounded (the proxy itself is kept alive by the
+  // continuous task).
+  private proxyNotifyTimer: number = -1;
+  private lastUiNotificationText: string = '';
+  private lastUiNotificationPublishMs: number = 0;
+  private uiNotificationActive: boolean = false;
+  private notificationWantAgent?: WantAgent;
   // When this page last became visible; until UI_WATCH_RESUME_GRACE_MS has
   // passed the extension may legitimately still be on its slow idle heartbeat.
   private uiWatchSinceMs: number = Date.now();
@@ -928,6 +1124,10 @@ struct Index {
   private lastBackPressAt: number = 0;
 
   onBackPress(): boolean {
+    if (this.showSubContentSheet) {
+      this.closeSubContentSheet();
+      return true;
+    }
     if (this.showSettingsPage) {
       this.showSettingsPage = false;
       return true;
@@ -1210,6 +1410,35 @@ struct Index {
     return n;
   }
 
+  // Collapse subscriptions that share a URL (keeping the first) and reassign
+  // stable sequential ids. Without this, an import that re-adds an existing list
+  // — or any corrupted persisted state with duplicate ids — makes the keyed
+  // subscription List under-render (ForEach drops same-key items) while
+  // filterSubscriptions.length keeps over-counting, so the overview shows e.g. 22
+  // while the list only shows 8. Run on every import and on load so the list and
+  // the count stay in lockstep.
+  private dedupeSubscriptions(list: FilterSubscription[]): FilterSubscription[] {
+    const seen: Set<string> = new Set<string>();
+    const out: FilterSubscription[] = [];
+    list.forEach((s: FilterSubscription) => {
+      const url: string = typeof s?.url === 'string' ? s.url.trim() : '';
+      if (url.length === 0 || seen.has(url)) {
+        return;
+      }
+      seen.add(url);
+      out.push({
+        id: out.length + 1,
+        name: typeof s?.name === 'string' && s.name.trim().length > 0 ? s.name.trim() : url,
+        url: url,
+        enabled: s?.enabled !== false,
+        state: typeof s?.state === 'string' ? s.state : undefined,
+        lines: typeof s?.lines === 'number' ? s.lines : undefined,
+        err: typeof s?.err === 'string' ? s.err : undefined,
+      });
+    });
+    return out;
+  }
+
   private addFilterSubscription(name: string, url: string): void {
     const u: string = url.trim();
     if (u.length === 0) {
@@ -1231,31 +1460,450 @@ struct Index {
       name: nm,
       url: u,
       enabled: true,
+      state: 'loading',
     }]);
     this.subAddNameInput = '';
     this.subAddUrlInput = '';
     this.subFeedbackText = this.tri('Added', '已添加', '已新增');
     this.applyFullModeConfigChange();
+    // Download + validate the list now; a failure force-disables it.
+    void this.downloadAndCacheSubscription(u, true);
   }
 
   private addSubscriptionPreset(preset: SubscriptionPreset): void {
     this.addFilterSubscription(preset.name, preset.url);
   }
 
+  // Unsubscribe (remove) the subscription matching a URL — backs both the
+  // recommended-library "Subscribed" toggle and the My-subscriptions list.
+  private removeSubscriptionByUrl(url: string): void {
+    const before: number = this.filterSubscriptions.length;
+    this.filterSubscriptions = this.filterSubscriptions.filter((s: FilterSubscription) => s.url !== url);
+    if (this.filterSubscriptions.length !== before) {
+      this.subFeedbackText = this.tri('Unsubscribed', '已取消订阅', '已取消訂閱');
+      this.applyFullModeConfigChange();
+    }
+  }
+
+  // Recommended-library button: subscribe if not yet subscribed, else unsubscribe.
+  private toggleSubscriptionPreset(preset: SubscriptionPreset): void {
+    if (this.subscriptionPresetActive(preset.url)) {
+      this.removeSubscriptionByUrl(preset.url);
+    } else {
+      this.addSubscriptionPreset(preset);
+    }
+  }
+
+  // View a recommended preset's content via the shared subscription viewer.
+  private viewPresetContent(preset: SubscriptionPreset): void {
+    this.viewSubscriptionContent({ id: 0, name: preset.name, url: preset.url, enabled: true });
+  }
+
+  // The subscriptions shown in the config-tab "My subscriptions" list — collapsed
+  // to the first few until the user expands, so a big import doesn't flood the page.
+  private mySubscriptionsToShow(): FilterSubscription[] {
+    if (this.showAllMySubscriptions || this.filterSubscriptions.length <= 4) {
+      return this.filterSubscriptions;
+    }
+    return this.filterSubscriptions.slice(0, 4);
+  }
+
   private toggleFilterSubscription(id: number, enabled: boolean): void {
+    let targetUrl: string = '';
     this.filterSubscriptions = this.filterSubscriptions.map((s: FilterSubscription) => {
       if (s.id === id) {
-        return { id: s.id, name: s.name, url: s.url, enabled: enabled } as FilterSubscription;
+        targetUrl = s.url;
+        return { id: s.id, name: s.name, url: s.url, enabled: enabled,
+          state: s.state, lines: s.lines, err: s.err } as FilterSubscription;
       }
       return s;
     });
     this.applyFullModeConfigChange();
+    // Enabling a list (re)downloads + validates it; failure force-disables it.
+    if (enabled && targetUrl.length > 0) {
+      void this.downloadAndCacheSubscription(targetUrl, true);
+    }
   }
 
   private removeFilterSubscription(id: number): void {
     this.filterSubscriptions = this.filterSubscriptions.filter((s: FilterSubscription) => s.id !== id);
     this.subFeedbackText = this.tri('Removed', '已删除', '已刪除');
     this.applyFullModeConfigChange();
+  }
+
+  // ----- Subscription download + local cache -----
+
+  private subsCacheDir(): string {
+    return `${this.getHostContext().filesDir}/${VPN_DIR_NAME}/subs`;
+  }
+
+  // A stable per-URL cache filename (djb2 hash → hex) so the same list always maps
+  // to the same local file regardless of display-name changes.
+  private subCacheFilePath(url: string): string {
+    let h: number = 5381;
+    for (let i = 0; i < url.length; i++) {
+      h = ((h * 33) + url.charCodeAt(i)) | 0;
+    }
+    return `${this.subsCacheDir()}/${(h >>> 0).toString(16)}.txt`;
+  }
+
+  private writeSubCache(url: string, content: string): void {
+    try {
+      fileIo.mkdirSync(this.subsCacheDir(), true);
+    } catch (_) {
+    }
+    this.writeTextFile(this.subCacheFilePath(url), content);
+  }
+
+  private readSubCache(url: string): string {
+    return this.readTextFile(this.subCacheFilePath(url));
+  }
+
+  // Non-empty, non-comment lines — the rule count shown on each subscription row.
+  private countRuleLines(text: string): number {
+    let n: number = 0;
+    const lines: string[] = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const t: string = lines[i].trim();
+      if (t.length === 0 || t.startsWith('#') || t.startsWith('!')) {
+        continue;
+      }
+      n += 1;
+    }
+    return n;
+  }
+
+  // Fetch a URL's text body (capped). Shared by the content viewer and the
+  // download-on-subscribe flow.
+  private async fetchUrlText(url: string, maxChars: number): Promise<UrlFetchResult> {
+    if (!(url.startsWith('http://') || url.startsWith('https://'))) {
+      return { ok: false, code: 0, text: '',
+        error: this.tri('Only http(s) lists can be fetched.', '仅支持 http(s) 列表。', '僅支援 http(s) 清單。') };
+    }
+    const httpRequest: http.HttpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: 15000,
+        readTimeout: 20000,
+        expectDataType: http.HttpDataType.STRING,
+      });
+      if (resp.responseCode !== http.ResponseCode.OK) {
+        return { ok: false, code: resp.responseCode, text: '',
+          error: this.tri(`HTTP ${resp.responseCode}`, `HTTP ${resp.responseCode}`, `HTTP ${resp.responseCode}`) };
+      }
+      let body: string = typeof resp.result === 'string' ? resp.result : this.decodeHttpBody(resp.result);
+      if (body.length > maxChars) {
+        body = body.substring(0, maxChars);
+      }
+      return { ok: true, code: 200, text: body, error: '' };
+    } catch (err) {
+      return { ok: false, code: 0, text: '', error: this.errorMessage(err) };
+    } finally {
+      try {
+        httpRequest.destroy();
+      } catch (_) {
+      }
+    }
+  }
+
+  // Set a subscription's download status by URL, then re-render by reassigning the
+  // array. A 'failed' list is force-disabled (its toggle defaults off — "enabled"
+  // means downloaded + valid); 'ok'/'loading' keep the current enabled state.
+  // Removal is a separate Delete button, so a disabled-failed list isn't stranded.
+  private setSubscriptionStatus(url: string, state: string, lines: number, err: string): void {
+    this.filterSubscriptions = this.filterSubscriptions.map((s: FilterSubscription) => {
+      if (s.url !== url) {
+        return s;
+      }
+      const enabled: boolean = state === 'failed' ? false : s.enabled;
+      return { id: s.id, name: s.name, url: s.url, enabled: enabled, state: state, lines: lines, err: err };
+    });
+  }
+
+  private markSubscriptionLoading(url: string): void {
+    this.filterSubscriptions = this.filterSubscriptions.map((s: FilterSubscription) => {
+      if (s.url !== url) {
+        return s;
+      }
+      return { id: s.id, name: s.name, url: s.url, enabled: s.enabled, state: 'loading', lines: s.lines, err: '' };
+    });
+  }
+
+  // Download a list, validate it looks like a rule list, cache it on disk, and
+  // record the result. On failure (unreachable / not a rule list) the list is
+  // force-disabled — "enabled" means "downloaded + valid" (the user's model).
+  private async downloadAndCacheSubscription(url: string, persist: boolean = false): Promise<boolean> {
+    this.markSubscriptionLoading(url);
+    const res: UrlFetchResult = await this.fetchUrlText(url, 2000000);
+    let ok: boolean = false;
+    if (!res.ok) {
+      this.setSubscriptionStatus(url, 'failed', 0, res.error);
+    } else if (!this.looksLikeRuleList(res.text)) {
+      this.setSubscriptionStatus(url, 'failed', 0,
+        this.tri('Not a rule list (a web page?)', '不是规则列表（可能是网页）', '不是規則清單（可能是網頁）'));
+    } else {
+      this.writeSubCache(url, res.text);
+      this.setSubscriptionStatus(url, 'ok', this.countRuleLines(res.text), '');
+      ok = true;
+    }
+    if (persist) {
+      this.savePersistState();
+    }
+    return ok;
+  }
+
+  // Download several lists concurrently, then persist + re-bake the running full
+  // engine once (rather than per list).
+  private async downloadSubscriptions(urls: string[]): Promise<void> {
+    if (urls.length === 0) {
+      return;
+    }
+    const tasks: Promise<boolean>[] = urls.map((u: string) => this.downloadAndCacheSubscription(u, false));
+    await Promise.all(tasks);
+    this.savePersistState();
+    if (this.activeRunning() && this.fullModeEnabled) {
+      this.applyFullModeConfigChange();
+    }
+  }
+
+  // The per-row download status label ('' = nothing to show yet).
+  private subStatusText(s: FilterSubscription): string {
+    if (s.state === 'loading') {
+      return this.tri('⏳ Downloading…', '⏳ 下载中…', '⏳ 下載中…');
+    }
+    if (s.state === 'failed') {
+      const why: string = typeof s.err === 'string' && s.err.length > 0 ? s.err : '';
+      return this.tri(`✗ Can't use: ${why}`, `✗ 无法使用：${why}`, `✗ 無法使用：${why}`);
+    }
+    if (s.state === 'ok') {
+      const n: number = typeof s.lines === 'number' ? s.lines : 0;
+      return this.tri(`✓ ${n} rules`, `✓ ${n} 条规则`, `✓ ${n} 條規則`);
+    }
+    return '';
+  }
+
+  private subStatusColor(s: FilterSubscription): string {
+    if (s.state === 'failed') {
+      return this.isDarkModeActive() ? '#FF8A8A' : '#D14343';
+    }
+    if (s.state === 'ok') {
+      return this.accentGreenTone();
+    }
+    return this.mutedTextColor();
+  }
+
+  // Status of the subscription matching a URL (for recommended-preset rows).
+  private subStatusTextByUrl(url: string): string {
+    const s: FilterSubscription | undefined = this.filterSubscriptions.find((x: FilterSubscription) => x.url === url);
+    return s !== undefined ? this.subStatusText(s) : '';
+  }
+
+  private subStatusColorByUrl(url: string): string {
+    const s: FilterSubscription | undefined = this.filterSubscriptions.find((x: FilterSubscription) => x.url === url);
+    return s !== undefined ? this.subStatusColor(s) : this.mutedTextColor();
+  }
+
+  // Re-download + re-validate every subscription, updating each list's cache and
+  // status. `detect` only changes the wording of the result toast (usable count);
+  // both re-fetch so a previously-failed list can recover and a stale one updates.
+  private async refreshAllSubscriptions(detect: boolean): Promise<void> {
+    const urls: string[] = this.filterSubscriptions
+      .map((s: FilterSubscription) => s.url)
+      .filter((u: string) => u.startsWith('http://') || u.startsWith('https://'));
+    if (urls.length === 0) {
+      try {
+        this.ensurePromptAction()?.showToast({ message: this.tri('No subscriptions', '暂无订阅', '尚無訂閱') });
+      } catch (_) {
+      }
+      return;
+    }
+    try {
+      this.ensurePromptAction()?.showToast({
+        message: detect ? this.tri('Checking…', '正在检测…', '正在檢測…')
+          : this.tri('Refreshing…', '正在刷新…', '正在刷新…')
+      });
+    } catch (_) {
+    }
+    await Promise.all(urls.map((u: string) => this.downloadAndCacheSubscription(u, false)));
+    this.savePersistState();
+    if (this.activeRunning() && this.fullModeEnabled) {
+      this.applyFullModeConfigChange();
+    }
+    let ok: number = 0;
+    let bad: number = 0;
+    this.filterSubscriptions.forEach((s: FilterSubscription) => {
+      if (s.state === 'ok') {
+        ok += 1;
+      } else if (s.state === 'failed') {
+        bad += 1;
+      }
+    });
+    try {
+      this.ensurePromptAction()?.showToast({
+        message: this.tri(`✓ ${ok} usable · ✗ ${bad} unusable`,
+          `✓ ${ok} 可用 · ✗ ${bad} 不可用`, `✓ ${ok} 可用 · ✗ ${bad} 不可用`)
+      });
+    } catch (_) {
+    }
+  }
+
+  // Delete a subscription, confirming first.
+  private confirmDeleteSubscription(s: FilterSubscription): void {
+    this.getUIContext().showAlertDialog({
+      message: this.tri(`Delete this subscription?\n${s.name}`,
+        `确定删除该订阅？\n${s.name}`, `確定刪除該訂閱？\n${s.name}`),
+      buttons: [
+        {
+          value: this.tri('Cancel', '取消', '取消'),
+          action: () => {
+          }
+        },
+        {
+          value: this.tri('Delete', '删除', '刪除'),
+          action: () => {
+            this.removeFilterSubscription(s.id);
+          }
+        }
+      ]
+    });
+  }
+
+  // ----- Subscription content viewer -----
+
+  // Show a subscription's rule list. Prefers the locally cached copy (downloaded on
+  // subscribe/import) so viewing is instant and works offline; only falls back to a
+  // live fetch when there's no cache yet. The body is capped to keep large hosts
+  // files from janking the UI; a monotonic request seq drops stale responses.
+  private async viewSubscriptionContent(sub: FilterSubscription): Promise<void> {
+    const url: string = typeof sub?.url === 'string' ? sub.url.trim() : '';
+    this.subContentTitle = typeof sub?.name === 'string' && sub.name.length > 0 ? sub.name : url;
+    this.subContentUrl = url;
+    this.subContentText = '';
+    this.subContentLineCount = 0;
+    this.subContentError = '';
+    this.showSubContentSheet = true;
+    const seq: number = ++this.subContentRequestSeq;
+
+    // 1) Local cache first.
+    const cached: string = this.readSubCache(url);
+    if (cached.trim().length > 0) {
+      this.showSubContentBody(cached);
+      return;
+    }
+
+    if (!(url.startsWith('http://') || url.startsWith('https://'))) {
+      this.subContentError = this.tri('Only http(s) lists can be previewed.',
+        '仅支持预览 http(s) 列表。', '僅支援預覽 http(s) 清單。');
+      return;
+    }
+
+    // 2) No cache — fetch live (and cache it for next time if it's a valid list).
+    this.subContentLoading = true;
+    const res: UrlFetchResult = await this.fetchUrlText(url, 2000000);
+    if (seq !== this.subContentRequestSeq) {
+      return;  // superseded by a newer request or a close
+    }
+    this.subContentLoading = false;
+    if (!res.ok) {
+      this.subContentError = this.tri(`Could not load: ${res.error}`,
+        `加载失败：${res.error}`, `載入失敗：${res.error}`);
+      return;
+    }
+    if (res.text.trim().length === 0) {
+      this.subContentError = this.tri('The list is empty.', '该列表为空。', '該清單為空。');
+      return;
+    }
+    if (this.looksLikeRuleList(res.text)) {
+      this.writeSubCache(url, res.text);
+    }
+    this.showSubContentBody(res.text);
+  }
+
+  // Render fetched/cached text into the viewer, capping the displayed length.
+  private showSubContentBody(body: string): void {
+    this.subContentLineCount = body.length === 0 ? 0 : body.split('\n').length;
+    const MAX_CHARS: number = 200000;
+    let shown: string = body;
+    if (shown.length > MAX_CHARS) {
+      shown = shown.substring(0, MAX_CHARS) + '\n\n'
+        + this.tri('… (preview truncated)', '……（预览已截断）', '……（預覽已截斷）');
+    }
+    this.subContentText = shown;
+  }
+
+  private decodeHttpBody(result: string | Object | ArrayBuffer): string {
+    try {
+      const decoder: util.TextDecoder = util.TextDecoder.create('utf-8');
+      return decoder.decodeToString(new Uint8Array(result as ArrayBuffer));
+    } catch (_) {
+      return '';
+    }
+  }
+
+  private closeSubContentSheet(): void {
+    this.subContentRequestSeq += 1;  // invalidate any in-flight response
+    this.showSubContentSheet = false;
+    this.subContentText = '';
+    this.subContentError = '';
+    this.subContentLoading = false;
+  }
+
+  // Viewer "Refresh" — force a live re-download of the open list (bypassing the
+  // cache), update the on-disk cache + the subscription's ✓/✗ status, and re-show.
+  private async refreshSubContent(): Promise<void> {
+    const url: string = this.subContentUrl.trim();
+    if (url.length === 0 || !(url.startsWith('http://') || url.startsWith('https://'))) {
+      return;
+    }
+    const seq: number = ++this.subContentRequestSeq;
+    this.subContentLoading = true;
+    this.subContentError = '';
+    const res: UrlFetchResult = await this.fetchUrlText(url, 2000000);
+    if (seq !== this.subContentRequestSeq) {
+      return;
+    }
+    this.subContentLoading = false;
+    if (!res.ok) {
+      this.subContentError = this.tri(`Could not refresh: ${res.error}`,
+        `刷新失败：${res.error}`, `重新整理失敗：${res.error}`);
+      this.setSubscriptionStatus(url, 'failed', 0, res.error);
+      this.savePersistState();
+      return;
+    }
+    if (res.text.trim().length === 0) {
+      this.subContentError = this.tri('The list is empty.', '该列表为空。', '該清單為空。');
+      return;
+    }
+    if (this.looksLikeRuleList(res.text)) {
+      this.writeSubCache(url, res.text);
+      this.setSubscriptionStatus(url, 'ok', this.countRuleLines(res.text), '');
+    } else {
+      this.setSubscriptionStatus(url, 'failed', 0,
+        this.tri('Not a rule list (a web page?)', '不是规则列表（可能是网页）', '不是規則清單（可能是網頁）'));
+    }
+    this.savePersistState();
+    if (this.activeRunning() && this.fullModeEnabled) {
+      this.applyFullModeConfigChange();
+    }
+    this.showSubContentBody(res.text);
+  }
+
+  // Open the subscription URL in the system browser — handy for lists that are a
+  // web page (a repo/redirect URL) rather than a raw rule file.
+  private openSubContentInBrowser(): void {
+    const url: string = this.subContentUrl.trim();
+    if (url.length === 0) {
+      return;
+    }
+    const want: Want = {
+      action: 'ohos.want.action.viewData',
+      entities: ['entity.system.browsable'],
+      uri: url,
+    };
+    this.getHostContext().startAbility(want).catch((err: BusinessError) => {
+      this.appendDebugLog(`==/vpn_ui/open_sub_browser_error/ ${this.errorMessage(err)}`);
+    });
   }
 
   // ----- DNS rewrites (full mode) -----
@@ -1282,6 +1930,450 @@ struct Index {
     this.dnsRewrites = this.dnsRewrites.filter((_r: DnsRewriteRule, i: number) => i !== index);
     this.rewriteFeedbackText = this.tri('Removed', '已删除', '已刪除');
     this.applyFullModeConfigChange();
+  }
+
+  // ----- Config import/export (AdGuard-compatible JSON) -----
+
+  // Reduce a custom block/allow rule line to its bare host. Returns '' for
+  // comments and complex rules that don't map to a single host (those simply
+  // aren't representable in the host-based adguard.json shape).
+  private hostFromRuleLine(line: string, allow: boolean): string {
+    let s: string = line.trim();
+    if (s.length === 0 || s.startsWith('!') || s.startsWith('#')) {
+      return '';
+    }
+    if (allow) {
+      if (!s.startsWith('@@')) {
+        return '';
+      }
+      s = s.slice(2);
+    } else if (s.startsWith('@@')) {
+      return '';  // an allow rule has no place in the blocked list
+    }
+    if (s.startsWith('||')) {
+      s = s.slice(2);
+    }
+    if (s.endsWith('^')) {
+      s = s.slice(0, -1);
+    }
+    if (s.length === 0 || !/^[A-Za-z0-9._*-]+$/.test(s)) {
+      return '';  // still carries a path / modifier / regex — skip
+    }
+    return s.toLowerCase();
+  }
+
+  // Heuristic: does this file look like an AdGuard/hosts/domain rule list (vs a
+  // JSON config or random text)? Permissive — only rejects clearly-non-rule
+  // content, so a config JSON imported via "import file" is caught.
+  private looksLikeRuleList(content: string): boolean {
+    const trimmed: string = content.trim();
+    if (trimmed.length === 0) {
+      return false;
+    }
+    // A JSON object/array is a config, not a rule list.
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        JSON.parse(trimmed);
+        return false;
+      } catch (_) {
+        // not valid JSON — judge by line content below
+      }
+    }
+    const lines: string[] = trimmed.split('\n')
+      .map((l: string) => l.trim())
+      .filter((l: string) => l.length > 0 && !l.startsWith('!') && !l.startsWith('#'));
+    if (lines.length === 0) {
+      return false;
+    }
+    let ruleLike: number = 0;
+    for (const line of lines) {
+      if (this.isPlausibleRuleLine(line)) {
+        ruleLike += 1;
+      }
+    }
+    return ruleLike * 2 >= lines.length;  // majority of content lines look like rules
+  }
+
+  private isPlausibleRuleLine(line: string): boolean {
+    // AdGuard / AdBlock syntax
+    if (line.startsWith('||') || line.startsWith('@@') || line.startsWith('|')
+      || line.startsWith('/') || line.includes('##') || line.includes('#@#') || line.includes('$')) {
+      return true;
+    }
+    // hosts format: <ipv4|ipv6> <host>
+    if (/^(\d{1,3}\.){3}\d{1,3}\s+\S+/.test(line) || /^[0-9a-fA-F:]+:[0-9a-fA-F:]*\s+\S+/.test(line)) {
+      return true;
+    }
+    // plain domain (optionally wildcard), e.g. example.com, *.ads.example.com
+    if (/^[*A-Za-z0-9_.-]+\.[A-Za-z]{2,}$/.test(line)) {
+      return true;
+    }
+    return false;
+  }
+
+  private hostRulesFromProfile(profileId: string, allow: boolean): ConfigHostRule[] {
+    const profile: RuleProfile | undefined = this.ruleProfiles.find((p: RuleProfile) => p.id === profileId);
+    if (profile === undefined) {
+      return [];
+    }
+    const out: ConfigHostRule[] = [];
+    const seen: string[] = [];
+    this.ruleProfileLines(profile.content).forEach((line: string) => {
+      const host: string = this.hostFromRuleLine(line, allow);
+      if (host.length > 0 && !seen.includes(host)) {
+        seen.push(host);
+        out.push({ host: host, enabled: true });
+      }
+    });
+    return out;
+  }
+
+  private buildConfigExportJson(): string {
+    const sources: ConfigSource[] = this.filterSubscriptions.map((s: FilterSubscription) => {
+      const e: ConfigSource = { label: s.name, url: s.url, enabled: s.enabled, allow: false, redirect: true };
+      return e;
+    });
+    const redirected: ConfigRedirect[] = this.dnsRewrites.map((r: DnsRewriteRule) => {
+      const e: ConfigRedirect = { host: r.domain, redirect: r.answer, enabled: true };
+      return e;
+    });
+    // Imported local rule lists (non-built-in profiles) — stored inline so the
+    // export is a self-contained snapshot. The built-in custom block/allow
+    // profiles are excluded here; they're already represented by blocked/allowed.
+    const profiles: ConfigRuleProfile[] = this.ruleProfiles
+      .filter((p: RuleProfile) => !p.builtIn)
+      .map((p: RuleProfile) => {
+        const e: ConfigRuleProfile = { name: p.name, content: p.content, enabled: p.enabled };
+        return e;
+      });
+    const app: ConfigAppSettings = {
+      upstreamDns: this.upstreamDnsInput,
+      upstreamAuto: this.upstreamAutoEnabled,
+      fullMode: this.fullModeEnabled,
+      proxyModeEnabled: this.proxyModeEnabled,
+      dnsProxyPort: this.dnsProxyPort,
+      aghHttpPort: this.aghHttpPort,
+      aghWebEnabled: this.aghWebEnabled,
+      blockedServiceIds: this.blockedServiceIds,
+      advancedDns: this.cloneAdvancedDns(),
+      dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
+      logRetentionDays: this.logRetentionDays,
+      logMaxSizeMb: this.logMaxSizeMb,
+      ruleProfiles: profiles,
+    };
+    const config: ConfigExport = {
+      sources: sources,
+      blocked: this.hostRulesFromProfile(CUSTOM_BLOCK_RULE_PROFILE_ID, false),
+      allowed: this.hostRulesFromProfile(CUSTOM_ALLOW_RULE_PROFILE_ID, true),
+      redirected: redirected,
+      app: app,
+    };
+    return JSON.stringify(config, null, 2);
+  }
+
+  private async exportConfigFile(): Promise<void> {
+    try {
+      const fileName: string | undefined =
+        await this.exportTextToDownloadDirectory('home_cloud_shield_config', 'json', this.buildConfigExportJson());
+      if (fileName === undefined) {
+        this.setConfigFeedback(this.exportCanceledMessage());
+        return;
+      }
+      this.setConfigFeedback(this.exportSuccessMessage(fileName));
+      try {
+        this.promptAction?.showToast({ message: this.t('exportSuccessToast', fileName) });
+      } catch (_) {
+      }
+      this.appendDebugLog(`==/vpn_ui/export_config/ ${fileName}`);
+    } catch (err) {
+      this.errorText = this.errorMessage(err);
+      this.appendDebugLog(`==/vpn_ui/export_config_error/ ${this.errorText}`);
+    }
+  }
+
+  // Merge a batch of hosts into a built-in custom rule profile, deduping against
+  // existing lines. Returns the count actually added.
+  private mergeHostsIntoProfile(profileId: string, hosts: string[], allow: boolean): number {
+    const lines: string[] = [];
+    hosts.forEach((h: string) => {
+      const host: string = h.trim().toLowerCase();
+      if (host.length > 0 && /^[A-Za-z0-9._*-]+$/.test(host)) {
+        const line: string = this.buildRuleLineForDomain(host, allow);
+        if (!lines.includes(line)) {
+          lines.push(line);
+        }
+      }
+    });
+    if (lines.length === 0) {
+      return 0;
+    }
+    let added: number = 0;
+    this.ruleProfiles = this.normalizeRuleProfiles(this.ruleProfiles).map((profile: RuleProfile) => {
+      if (profile.id !== profileId) {
+        return profile;
+      }
+      const originalLines: string[] = this.ruleProfileLines(profile.content);
+      const nextLines: string[] = originalLines.slice();
+      lines.forEach((line: string) => {
+        if (!nextLines.includes(line)) {
+          nextLines.push(line);
+          added += 1;
+        }
+      });
+      return this.updateRuleProfileContent(profile, nextLines, originalLines);
+    });
+    return added;
+  }
+
+  private mergeImportedSources(sources: ConfigSource[]): SourceMergeResult {
+    let added: number = 0;
+    let skipped: number = 0;
+    let nextId: number = this.nextSubscriptionId();
+    const merged: FilterSubscription[] = this.filterSubscriptions.slice();
+    sources.forEach((s: ConfigSource) => {
+      const url: string = typeof s?.url === 'string' ? s.url.trim() : '';
+      // Only http(s) lists are usable; count and skip content:// file URIs and
+      // other non-fetchable schemes. (Note: an http(s) URL that isn't a raw rule
+      // list — a repo page, a redirect wrapper — still imports; the engine just
+      // won't parse it. We can't reliably detect that from the URL alone.)
+      if (!(url.startsWith('http://') || url.startsWith('https://'))) {
+        if (url.length > 0) {
+          skipped += 1;
+        }
+        return;
+      }
+      if (merged.some((e: FilterSubscription) => e.url === url)) {
+        return;  // duplicate of an existing subscription — silently deduped
+      }
+      const label: string = typeof s?.label === 'string' && s.label.trim().length > 0 ? s.label.trim() : url;
+      merged.push({ id: nextId, name: label, url: url, enabled: s?.enabled !== false });
+      nextId += 1;
+      added += 1;
+    });
+    // Always reassign (deduped + reindexed) so a single import also heals any
+    // pre-existing duplicate-id/url corruption, keeping list and count consistent.
+    this.filterSubscriptions = this.dedupeSubscriptions(merged);
+    return { added: added, skipped: skipped };
+  }
+
+  // Re-create imported local rule lists from the app section, deduping by content
+  // against existing non-built-in profiles. Returns the count actually added.
+  private mergeImportedRuleProfiles(profiles: ConfigRuleProfile[]): number {
+    const existingContents: string[] = this.ruleProfiles
+      .filter((p: RuleProfile) => !p.builtIn)
+      .map((p: RuleProfile) => this.normalizeRuleContent(p.content).trim());
+    const toAdd: RuleProfile[] = [];
+    profiles.forEach((profile: ConfigRuleProfile) => {
+      const content: string = typeof profile?.content === 'string' ? profile.content : '';
+      const normalized: string = this.normalizeRuleContent(content).trim();
+      if (normalized.length === 0 || existingContents.includes(normalized)) {
+        return;
+      }
+      existingContents.push(normalized);
+      const name: string = typeof profile?.name === 'string' && profile.name.trim().length > 0
+        ? profile.name.trim()
+        : `${this.defaultCustomRuleName()} ${this.ruleProfiles.length + toAdd.length + 1}`;
+      toAdd.push(this.createRuleProfile(name, content, profile?.enabled !== false));
+    });
+    if (toAdd.length === 0) {
+      return 0;
+    }
+    // Keep imported lists ahead of the built-in custom profiles (same ordering as
+    // importRulesFile), so normalizeRuleProfiles re-sorts them consistently.
+    const importedOnly: RuleProfile[] = this.ruleProfiles.filter((p: RuleProfile) => !p.builtIn);
+    const builtIns: RuleProfile[] = this.ruleProfiles.filter((p: RuleProfile) => p.builtIn);
+    this.ruleProfiles = this.normalizeRuleProfiles(importedOnly.concat(toAdd).concat(builtIns));
+    return toAdd.length;
+  }
+
+  private mergeImportedRedirects(redirected: ConfigRedirect[]): number {
+    let added: number = 0;
+    const merged: DnsRewriteRule[] = this.dnsRewrites.slice();
+    redirected.forEach((r: ConfigRedirect) => {
+      if (r?.enabled === false) {
+        return;
+      }
+      const domain: string = typeof r?.host === 'string' ? r.host.trim().toLowerCase() : '';
+      const answer: string = typeof r?.redirect === 'string' ? r.redirect.trim() : '';
+      if (domain.length === 0 || answer.length === 0 || merged.some((x: DnsRewriteRule) => x.domain === domain)) {
+        return;
+      }
+      merged.push({ domain: domain, answer: answer });
+      added += 1;
+    });
+    if (added > 0) {
+      this.dnsRewrites = merged;
+    }
+    return added;
+  }
+
+  // Collect hosts from imported block/allow entries. Disabled entries are skipped
+  // (the app has no per-rule disable flag to preserve their state).
+  private hostsFromImportRules(rules: ConfigHostRule[]): string[] {
+    const out: string[] = [];
+    rules.forEach((r: ConfigHostRule) => {
+      if (r?.enabled === false) {
+        return;
+      }
+      const host: string = typeof r?.host === 'string' ? r.host.trim() : '';
+      if (host.length > 0) {
+        out.push(host);
+      }
+    });
+    return out;
+  }
+
+  private applyImportedAppSettings(app: ConfigAppSettings): void {
+    if (typeof app.upstreamDns === 'string') {
+      this.upstreamDnsInput = app.upstreamDns.trim();
+    }
+    if (typeof app.upstreamAuto === 'boolean') {
+      this.upstreamAutoEnabled = app.upstreamAuto;
+    }
+    if (typeof app.fullMode === 'boolean') {
+      this.fullModeEnabled = app.fullMode;
+    }
+    if (typeof app.proxyModeEnabled === 'boolean') {
+      this.proxyModeEnabled = app.proxyModeEnabled;
+    }
+    if (typeof app.dnsProxyPort === 'string' && app.dnsProxyPort.trim().length > 0) {
+      this.dnsProxyPort = app.dnsProxyPort.trim();
+    }
+    if (typeof app.aghHttpPort === 'string' && app.aghHttpPort.trim().length > 0) {
+      this.aghHttpPort = app.aghHttpPort.trim();
+    }
+    if (typeof app.aghWebEnabled === 'boolean') {
+      this.aghWebEnabled = app.aghWebEnabled;
+    }
+    if (Array.isArray(app.blockedServiceIds)) {
+      const ids: string[] = this.blockedServiceIds.slice();
+      app.blockedServiceIds.forEach((x: string) => {
+        if (typeof x === 'string' && x.length > 0 && !ids.includes(x)) {
+          ids.push(x);
+        }
+      });
+      this.blockedServiceIds = ids;
+    }
+    if (app.advancedDns !== undefined && app.advancedDns !== null) {
+      this.advancedDns = this.normalizeAdvancedDns(app.advancedDns);
+    }
+    if (typeof app.dnsCacheTtlSeconds === 'number' && Number.isFinite(app.dnsCacheTtlSeconds)
+      && app.dnsCacheTtlSeconds >= 0) {
+      this.dnsCacheTtlSeconds = Math.floor(app.dnsCacheTtlSeconds);
+      this.dnsCacheTtlInput = `${this.dnsCacheTtlSeconds}`;
+    }
+    if (typeof app.logRetentionDays === 'number' && Number.isFinite(app.logRetentionDays)
+      && app.logRetentionDays >= 0) {
+      this.logRetentionDays = Math.floor(app.logRetentionDays);
+      this.logRetentionDaysInput = `${this.logRetentionDays}`;
+    }
+    if (typeof app.logMaxSizeMb === 'number' && Number.isFinite(app.logMaxSizeMb) && app.logMaxSizeMb >= 0) {
+      this.logMaxSizeMb = Math.floor(app.logMaxSizeMb);
+      this.logMaxSizeMbInput = `${this.logMaxSizeMb}`;
+    }
+  }
+
+  private async importConfigFile(): Promise<void> {
+    try {
+      const p: picker.DocumentViewPicker = new picker.DocumentViewPicker(this.getHostContext());
+      const uris: string[] = await p.select({ maxSelectNumber: 1, fileSuffixFilters: ['.json'] });
+      if (!uris || uris.length === 0) {
+        this.setConfigFeedback(this.t('noConfigSelected'));
+        return;
+      }
+      const importedPath: string = `${this.getHostContext().filesDir}/${VPN_DIR_NAME}/imported_config.json`;
+      try {
+        await fileIo.copyFile(uris[0], importedPath);
+      } catch (_) {
+        const srcPath: string = decodeURIComponent(new uri.URI(uris[0]).encodedPath);
+        await fileIo.copyFile(srcPath, importedPath);
+      }
+      const raw: string = this.readTextFile(importedPath);
+      if (raw.trim().length === 0) {
+        this.setConfigFeedback(this.t('configImportInvalid'));
+        return;
+      }
+      let config: ConfigExport;
+      try {
+        config = JSON.parse(raw) as ConfigExport;
+      } catch (_) {
+        this.setConfigFeedback(this.t('configImportInvalid'));
+        return;
+      }
+
+      this.ensureRuleProfilesInitialized();
+      const result: ConfigImportResult =
+        { sources: 0, blocked: 0, allowed: 0, redirected: 0, ruleFiles: 0, skippedSources: 0 };
+      if (Array.isArray(config.sources)) {
+        const sourceResult: SourceMergeResult = this.mergeImportedSources(config.sources);
+        result.sources = sourceResult.added;
+        result.skippedSources = sourceResult.skipped;
+      }
+      if (Array.isArray(config.blocked)) {
+        result.blocked =
+          this.mergeHostsIntoProfile(CUSTOM_BLOCK_RULE_PROFILE_ID, this.hostsFromImportRules(config.blocked), false);
+      }
+      if (Array.isArray(config.allowed)) {
+        result.allowed =
+          this.mergeHostsIntoProfile(CUSTOM_ALLOW_RULE_PROFILE_ID, this.hostsFromImportRules(config.allowed), true);
+      }
+      if (Array.isArray(config.redirected)) {
+        result.redirected = this.mergeImportedRedirects(config.redirected);
+      }
+      if (config.app !== undefined && config.app !== null) {
+        this.applyImportedAppSettings(config.app);
+        if (Array.isArray(config.app.ruleProfiles)) {
+          result.ruleFiles = this.mergeImportedRuleProfiles(config.app.ruleProfiles);
+        }
+      }
+
+      this.syncRuleCountBadges();
+      this.rulesText = this.buildMergedRulesText();
+      this.rulesDirty = true;
+      this.savePersistState();
+      this.errorText = '';
+      // Force fresh array references so the config-page counts (rendered via
+      // memoizing @Builder rows) refresh immediately instead of after the next
+      // unrelated state change.
+      this.filterSubscriptions = this.filterSubscriptions.slice();
+      this.dnsRewrites = this.dnsRewrites.slice();
+      this.ruleProfiles = this.ruleProfiles.slice();
+      // Apply now so the import actually takes effect without a manual restart:
+      // lite VPN hot-reloads the rewritten rules file; full mode restarts to bake
+      // in the new subscriptions / rewrites / rules.
+      if (this.activeRunning()) {
+        this.writeTextFile(this.rulesFilePath, this.rulesText);
+        this.writeUpstreamFile();
+        this.applyFullModeConfigChange();
+      }
+      // Download + validate the imported subscriptions in the background. Lists that
+      // can't be fetched or aren't rule lists are marked failed and force-disabled,
+      // so "enabled" reflects "downloaded + valid".
+      const importedUrls: string[] = this.filterSubscriptions
+        .filter((s: FilterSubscription) => s.enabled)
+        .map((s: FilterSubscription) => s.url);
+      void this.downloadSubscriptions(importedUrls);
+      let summary: string = this.t('configImportedSummary', result.sources, result.blocked, result.allowed,
+        result.redirected, result.ruleFiles);
+      if (result.skippedSources > 0) {
+        summary += this.t('configImportSkipped', result.skippedSources);
+      }
+      if (importedUrls.length > 0) {
+        summary += this.tri(' · downloading list contents…', ' · 正在下载订阅内容…', ' · 正在下載訂閱內容…');
+      }
+      this.setConfigFeedback(summary);
+      try {
+        this.promptAction?.showToast({ message: summary });
+      } catch (_) {
+      }
+      this.appendDebugLog(
+        `==/vpn_ui/import_config/ sources=${result.sources} blocked=${result.blocked} allowed=${result.allowed} redirected=${result.redirected} ruleFiles=${result.ruleFiles} skipped=${result.skippedSources}`
+      );
+    } catch (err) {
+      this.errorText = this.errorMessage(err);
+      this.setConfigFeedback(this.t('configImportInvalid'));
+      this.appendDebugLog(`==/vpn_ui/import_config_error/ ${this.errorText}`);
+    }
   }
 
   // ----- Advanced DNS settings (full mode) -----
@@ -1829,12 +2921,98 @@ struct Index {
     this.upstreamDnsInput = text;
     this.savePersistState();
     this.errorText = '';
-    this.writeTextFile(this.upstreamDnsFilePath, text);
-    this.appendDebugLog(`==/vpn_ui/upstream_set/ upstream=${text.length > 0 ? cleaned.join(',') : DEFAULT_UPSTREAM_DNS_IP}`);
+    this.writeUpstreamFile();
+    this.appendDebugLog(`==/vpn_ui/upstream_set/ auto=${this.upstreamAutoEnabled} upstream=${text.length > 0 ? cleaned.join(',') : DEFAULT_UPSTREAM_DNS_IP}`);
     try {
       this.ensurePromptAction()?.showToast({ message: this.t('upstreamDnsApplied') });
     } catch (_) {
     }
+  }
+
+  // The content written to upstream.txt: an __AUTO__ marker line (so the VPN
+  // extension follows the system/router DNS) followed by the manual list as the
+  // fallback, or just the manual list when auto is off.
+  private upstreamFileText(): string {
+    const manual: string = this.upstreamDnsInput.trim();
+    return this.upstreamAutoEnabled ? `${UPSTREAM_AUTO_MARKER}\n${manual}` : manual;
+  }
+
+  private writeUpstreamFile(): void {
+    this.writeTextFile(this.upstreamDnsFilePath, this.upstreamFileText());
+  }
+
+  // DNS-proxy mode resolves the upstream in THIS process (no VPN extension), so
+  // it needs its own query of the system/router resolvers for auto mode. Filters
+  // out loopback, IPv6 link-local, and unusable entries (mirror of the extension).
+  private async queryUnderlyingDnsServers(): Promise<string[]> {
+    const out: string[] = [];
+    try {
+      const netHandle: connection.NetHandle = await connection.getDefaultNet();
+      if (netHandle.netId === 0) {
+        return out;
+      }
+      const props: connection.ConnectionProperties = await connection.getConnectionProperties(netHandle);
+      const servers: connection.NetAddress[] = props.dnses ?? [];
+      servers.forEach((s: connection.NetAddress) => {
+        const ip: string = (s.address ?? '').trim();
+        const lower: string = ip.toLowerCase();
+        if (ip.length === 0 || out.includes(ip)) {
+          return;
+        }
+        if (ip.startsWith('127.') || ip === '::1' || lower.startsWith('fe80') || lower.includes('%')) {
+          return;
+        }
+        if (this.isValidUpstreamIp(ip)) {
+          out.push(ip);
+        }
+      });
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ui/underlying_dns_error/ ${this.errorMessage(err)}`);
+    }
+    return out;
+  }
+
+  // Auto upstream is only meaningful in VPN mode, where the extension owns the
+  // physical network and can read the system/router DNS. In pure DNS-proxy mode
+  // there is no tunnel and no reliable underlying resolver to follow, so the
+  // toggle is greyed out and the manual list is always used.
+  private upstreamAutoAvailable(): boolean {
+    return !this.proxyModeEnabled;
+  }
+
+  // The upstream the DNS-proxy server should use. Auto mode never applies here
+  // (see upstreamAutoAvailable) — proxy mode always uses the manual IP list.
+  private async resolveProxyUpstream(manualList: string): Promise<string> {
+    if (!this.upstreamAutoEnabled || !this.upstreamAutoAvailable()) {
+      return manualList;
+    }
+    const system: string[] = await this.queryUnderlyingDnsServers();
+    return system.length > 0 ? system.join('\n') : manualList;
+  }
+
+  private onUpstreamAutoChange(value: boolean): void {
+    // Defensive: the toggle is disabled in proxy mode, but never let it flip on.
+    if (value && !this.upstreamAutoAvailable()) {
+      return;
+    }
+    this.upstreamAutoEnabled = value;
+    this.savePersistState();
+    // Rewrite the file the VPN extension watches: lite mode hot-reloads within
+    // ~1s, full mode applies on next restart. (Proxy mode uses the manual list.)
+    this.writeUpstreamFile();
+    this.appendDebugLog(`==/vpn_ui/upstream_auto/ ${value}`);
+    try {
+      this.ensurePromptAction()?.showToast({ message: this.t('upstreamDnsApplied') });
+    } catch (_) {
+    }
+  }
+
+  // The resolver(s) the running filter actually uses, for display. In auto mode
+  // this comes from the live status snapshot (the system/router DNS); empty until
+  // the filter is up.
+  private effectiveUpstreamDisplay(): string {
+    const eff: string = (this.status.effectiveUpstream ?? '').trim();
+    return eff.length > 0 ? eff.replace(/\n/g, ', ') : '';
   }
 
   private parseLogRetentionDaysInput(value: string): number {
@@ -2892,6 +4070,9 @@ struct Index {
       this.showFirstRunDisclaimer = true;
     }
     this.applyPreferredLanguage(this.language);
+    // Make sure notify.json exists with the current settings/labels before any
+    // (auto-)start, so the extension reads a fresh config on launch.
+    this.writeNotifyConfigFile();
     this.ensureRuleProfilesInitialized();
     this.autoStartAttempted = false;
     this.applyTheme(this.themeMode);
@@ -2922,6 +4103,12 @@ struct Index {
 
   aboutToDisappear(): void {
     this.stopRefreshTimer();
+    // Avoid an orphaned timer firing on a torn-down component. Leave the last
+    // published notification in place (don't cancel) — the proxy keeps filtering.
+    if (this.proxyNotifyTimer >= 0) {
+      clearInterval(this.proxyNotifyTimer);
+      this.proxyNotifyTimer = -1;
+    }
   }
 
   // Pause the 1.2s refresh loop (and stop touching ui_watch) while this page is
@@ -2980,6 +4167,8 @@ struct Index {
     this.upstreamDnsFilePath = `${vpnDir}/${UPSTREAM_DNS_FILE_NAME}`;
     this.stateFilePath = `${vpnDir}/${STATE_FILE_NAME}`;
     this.uiWatchFilePath = `${vpnDir}/${UI_WATCH_FILE_NAME}`;
+    this.notifyConfigFilePath = `${vpnDir}/${NOTIFY_CONFIG_FILE_NAME}`;
+    this.notifyCountsFilePath = `${vpnDir}/${NOTIFY_COUNTS_FILE_NAME}`;
     try {
       fileIo.mkdirSync(vpnDir, true);
     } catch (_) {
@@ -3022,7 +4211,10 @@ struct Index {
         clearDnsLogOnStart: this.clearDnsLogOnStart,
         clearDebugLogOnStart: this.clearDebugLogOnStart,
         filterMode: this.fullModeEnabled ? 'full' : 'lightweight',
-        aghFiltersJson: JSON.stringify(this.filterSubscriptions),
+        // Exclude lists that failed to download/validate — the full engine should
+        // not try to fetch a URL we already know is broken or not a rule list.
+        aghFiltersJson: JSON.stringify(
+          this.filterSubscriptions.filter((s: FilterSubscription) => s.state !== 'failed')),
         aghRewritesJson: JSON.stringify(this.dnsRewrites),
         aghAdvancedJson: JSON.stringify(this.advancedDns),
         aghHttpPort: this.aghHttpPortNumber(),
@@ -3035,12 +4227,226 @@ struct Index {
     return {
       wants: [{
         bundleName: VPN_BUNDLE_NAME,
+        moduleName: VPN_MODULE_NAME,
         abilityName: ENTRY_ABILITY_NAME,
       }],
       actionType: wantAgent.OperationType.START_ABILITY,
       requestCode: 0,
       wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
     };
+  }
+
+  private clampNotificationRefreshSeconds(value: number): number {
+    if (!Number.isFinite(value)) {
+      return DEFAULT_NOTIFICATION_REFRESH_SECONDS;
+    }
+    const rounded: number = Math.round(value);
+    if (rounded < NOTIFICATION_REFRESH_MIN_SECONDS) {
+      return NOTIFICATION_REFRESH_MIN_SECONDS;
+    }
+    if (rounded > NOTIFICATION_REFRESH_MAX_SECONDS) {
+      return NOTIFICATION_REFRESH_MAX_SECONDS;
+    }
+    return rounded;
+  }
+
+  // Persist the persistent-notification config (enable flag, refresh interval,
+  // and the labels resolved against the in-app language) to notify.json. The VPN
+  // extension watches this file and applies changes live (see MyVpnExtAbility).
+  private writeNotifyConfigFile(): void {
+    if (this.notifyConfigFilePath.length === 0) {
+      return;
+    }
+    const config: NotifyConfigFile = {
+      enabled: this.persistentNotificationEnabled,
+      refreshSeconds: this.clampNotificationRefreshSeconds(this.notificationRefreshSeconds),
+      title: this.t('notificationTitle'),
+      blockedLabel: this.t('blocked'),
+      allowedLabel: this.t('allowed'),
+      totalLabel: this.t('notificationTotal'),
+    };
+    this.writeTextFile(this.notifyConfigFilePath, JSON.stringify(config));
+  }
+
+  // Best-effort: ask the user to allow notifications so the persistent stats
+  // notification can show. Safe to call repeatedly — once decided the system
+  // just rejects, which we ignore.
+  private async ensureNotificationPermission(): Promise<void> {
+    try {
+      if (await notificationManager.isNotificationEnabled()) {
+        return;
+      }
+      await notificationManager.requestEnableNotification(this.getHostContext());
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ui/notify_permission/ ${this.errorMessage(err)}`);
+    }
+  }
+
+  private async onPersistentNotificationChange(value: boolean): Promise<void> {
+    this.persistentNotificationEnabled = value;
+    this.savePersistState();
+    if (value) {
+      await this.ensureNotificationPermission();
+    }
+    // VPN mode applies via notify.json (savePersistState wrote it); proxy mode is
+    // published from this process, so react immediately.
+    if (this.proxyModeEnabled && this.dnsProxyRunning) {
+      if (value) {
+        this.startProxyNotify();
+      } else {
+        this.stopProxyNotify();
+      }
+    }
+  }
+
+  private setNotificationRefreshSeconds(seconds: number): void {
+    const next: number = this.clampNotificationRefreshSeconds(seconds);
+    if (next === this.notificationRefreshSeconds) {
+      return;
+    }
+    this.notificationRefreshSeconds = next;
+    this.savePersistState();
+    // Re-pace the proxy-mode publisher immediately when running.
+    if (this.proxyModeEnabled && this.dnsProxyRunning && this.persistentNotificationEnabled) {
+      this.startProxyNotify();
+    }
+  }
+
+  private formatCount(value: number): string {
+    const digits: string = `${Math.max(0, Math.floor(value))}`;
+    return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  // Capture the live cumulative baseline for the VPN extension's notification:
+  // the home-page cumulative counts (querySummary) plus the native session counts
+  // at this instant. The extension adds its live native delta on top so the
+  // notification matches the home page yet keeps ticking in the background.
+  // Deduped so an unchanged baseline doesn't churn the file the extension watches.
+  private writeNotifyCountsFile(): void {
+    this.writeNotifyCountsBaseline(this.status.nativeStats.allowedQueries, this.status.nativeStats.blockedQueries);
+  }
+
+  private writeNotifyCountsBaseline(natAllowed: number, natBlocked: number): void {
+    if (this.notifyCountsFilePath.length === 0) {
+      return;
+    }
+    const counts: NotifyCountsFile = {
+      cumAllowed: Math.max(0, this.querySummary.allowed),
+      cumBlocked: Math.max(0, this.querySummary.blocked),
+      natAllowed: Math.max(0, natAllowed),
+      natBlocked: Math.max(0, natBlocked),
+    };
+    const signature: string = `${counts.cumAllowed}:${counts.cumBlocked}:${counts.natAllowed}:${counts.natBlocked}`;
+    if (signature === this.lastNotifyCountsSignature) {
+      return;
+    }
+    this.lastNotifyCountsSignature = signature;
+    this.writeTextFile(this.notifyCountsFilePath, JSON.stringify(counts));
+  }
+
+  // ---- Proxy-mode notification (published by this process) ------------------
+
+  private async ensureUiNotificationWantAgent(): Promise<WantAgent | undefined> {
+    if (this.notificationWantAgent !== undefined) {
+      return this.notificationWantAgent;
+    }
+    try {
+      this.notificationWantAgent = await wantAgent.getWantAgent(this.buildKeepAliveWantAgentInfo());
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ui/notify_wantagent_error/ ${this.errorMessage(err)}`);
+    }
+    return this.notificationWantAgent;
+  }
+
+  private async publishStatsNotificationUI(text: string): Promise<void> {
+    try {
+      const agent: WantAgent | undefined = await this.ensureUiNotificationWantAgent();
+      const request: notificationManager.NotificationRequest = {
+        id: STATS_NOTIFICATION_ID,
+        // CONTENT_INFORMATION = silent LEVEL_MIN slot, so repeated republishes
+        // (live counts) don't sound/vibrate.
+        notificationSlotType: notificationManager.SlotType.CONTENT_INFORMATION,
+        content: {
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          normal: {
+            title: this.t('notificationTitle'),
+            text: text,
+          },
+        },
+        isOngoing: true,
+        isUnremovable: false,
+        tapDismissed: false,
+        wantAgent: agent,
+      };
+      await notificationManager.publish(request);
+      this.uiNotificationActive = true;
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ui/notify_publish_error/ ${this.errorMessage(err)}`);
+    }
+  }
+
+  private cancelStatsNotificationUI(): void {
+    this.lastUiNotificationText = '';
+    this.lastUiNotificationPublishMs = 0;
+    if (!this.uiNotificationActive) {
+      return;
+    }
+    this.uiNotificationActive = false;
+    notificationManager.cancel(STATS_NOTIFICATION_ID).catch((err: BusinessError) => {
+      this.appendDebugLog(`==/vpn_ui/notify_cancel_error/ ${this.errorMessage(err)}`);
+    });
+  }
+
+  // Proxy mode has no native query counters wired into getStats, so it shows the
+  // cumulative query-log counts (querySummary) directly — identical to the home
+  // page. The timer below keeps querySummary fresh in the background.
+  private updateProxyStatsNotification(force: boolean): void {
+    if (!this.persistentNotificationEnabled || !this.dnsProxyRunning) {
+      if (this.uiNotificationActive) {
+        this.cancelStatsNotificationUI();
+      }
+      return;
+    }
+    const now: number = Date.now();
+    if (!force && now - this.lastUiNotificationPublishMs < this.clampNotificationRefreshSeconds(this.notificationRefreshSeconds) * 1000) {
+      return;
+    }
+    const text: string =
+      `${this.t('blocked')} ${this.formatCount(this.querySummary.blocked)}    ` +
+      `${this.t('allowed')} ${this.formatCount(this.querySummary.allowed)}    ` +
+      `${this.t('notificationTotal')} ${this.formatCount(this.querySummary.total)}`;
+    if (!force && text === this.lastUiNotificationText) {
+      return;
+    }
+    this.lastUiNotificationText = text;
+    this.lastUiNotificationPublishMs = now;
+    void this.publishStatsNotificationUI(text);
+  }
+
+  private startProxyNotify(): void {
+    this.stopProxyNotify();
+    if (!this.persistentNotificationEnabled) {
+      return;
+    }
+    void this.ensureNotificationPermission();
+    this.updateProxyStatsNotification(true);
+    this.proxyNotifyTimer = setInterval(() => {
+      // Keep the cumulative counts advancing while backgrounded (the foreground
+      // refresh loop is paused then). Cheap incremental ingestion, gated to the
+      // notification cadence.
+      if (!this.pageVisible) {
+        this.refreshQueryLog();
+      }
+      this.updateProxyStatsNotification(false);
+    }, this.clampNotificationRefreshSeconds(this.notificationRefreshSeconds) * 1000);
+  }
+
+  private stopProxyNotify(): void {
+    if (this.proxyNotifyTimer >= 0) {
+      clearInterval(this.proxyNotifyTimer);
+      this.proxyNotifyTimer = -1;
+    }
+    this.cancelStatsNotificationUI();
   }
 
   private loadPersistState(): void {
@@ -3070,11 +4476,21 @@ struct Index {
       if (typeof state.autoStartFilterEnabled === 'boolean') {
         this.autoStartFilterEnabled = state.autoStartFilterEnabled;
       }
+      if (typeof state.persistentNotificationEnabled === 'boolean') {
+        this.persistentNotificationEnabled = state.persistentNotificationEnabled;
+      }
+      if (typeof state.notificationRefreshSeconds === 'number'
+        && Number.isFinite(state.notificationRefreshSeconds)) {
+        this.notificationRefreshSeconds = this.clampNotificationRefreshSeconds(state.notificationRefreshSeconds);
+      }
       if (typeof state.currentTab === 'number' && state.currentTab >= 0 && state.currentTab <= 2) {
         this.currentTab = state.currentTab;
       }
       if (typeof state.upstreamDnsIp === 'string') {
         this.upstreamDnsInput = state.upstreamDnsIp.trim();
+      }
+      if (typeof state.upstreamAutoEnabled === 'boolean') {
+        this.upstreamAutoEnabled = state.upstreamAutoEnabled;
       }
       if (typeof state.dnsCacheTtlSeconds === 'number' && Number.isFinite(state.dnsCacheTtlSeconds)
         && state.dnsCacheTtlSeconds >= 0) {
@@ -3142,9 +4558,12 @@ struct Index {
             name: typeof s?.name === 'string' && s.name.trim().length > 0 ? s.name.trim() : url,
             url: url,
             enabled: s?.enabled !== false,
+            state: typeof s?.state === 'string' ? s.state : undefined,
+            lines: typeof s?.lines === 'number' ? s.lines : undefined,
+            err: typeof s?.err === 'string' ? s.err : undefined,
           });
         });
-        this.filterSubscriptions = subs;
+        this.filterSubscriptions = this.dedupeSubscriptions(subs);
       }
       if (Array.isArray(state.dnsRewrites)) {
         const rws: DnsRewriteRule[] = [];
@@ -3203,11 +4622,14 @@ struct Index {
       audioKeepAliveEnabled: this.audioKeepAliveEnabled,
       locationKeepAliveEnabled: this.locationKeepAliveEnabled,
       autoStartFilterEnabled: this.autoStartFilterEnabled,
+      persistentNotificationEnabled: this.persistentNotificationEnabled,
+      notificationRefreshSeconds: this.notificationRefreshSeconds,
       language: this.language,
       themeMode: this.themeMode,
       ruleProfiles: this.ruleProfiles,
       dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
       upstreamDnsIp: this.upstreamDnsInput,
+      upstreamAutoEnabled: this.upstreamAutoEnabled,
       logRetentionDays: this.logRetentionDays,
       logMaxSizeMb: this.logMaxSizeMb,
       clearDnsLogOnStart: this.clearDnsLogOnStart,
@@ -3225,6 +4647,9 @@ struct Index {
       currentTab: this.currentTab,
     };
     this.writeTextFile(this.stateFilePath, JSON.stringify(state));
+    // Mirror the notification settings (and current localized labels) into
+    // notify.json so the running VPN extension applies any change live.
+    this.writeNotifyConfigFile();
   }
 
   private async loadAppVersion(): Promise<void> {
@@ -3346,6 +4771,9 @@ struct Index {
     this.refreshStatus();
     this.refreshQueryLog();
     this.refreshDebugLog();
+    // Capture the cumulative baseline for the VPN extension's notification (it
+    // adds its live native delta on top). Deduped internally.
+    this.writeNotifyCountsFile();
     // DNS-proxy mode has no status pump; poll the in-process native flag so a
     // dead proxy is noticed (and can be auto-restarted) instead of the toggle
     // staying stuck on "running".
@@ -3899,7 +5327,18 @@ struct Index {
       if (!this.writeTextFile(this.rulesFilePath, this.rulesText)) {
         throw new Error('Failed to write rules file');
       }
-      this.writeTextFile(this.upstreamDnsFilePath, this.upstreamDnsInput.trim());
+      this.writeUpstreamFile();
+      // Refresh notify.json and (if enabled) prompt for notification permission
+      // before the extension comes up, so the persistent stats notification can
+      // appear immediately.
+      this.writeNotifyConfigFile();
+      // The (re)start resets the native session counters to 0, so seed the
+      // baseline against nat=0: the extension shows cumulative + native from the
+      // first query, with no stale-session transient.
+      this.writeNotifyCountsBaseline(0, 0);
+      if (this.persistentNotificationEnabled) {
+        await this.ensureNotificationPermission();
+      }
       this.rulesDirty = false;
       hilog.info(
         DOMAIN,
@@ -4067,6 +5506,7 @@ struct Index {
       }
 
       const importedProfiles: RuleProfile[] = [];
+      let invalidCount: number = 0;
       for (let index = 0; index < uris.length; index += 1) {
         const currentUri: string = uris[index];
         const importedPath: string = `${this.getHostContext().filesDir}/${VPN_DIR_NAME}/imported_rules_${index}.txt`;
@@ -4081,13 +5521,20 @@ struct Index {
           if (importedText.trim().length === 0) {
             continue;
           }
+          // Reject files that aren't rule lists (e.g. a config JSON dropped here
+          // by mistake — it belongs in "Import config", not "Import file").
+          if (!this.looksLikeRuleList(importedText)) {
+            invalidCount += 1;
+            continue;
+          }
           importedProfiles.push(this.createRuleProfile(this.ruleProfileNameFromUri(currentUri, index + 1), importedText, true));
         } catch (_) {
         }
       }
 
       if (importedProfiles.length === 0) {
-        this.errorText = this.t('importedEmpty');
+        this.errorText = invalidCount > 0 ? this.t('importRuleInvalid') : this.t('importedEmpty');
+        this.setConfigFeedback(this.errorText);
         return;
       }
 
@@ -4462,11 +5909,11 @@ struct Index {
   // unmarshals this onto its built-in defaults, so we only emit the loopback
   // binds, our upstreams, enabled online subscriptions, and the user rules.
   // (Thin validation slice: DNS rewrites / advanced DNS are not wired here yet.)
-  private buildAghProxyYaml(dnsPort: number, httpPort: number): string {
+  private buildAghProxyYaml(dnsPort: number, httpPort: number, upstreamSource?: string): string {
     const yamlQuote = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
     const upstreams: string[] = [];
-    for (const raw of this.upstreamDnsInput.split(/[\s,;\n]+/)) {
+    for (const raw of (upstreamSource ?? this.upstreamDnsInput).split(/[\s,;\n]+/)) {
       const ip: string = raw.trim();
       if (ip.length > 0 && !upstreams.includes(ip)) {
         upstreams.push(ip);
@@ -4497,7 +5944,8 @@ struct Index {
       : 'user_rules: []';
 
     const enabledSubs: FilterSubscription[] = this.filterSubscriptions.filter(
-      (s: FilterSubscription) => s.enabled && typeof s.url === 'string' && s.url.trim().length > 0);
+      (s: FilterSubscription) => s.enabled && s.state !== 'failed'
+        && typeof s.url === 'string' && s.url.trim().length > 0);
     let filtersBlock: string;
     if (enabledSubs.length === 0) {
       filtersBlock = 'filters: []';
@@ -4618,11 +6066,14 @@ struct Index {
     this.errorText = '';
     try {
       this.writeTextFile(this.rulesFilePath, this.rulesText);
-      this.writeTextFile(this.upstreamDnsFilePath, this.upstreamDnsInput.trim());
+      this.writeUpstreamFile();
+      // Auto mode (proxy runs in-process, so resolve the system/router DNS here);
+      // otherwise the manual list. Full mode reads this via buildAghProxyYaml below.
+      const upstreamSource: string = await this.resolveProxyUpstream(this.upstreamDnsInput.trim());
+      this.appendDebugLog(`==/vpn_ui/dns_proxy_upstream/ auto=${this.upstreamAutoEnabled} upstream=${upstreamSource.replace(/\n/g, ',')}`);
       // The lightweight native engine only speaks plain Do53, so strip any
-      // encrypted/advanced entries left over from full mode before handing the
-      // list to it; full mode reads upstreamDnsInput directly via buildAghProxyYaml.
-      const liteUpstreams: string[] = this.splitUpstreamEntries(this.upstreamDnsInput)
+      // encrypted/advanced entries before handing the list to it.
+      const liteUpstreams: string[] = this.splitUpstreamEntries(upstreamSource)
         .filter((e: string) => this.isValidUpstreamIp(e));
       const upstream: string = liteUpstreams.length > 0
         ? liteUpstreams.join('\n')
@@ -4650,7 +6101,7 @@ struct Index {
         const cfgPath: string = `${vpnDir}/${AGH_CONFIG_FILE_NAME}`;
         const workDir: string = `${vpnDir}/${AGH_WORK_DIR_NAME}`;
         const logPath: string = `${vpnDir}/${AGH_LOG_FILE_NAME}`;
-        this.writeTextFile(cfgPath, this.buildAghProxyYaml(port, httpPort));
+        this.writeTextFile(cfgPath, this.buildAghProxyYaml(port, httpPort, upstreamSource));
         try {
           fileIo.mkdirSync(workDir, true);
         } catch (_) {
@@ -4676,6 +6127,7 @@ struct Index {
       this.dnsProxyRunning = true;
       this.dnsProxyDesiredRunning = true;
       this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${port}`);
+      this.startProxyNotify();
       this.appendDebugLog(`==/vpn_ui/dns_proxy_started/ engine=${this.fullModeEnabled ? 'full' : 'lite'} port=${port} http=${httpPort}`);
       if (port !== configuredPort) {
         try {
@@ -4708,6 +6160,13 @@ struct Index {
       if (running && this.dnsProxyStatusText.length === 0) {
         this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${this.displayedDnsPort()}`);
       }
+      // Adopt a proxy that's running but whose notification publisher isn't (e.g.
+      // the UI was re-created while the keep-alive task kept the proxy alive).
+      if (running && this.persistentNotificationEnabled && this.proxyNotifyTimer < 0) {
+        this.startProxyNotify();
+      } else if (!running && this.proxyNotifyTimer >= 0) {
+        this.stopProxyNotify();
+      }
     } catch (_) {
     }
   }
@@ -4728,6 +6187,7 @@ struct Index {
       this.dnsProxyRunning = false;
       this.dnsProxyActivePort = 0;
       this.aghActiveHttpPort = 0;
+      this.stopProxyNotify();
       this.dnsProxyStatusText = this.t('dnsProxyStoppedStatus');
       this.appendDebugLog('==/vpn_ui/dns_proxy_stopped/');
     } catch (err) {
@@ -5070,6 +6530,8 @@ struct Index {
       updatedAt: snapshot.updatedAt,
       tunFd: normalizedTunFd,
       nativeStats: snapshot.nativeStats,
+      effectiveUpstream: snapshot.effectiveUpstream,
+      upstreamAuto: snapshot.upstreamAuto,
     };
   }
 
@@ -5516,6 +6978,26 @@ struct Index {
       })
   }
 
+  // One segment of the persistent-notification refresh-interval selector (1-5s).
+  @Builder
+  private NotifyIntervalSegButton(seconds: number) {
+    Button(`${seconds}${this.language === 'en' ? 's' : '秒'}`)
+      .type(ButtonType.Normal)
+      .layoutWeight(1)
+      .height(36)
+      .fontSize(13)
+      .fontWeight(this.notificationRefreshSeconds === seconds ? FontWeight.Bold : FontWeight.Medium)
+      .backgroundColor(this.notificationRefreshSeconds === seconds ? this.cardSurfaceTone() : Color.Transparent)
+      .fontColor(this.notificationRefreshSeconds === seconds ? this.accentBlueTone() : this.secondaryTextColor())
+      .borderRadius(11)
+      .shadow(this.notificationRefreshSeconds === seconds
+        ? { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 }
+        : { radius: 0, color: '#00000000' })
+      .onClick(() => {
+        this.setNotificationRefreshSeconds(seconds);
+      })
+  }
+
   // Leading icon + title + description block for a settings list row. The
   // trailing control (chevron / Toggle) is placed by the caller as a sibling.
   @Builder
@@ -5539,7 +7021,67 @@ struct Index {
     .alignItems(VerticalAlign.Center)
   }
 
-  // One recommended online-list row with a Subscribe / Subscribed button.
+  // One of the user's active subscriptions: tap the card to preview its content
+  // (cache first). The switch enables/disables the list (a failed list defaults
+  // off); the 🗑 button removes it after a confirmation. Disabling never deletes.
+  @Builder
+  private MySubscriptionRow(s: FilterSubscription) {
+    Row({ space: 10 }) {
+      Column({ space: 2 }) {
+        Text(s.name)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(s.url)
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (this.subStatusText(s).length > 0) {
+          Text(this.subStatusText(s))
+            .fontSize(11)
+            .fontColor(this.subStatusColor(s))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Toggle({ type: ToggleType.Switch, isOn: s.enabled })
+        .selectedColor(this.accentBlueTone())
+        .onChange((value: boolean) => {
+          // Enable/disable only — removal is the 🗑 button. Enabling (re)downloads
+          // and validates; a failure flips it back off.
+          this.toggleFilterSubscription(s.id, value);
+        })
+      Button('🗑')
+        .type(ButtonType.Circle)
+        .width(34)
+        .height(34)
+        .fontSize(15)
+        .backgroundColor(this.softRedTone())
+        .fontColor(this.isDarkModeActive() ? '#FF8A8A' : '#B42318')
+        .onClick(() => {
+          this.confirmDeleteSubscription(s);
+        })
+    }
+    .width('100%')
+    .padding(14)
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(16)
+    .shadow({ radius: 12, color: this.cardShadowTone() })
+    .margin({ bottom: 10 })
+    // Tapping the card (anywhere but the switch / delete button) previews content.
+    .onClick(() => {
+      this.viewSubscriptionContent(s);
+    })
+  }
+
+  // One recommended online-list row: tap the text to preview its content, and the
+  // button subscribes (or unsubscribes when already subscribed).
   @Builder
   private RecommendedPresetRow(preset: SubscriptionPreset) {
     Row({ space: 10 }) {
@@ -5555,14 +7097,20 @@ struct Index {
           .fontColor(this.secondaryTextColor())
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (this.subStatusTextByUrl(preset.url).length > 0) {
+          Text(this.subStatusTextByUrl(preset.url))
+            .fontSize(11)
+            .fontColor(this.subStatusColorByUrl(preset.url))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
 
       Button(this.subscriptionPresetActive(preset.url)
-          ? this.tri('Subscribed', '已订阅', '已訂閱')
+          ? this.tri('Subscribed ✕', '已订阅 ✕', '已訂閱 ✕')
           : this.tri('Subscribe', '订阅', '訂閱'))
-        .enabled(!this.subscriptionPresetActive(preset.url))
         .height(32)
         .padding({ left: 14, right: 14 })
         .fontSize(12)
@@ -5573,7 +7121,7 @@ struct Index {
           ? this.secondaryTextColor() : '#FFFFFF')
         .borderRadius(8)
         .onClick(() => {
-          this.addSubscriptionPreset(preset);
+          this.toggleSubscriptionPreset(preset);
         })
     }
     .width('100%')
@@ -5582,6 +7130,10 @@ struct Index {
     .borderRadius(16)
     .shadow({ radius: 12, color: this.cardShadowTone() })
     .margin({ bottom: 10 })
+    // Tapping the card (anywhere but the button) previews the list content.
+    .onClick(() => {
+      this.viewPresetContent(preset);
+    })
   }
 
   // Preview of the most recent queries (independent of the list's active
@@ -6376,9 +7928,16 @@ struct Index {
                   .fontColor(this.mutedTextColor())
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(this.tri('👁 Tap to preview content', '👁 点按查看订阅内容', '👁 點按查看訂閱內容'))
+                  .fontSize(11)
+                  .fontColor(this.accentBlueTone())
               }
               .layoutWeight(1)
               .alignItems(HorizontalAlign.Start)
+              // Tap the text area to fetch and browse the list's actual content.
+              .onClick(() => {
+                this.viewSubscriptionContent(s);
+              })
 
               Toggle({ type: ToggleType.Switch, isOn: s.enabled })
                 .onChange((value: boolean) => {
@@ -6407,6 +7966,125 @@ struct Index {
       .scrollBar(BarState.Off)
       .cachedCount(8)
       .divider({ strokeWidth: 8, color: Color.Transparent })
+    }
+    .width('100%')
+    .height('100%')
+    .padding({
+      left: 14,
+      right: 14,
+      top: Math.max(18, this.avoidPaddingTop + 12),
+      bottom: Math.max(18, this.avoidPaddingBottom + 12)
+    })
+    .backgroundColor(this.sheetSurfaceTone())
+  }
+
+  @Builder
+  private SubContentSheet() {
+    Column({ space: 12 }) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text(this.subContentTitle.length > 0
+            ? this.subContentTitle
+            : this.tri('Subscription content', '订阅内容', '訂閱內容'))
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.subContentUrl)
+            .fontSize(11)
+            .fontColor(this.mutedTextColor())
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Button(this.tri('Close', '关闭', '關閉'))
+          .fontSize(13)
+          .height(36)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(12)
+          .onClick(() => {
+            this.closeSubContentSheet();
+          })
+      }
+      .width('100%')
+
+      Row({ space: 10 }) {
+        Text(this.subContentLoading
+          ? this.tri('Loading…', '加载中…', '載入中…')
+          : (this.subContentLineCount > 0
+              ? this.tri(`${this.subContentLineCount} lines`,
+                  `共 ${this.subContentLineCount} 行`, `共 ${this.subContentLineCount} 行`)
+              : ''))
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+          .layoutWeight(1)
+        Button(this.tri('🔄 Refresh', '🔄 刷新', '🔄 刷新'))
+          .fontSize(12)
+          .height(34)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(10)
+          .enabled(!this.subContentLoading)
+          .onClick(() => {
+            void this.refreshSubContent();
+          })
+        Button(this.tri('Open in browser', '浏览器打开', '瀏覽器開啟'))
+          .fontSize(12)
+          .height(34)
+          .backgroundColor(this.coolChipSurfaceTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(10)
+          .onClick(() => {
+            this.openSubContentInBrowser();
+          })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      if (this.subContentLoading) {
+        Column() {
+          LoadingProgress()
+            .width(44)
+            .height(44)
+            .color(this.accentBlueTone())
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+      } else if (this.subContentError.length > 0) {
+        Column() {
+          Text(this.subContentError)
+            .fontSize(14)
+            .lineHeight(21)
+            .fontColor(this.isDarkModeActive() ? '#FF8A8A' : '#D14343')
+            .width('100%')
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Start)
+      } else {
+        Scroll() {
+          Text(this.subContentText)
+            .fontSize(12)
+            .lineHeight(18)
+            .fontColor(this.primaryTextColor())
+            .textAlign(TextAlign.Start)
+            .width('100%')
+            .copyOption(CopyOptions.LocalDevice)
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .align(Alignment.TopStart)
+        .scrollBar(BarState.Auto)
+        .padding(12)
+        .backgroundColor(this.sheetSecondarySurfaceTone())
+        .borderRadius(14)
+        .border({ width: 1, color: this.sheetBorderTone() })
+      }
     }
     .width('100%')
     .height('100%')
@@ -7697,6 +9375,86 @@ struct Index {
           .margin({ top: 4 })
         }
 
+        // ===== My subscriptions (imported + subscribed online lists) =====
+        Column({ space: 10 }) {
+          Row({ space: 10 }) {
+            Column({ space: 2 }) {
+              Text(this.tri('📡 My subscriptions', '📡 我的订阅', '📡 我的訂閱'))
+                .fontSize(11)
+                .fontWeight(FontWeight.Bold)
+                .letterSpacing(1.5)
+                .fontColor(this.selectedChipTextTone())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            // Refresh = re-download all lists; Check = re-download + report how many
+            // are usable. Both update each list's cache and ✓/✗ status.
+            if (this.filterSubscriptions.length > 0) {
+              Text(this.tri('🔄 Refresh', '🔄 刷新', '🔄 刷新'))
+                .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.selectedChipTextTone())
+                .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+                .backgroundColor(this.coolNeutralChipSurfaceTone())
+                .borderRadius(10)
+                .border({ width: 1, color: this.cardBorderTone() })
+                .onClick(() => {
+                  void this.refreshAllSubscriptions(false);
+                })
+              Text(this.tri('🩺 Check', '🩺 检测', '🩺 檢測'))
+                .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.selectedChipTextTone())
+                .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+                .backgroundColor(this.coolNeutralChipSurfaceTone())
+                .borderRadius(10)
+                .border({ width: 1, color: this.cardBorderTone() })
+                .margin({ left: 6 })
+                .onClick(() => {
+                  void this.refreshAllSubscriptions(true);
+                })
+            }
+
+            if (this.filterSubscriptions.length > 4) {
+              Text(this.showAllMySubscriptions
+                  ? this.tri('Collapse ▲', '收起 ▲', '收起 ▲')
+                  : this.tri(`Show all (${this.filterSubscriptions.length}) ▼`,
+                      `全部 (${this.filterSubscriptions.length}) ▼`,
+                      `全部 (${this.filterSubscriptions.length}) ▼`))
+                .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.selectedChipTextTone())
+                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                .backgroundColor(this.coolNeutralChipSurfaceTone())
+                .borderRadius(10)
+                .border({ width: 1, color: this.cardBorderTone() })
+                .onClick(() => {
+                  this.showAllMySubscriptions = !this.showAllMySubscriptions;
+                })
+            }
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+
+          if (this.filterSubscriptions.length === 0) {
+            Text(this.tri('No subscriptions yet. Import a config, or subscribe to a list below.',
+              '暂无订阅。可导入配置，或在下方「推荐规则库」订阅。',
+              '尚無訂閱。可匯入設定，或在下方「推薦規則庫」訂閱。'))
+              .fontSize(13)
+              .fontColor(this.secondaryTextColor())
+              .width('100%')
+              .padding({ top: 6, bottom: 6 })
+          } else {
+            ForEach(this.mySubscriptionsToShow(), (s: FilterSubscription) => {
+              this.MySubscriptionRow(s)
+            }, (s: FilterSubscription) => `${s.id}`)
+          }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .margin({ top: 8 })
+
         // ===== Recommended rule libraries (collapsible, wired to real subscriptions) =====
         Column({ space: 10 }) {
           Row({ space: 10 }) {
@@ -7906,6 +9664,78 @@ struct Index {
                 .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.secondaryTextColor())
                 .width('100%')
                 .margin({ top: 4, bottom: 4 })
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding({ left: 16, right: 16, top: 6, bottom: 6 })
+          .backgroundColor(this.elevatedSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(22)
+          .border({ width: 1, color: this.cardBorderTone() })
+          .shadow({ radius: 12, color: this.cardShadowTone() })
+          .linearGradient({
+            angle: 145,
+            colors: this.isDarkModeActive()
+              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+          })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+
+        // 🔔 通知栏
+        Column({ space: 8 }) {
+          this.SettingsGroupTitle({ text: this.t('notificationGroup') })
+          Column() {
+            Row({ space: 12 }) {
+              this.SettingsIconText({ glyph: '🔔', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+                title: this.t('persistentNotification'), desc: this.t('persistentNotificationHint') })
+              Toggle({ type: ToggleType.Switch, isOn: this.persistentNotificationEnabled })
+                .onChange((value: boolean) => {
+                  this.onPersistentNotificationChange(value).catch((err: BusinessError) => {
+                    this.errorText = this.errorMessage(err);
+                  });
+                })
+            }
+            .width('100%')
+            .padding({ top: 10, bottom: 10 })
+            .alignItems(VerticalAlign.Center)
+
+            if (this.persistentNotificationEnabled) {
+              Divider().strokeWidth(1).color(this.cardBorderTone())
+
+              Row({ space: 12 }) {
+                Column({ space: 2 }) {
+                  Text(this.t('notificationRefreshInterval'))
+                    .fontSize(15)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor(this.primaryTextColor())
+                  Text(this.t('notificationRefreshIntervalHint'))
+                    .fontSize(12)
+                    .lineHeight(17)
+                    .fontColor(this.secondaryTextColor())
+                }
+                .layoutWeight(1)
+                .alignItems(HorizontalAlign.Start)
+              }
+              .width('100%')
+              .padding({ top: 10, bottom: 6 })
+              .alignItems(VerticalAlign.Center)
+
+              Row({ space: 5 }) {
+                this.NotifyIntervalSegButton(1)
+                this.NotifyIntervalSegButton(2)
+                this.NotifyIntervalSegButton(3)
+                this.NotifyIntervalSegButton(4)
+                this.NotifyIntervalSegButton(5)
+              }
+              .width('100%')
+              .padding(5)
+              .margin({ bottom: 6 })
+              .backgroundColor(this.softPanelTone())
+              .borderRadius(14)
+              .border({ width: 1, color: this.cardBorderTone() })
             }
           }
           .width('100%')
@@ -8344,10 +10174,112 @@ struct Index {
         .width('100%')
         .alignItems(HorizontalAlign.Start)
 
+        // ===== 💾 配置备份 =====
+        Column({ space: 8 }) {
+          this.SettingsGroupTitle({ text: this.t('configBackupGroup') })
+          Column() {
+            Row({ space: 12 }) {
+              this.SettingsIconText({ glyph: '⬇', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+                title: this.t('importConfig'), desc: this.t('importConfigHint') })
+              Text('›')
+                .fontSize(20)
+                .fontColor(this.secondaryTextColor())
+            }
+            .width('100%')
+            .padding({ top: 10, bottom: 10 })
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => {
+              this.importConfigFile().catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            })
+
+            Divider().strokeWidth(1).color(this.cardBorderTone())
+
+            Row({ space: 12 }) {
+              this.SettingsIconText({ glyph: '⬆', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+                title: this.t('exportConfig'), desc: this.t('exportConfigHint') })
+              Text('›')
+                .fontSize(20)
+                .fontColor(this.secondaryTextColor())
+            }
+            .width('100%')
+            .padding({ top: 10, bottom: 10 })
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => {
+              this.exportConfigFile().catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            })
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding({ left: 16, right: 16, top: 6, bottom: 6 })
+          .backgroundColor(this.elevatedSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(22)
+          .border({ width: 1, color: this.cardBorderTone() })
+          .shadow({ radius: 12, color: this.cardShadowTone() })
+          .linearGradient({
+            angle: 145,
+            colors: this.isDarkModeActive()
+              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+          })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+
         // ===== 🔗 上游 DNS =====
         Column({ space: 8 }) {
           this.SettingsGroupTitle({ text: this.tri('🔗 Upstream DNS', '🔗 上游 DNS', '🔗 上游 DNS') })
           Column({ space: 10 }) {
+            // Auto upstream: follow the system/router DNS (VPN mode). The manual
+            // list below stays editable and is used as the fallback.
+            Row({ space: 12 }) {
+              Column({ space: 2 }) {
+                Text(this.t('upstreamAutoTitle'))
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.primaryTextColor())
+                Text(this.t('upstreamAutoHint'))
+                  .fontSize(12)
+                  .lineHeight(17)
+                  .fontColor(this.secondaryTextColor())
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+              .opacity(this.upstreamAutoAvailable() ? 1 : 0.4)
+              Toggle({ type: ToggleType.Switch, isOn: this.upstreamAutoEnabled && this.upstreamAutoAvailable() })
+                .enabled(this.upstreamAutoAvailable())
+                .opacity(this.upstreamAutoAvailable() ? 1 : 0.4)
+                .onChange((value: boolean) => {
+                  this.onUpstreamAutoChange(value);
+                })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
+
+            // Proxy mode can't follow the system DNS — explain why it's greyed out.
+            if (!this.upstreamAutoAvailable()) {
+              Text(this.tri('Unavailable in DNS-proxy mode — the manual upstream below is used.',
+                '纯 DNS 代理模式下不可用，将使用下方手动填写的上游。',
+                '純 DNS 代理模式下不可用，將使用下方手動填寫的上游。'))
+                .fontSize(12)
+                .lineHeight(17)
+                .fontColor(this.mutedTextColor())
+                .width('100%')
+            } else if (this.upstreamAutoEnabled) {
+              Text(this.effectiveUpstreamDisplay().length > 0
+                ? this.t('upstreamAutoCurrent', this.effectiveUpstreamDisplay())
+                : this.t('upstreamAutoWaiting'))
+                .fontSize(12)
+                .lineHeight(17)
+                .fontColor(this.accentBlueTone())
+                .width('100%')
+              Divider().strokeWidth(1).color(this.cardBorderTone())
+            }
+
             Text(this.t('upstreamDnsHint'))
               .fontSize(12)
               .lineHeight(18)
@@ -9189,6 +11121,14 @@ struct Index {
       .height('100%')
       if (deviceInfo.sdkApiVersion < 23) {
         this.ClassicTabHost()
+      }
+
+      // Subscription content viewer — a plain top-of-Stack overlay (like the
+      // disclaimer) instead of a bindContentCover. A second modal binding on the
+      // root column (which already hosts bindSheet) was being dropped, so taps did
+      // nothing; an overlay rendered here always shows, from any tab.
+      if (this.showSubContentSheet) {
+        this.SubContentSheet()
       }
 
       // First-launch disclaimer gate sits on top of everything.

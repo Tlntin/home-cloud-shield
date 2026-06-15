@@ -265,6 +265,26 @@
     { "name": "customAllowRulePlaceholder", "value": "Enter a domain or full rule. Domains become @@||domain^ automatically." },
     { "name": "confirmDeleteRuleLine", "value": "Remove this rule?" },
     { "name": "noCustomRulesHint", "value": "No rules yet. Enter a domain and tap Add. Use the button on the right to remove a single rule." },
-    { "name": "swipeAgainToExit", "value": "Swipe again to exit" }
+    { "name": "swipeAgainToExit", "value": "Swipe again to exit" },
+    { "name": "notificationGroup", "value": "🔔 Notification" },
+    { "name": "persistentNotification", "value": "Persistent notification" },
+    { "name": "persistentNotificationHint", "value": "Keep a notification showing blocked / allowed / total DNS counts" },
+    { "name": "notificationRefreshInterval", "value": "Refresh interval" },
+    { "name": "notificationRefreshIntervalHint", "value": "How often the notification updates" },
+    { "name": "notificationTitle", "value": "Home Cloud Shield · DNS protection on" },
+    { "name": "notificationTotal", "value": "Total" },
+    { "name": "configBackupGroup", "value": "💾 Config backup" },
+    { "name": "importConfig", "value": "Import config" },
+    { "name": "importConfigHint", "value": "Import sources/blocked/allowed/redirects from JSON (AdGuard-compatible), merged" },
+    { "name": "exportConfig", "value": "Export config" },
+    { "name": "exportConfigHint", "value": "Export the current config to a JSON file" },
+    { "name": "configImportInvalid", "value": "Couldn't read the config file" },
+    { "name": "configImportedSummary", "value": "Imported: %d sources · %d blocked · %d allowed · %d redirects · %d rule files" },
+    { "name": "configImportSkipped", "value": " · skipped %d unusable source URL(s)" },
+    { "name": "upstreamAutoTitle", "value": "Auto upstream DNS" },
+    { "name": "upstreamAutoHint", "value": "Follow the system/router-provided DNS (better for LAN domains, lower latency); falls back to the manual DNS below. VPN mode only." },
+    { "name": "upstreamAutoCurrent", "value": "Current upstream: %s" },
+    { "name": "upstreamAutoWaiting", "value": "Shows the DNS in use once filtering starts" },
+    { "name": "importRuleInvalid", "value": "Not a valid rule list. For a config JSON, use \"Import config\" instead." }
   ]
 }
