@@ -223,10 +223,10 @@ home_cloud_shield/
 
 ## 你可能感兴趣的其它 App
 
-同作者的其它 HarmonyOS 应用：
+同作者的其它 HarmonyOS 应用（点击图标即可直达应用商店下载）：
 
-| 应用 | 一句话介绍 | 链接 |
-| --- | --- | --- |
-| **听澜盒** | 连接私人 Navidrome 音乐服务器的智能播放器：每日更新的丰富个性化推荐，支持下载与边下边播、元数据缓存减少在线请求、多服务器智能切换 | [官网](https://music.http5.cn/) ｜ [应用商店](https://appgallery.huawei.com/app/detail?id=com.tlntin.sonawave&channelId=SHARE&source=appshare) |
-| **frp 助手** | 鸿蒙版 frp 内网穿透工具：多配置导入、一键启停、实时日志，数据全部保留在本地 | [官网](https://frp.http5.cn/) ｜ [应用商店](https://appgallery.huawei.com/app/detail?id=com.tlntin.frp&channelId=SHARE&source=appshare) |
-| **栖云盒** | 鸿蒙端的 Home Assistant 管理应用，随时随地掌控你的智能家居 | [应用商店](https://appgallery.huawei.com/app/detail?id=com.tlntin.homecloudbox&channelId=SHARE&source=appshare) |
+| 应用 | 一句话介绍 | 官网 | 下载 |
+| :---: | --- | :---: | :---: |
+| <a href="https://appgallery.huawei.com/app/detail?id=com.tlntin.sonawave&channelId=SHARE&source=appshare"><img src="./images/apps/sonawave.png" width="64" alt="听澜盒" /></a><br />**听澜盒** | 多音乐源智能播放器：可连接 **Navidrome / Subsonic / Emby / 飞牛音乐（fnOS） / WebDAV**，也能不用服务器直接扫描播放手机本地音频；每日更新的个性化推荐、逐字歌词与主题换肤、下载与边下边播、元数据缓存减少在线请求、多服务器自动竞速切换 | [music.http5.cn](https://music.http5.cn/) | [应用商店](https://appgallery.huawei.com/app/detail?id=com.tlntin.sonawave&channelId=SHARE&source=appshare) |
+| <a href="https://appgallery.huawei.com/app/detail?id=com.tlntin.frp&channelId=SHARE&source=appshare"><img src="./images/apps/frp.png" width="64" alt="frp 助手" /></a><br />**frp 助手** | 鸿蒙版 frp 内网穿透工具：多配置导入、一键启停、实时日志，数据全部保留在本地 | [frp.http5.cn](https://frp.http5.cn/) | [应用商店](https://appgallery.huawei.com/app/detail?id=com.tlntin.frp&channelId=SHARE&source=appshare) |
+| <a href="https://appgallery.huawei.com/app/detail?id=com.tlntin.homecloudbox&channelId=SHARE&source=appshare"><img src="./images/apps/home-cloud-box.png" width="64" alt="栖云盒" /></a><br />**栖云盒** | 鸿蒙端的 Home Assistant 管理应用，随时随地掌控你的智能家居 | [box.http5.cn](https://box.http5.cn/) | [应用商店](https://appgallery.huawei.com/app/detail?id=com.tlntin.homecloudbox&channelId=SHARE&source=appshare) |

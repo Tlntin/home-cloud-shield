@@ -223,10 +223,10 @@ This repository is distributed under `GPL-3.0-only` (it contains a ported and mo
 
 ## Other Apps You May Like
 
-Other HarmonyOS apps by the same author:
+Other HarmonyOS apps by the same author (tap an icon to open it in AppGallery):
 
-| App | One-liner | Links |
-| --- | --- | --- |
-| **SonaWave** | A smart player for your private Navidrome music server — rich personalized recommendations refreshed daily, downloads with play-while-downloading, metadata caching for fewer online requests, and smart multi-server switching | [Website](https://music.http5.cn/) \| [AppGallery](https://appgallery.huawei.com/app/detail?id=com.tlntin.sonawave&channelId=SHARE&source=appshare) |
-| **frp Assistant** | An frp tunneling tool for HarmonyOS: import multiple configs, one-tap start/stop, live logs, all data kept local | [Website](https://frp.http5.cn/) \| [AppGallery](https://appgallery.huawei.com/app/detail?id=com.tlntin.frp&channelId=SHARE&source=appshare) |
-| **Home Cloud Box** | A Home Assistant management app for HarmonyOS — control your smart home anywhere | [AppGallery](https://appgallery.huawei.com/app/detail?id=com.tlntin.homecloudbox&channelId=SHARE&source=appshare) |
+| App | One-liner | Website | Download |
+| :---: | --- | :---: | :---: |
+| <a href="https://appgallery.huawei.com/app/detail?id=com.tlntin.sonawave&channelId=SHARE&source=appshare"><img src="./images/apps/sonawave.png" width="64" alt="SonaWave" /></a><br />**SonaWave** | A smart player for many music sources — **Navidrome / Subsonic / Emby / fnOS Music / WebDAV** — or no server at all: scan and play the audio files on your phone. Daily personalized recommendations, karaoke lyrics and theme skins, downloads with play-while-downloading, metadata caching for fewer online requests, and smart multi-server switching | [music.http5.cn](https://music.http5.cn/) | [AppGallery](https://appgallery.huawei.com/app/detail?id=com.tlntin.sonawave&channelId=SHARE&source=appshare) |
+| <a href="https://appgallery.huawei.com/app/detail?id=com.tlntin.frp&channelId=SHARE&source=appshare"><img src="./images/apps/frp.png" width="64" alt="frp Assistant" /></a><br />**frp Assistant** | An frp tunneling tool for HarmonyOS: import multiple configs, one-tap start/stop, live logs, all data kept local | [frp.http5.cn](https://frp.http5.cn/) | [AppGallery](https://appgallery.huawei.com/app/detail?id=com.tlntin.frp&channelId=SHARE&source=appshare) |
+| <a href="https://appgallery.huawei.com/app/detail?id=com.tlntin.homecloudbox&channelId=SHARE&source=appshare"><img src="./images/apps/home-cloud-box.png" width="64" alt="Home Cloud Box" /></a><br />**Home Cloud Box** | A Home Assistant management app for HarmonyOS — control your smart home anywhere | [box.http5.cn](https://box.http5.cn/) | [AppGallery](https://appgallery.huawei.com/app/detail?id=com.tlntin.homecloudbox&channelId=SHARE&source=appshare) |
