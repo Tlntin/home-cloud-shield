@@ -124,6 +124,16 @@ const FILTER_MODE_LIGHTWEIGHT = 'lightweight';
 const WANT_AGH_FILTERS_JSON = 'aghFiltersJson';
 const WANT_AGH_REWRITES_JSON = 'aghRewritesJson';
 const WANT_AGH_ADVANCED_JSON = 'aghAdvancedJson';
+// Per-app routing (see data/AppSplit.ets): 'off' | 'bypass' | 'only', plus the
+// enabled bundle names as a JSON string array.
+const WANT_APP_SPLIT_MODE = 'appSplitMode';
+const WANT_APP_SPLIT_BUNDLES = 'appSplitBundles';
+// Live copy of the same settings, written by the UI on every change. The
+// extension is a long-lived instance — a second startVpnExtensionAbility does
+// not re-run onCreate, so Want params alone would never pick up edits made
+// while it runs. Watching this file lets per-app changes rebuild the tun live.
+const APP_SPLIT_FILE_NAME = 'app_split.json';
+const APP_SPLIT_MAX_BUNDLES = 255;
 const LEGACY_DEFAULT_RULES_TEXT = [
   '! AdGuard-style DNS rules',
   '! Supported examples:',
@@ -172,6 +182,12 @@ interface StatusSnapshot {
 // Persistent-notification config written by the UI (vpn/notify.json). Labels are
 // resolved against the in-app language override on the UI side and passed through
 // verbatim, so this process never needs to localize.
+// vpn/app_split.json, written by the UI (see APP_SPLIT_FILE_NAME).
+interface AppSplitFile {
+  mode?: string;
+  bundles?: Object[];
+}
+
 interface NotifyConfig {
   enabled: boolean;
   refreshSeconds: number;
@@ -235,6 +251,13 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private aghAdvancedJson: string = '';
   private aghHttpPort: number = AGH_HTTP_PORT_DEFAULT;
   private aghWebEnabled: boolean = false;
+  private appSplitMode: string = 'off';
+  private appSplitBundles: string[] = [];
+  private appSplitFilePath: string = '';
+  private lastAppSplitSignature: string = '';
+  // Set when app_split.json changed the effective lists; onNetworkChanged then
+  // rebuilds the tun even if the underlying DNS is unchanged.
+  private appSplitDirty: boolean = false;
   private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   private logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   private logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
@@ -338,6 +361,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     const httpPort: number = this.wantNumberParam(want, WANT_AGH_HTTP_PORT, AGH_HTTP_PORT_DEFAULT);
     this.aghHttpPort = (httpPort >= 1024 && httpPort <= 65535) ? httpPort : AGH_HTTP_PORT_DEFAULT;
     this.aghWebEnabled = this.wantBooleanParam(want, WANT_AGH_WEB_ENABLED, false);
+    this.appSplitFilePath = `${vpnDir}/${APP_SPLIT_FILE_NAME}`;
+    this.parseAppSplit(want);
     this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
     this.logRetentionDays = this.wantNumberParam(want, WANT_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS);
     this.logMaxSizeMb = this.wantNumberParam(want, WANT_LOG_MAX_SIZE_MB, DEFAULT_LOG_MAX_SIZE_MB);
@@ -564,7 +589,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       routes.push(this.buildHostRoute(ip));
     });
 
-    return {
+    const config: vpnExtension.VpnConfig = {
       addresses: [{
         address: {
           address: TUN_ADDRESS_IP,
@@ -583,8 +608,106 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       dnsAddresses: [DNS_SERVER_IP, DNS_SERVER_IPV6],
       isIPv4Accepted: true,
       isIPv6Accepted: true,
-      blockedApplications: [APP_BUNDLE_NAME],
     };
+    // Our own bundle must never route through the tun: the upstream forwarding
+    // sockets would loop back into the filter. In 'only' mode it is excluded
+    // implicitly (not in the trusted list); otherwise it is always blocked.
+    if (this.appSplitMode === 'only') {
+      config.trustedApplications = this.appSplitBundles;
+    } else if (this.appSplitMode === 'bypass') {
+      config.blockedApplications = [APP_BUNDLE_NAME].concat(this.appSplitBundles);
+    } else {
+      config.blockedApplications = [APP_BUNDLE_NAME];
+    }
+    return config;
+  }
+
+  // Initial per-app config: the UI's app_split.json when present (always
+  // written before a start), else the Want params.
+  private parseAppSplit(want: Want): void {
+    this.lastAppSplitSignature = this.appSplitFileSignature();
+    const content: string = this.readTextFile(this.appSplitFilePath);
+    if (content.trim().length > 0) {
+      this.loadAppSplitContent(content);
+    } else {
+      this.applyAppSplit(this.wantStringParam(want, WANT_APP_SPLIT_MODE),
+        this.parseBundleList(this.wantStringParam(want, WANT_APP_SPLIT_BUNDLES)));
+    }
+  }
+
+  private loadAppSplitContent(content: string): void {
+    let mode: string = 'off';
+    let bundles: string[] = [];
+    try {
+      const cfg = JSON.parse(content) as AppSplitFile;
+      mode = typeof cfg?.mode === 'string' ? cfg.mode : 'off';
+      bundles = this.sanitizeBundles(Array.isArray(cfg?.bundles) ? cfg.bundles as Object[] : []);
+    } catch (_) {
+    }
+    this.applyAppSplit(mode, bundles);
+  }
+
+  private parseBundleList(raw: string): string[] {
+    try {
+      const parsed: Object = raw.length > 0 ? JSON.parse(raw) as Object : [];
+      return Array.isArray(parsed) ? this.sanitizeBundles(parsed as Object[]) : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  private sanitizeBundles(items: Object[]): string[] {
+    const bundles: string[] = [];
+    for (const item of items) {
+      if (typeof item === 'string' && item.length > 0 && item !== APP_BUNDLE_NAME && !bundles.includes(item)) {
+        bundles.push(item);
+      }
+    }
+    return bundles.slice(0, APP_SPLIT_MAX_BUNDLES);
+  }
+
+  private applyAppSplit(mode: string, bundles: string[]): void {
+    this.appSplitBundles = bundles;
+    // An empty list can't express either mode — 'only' with nothing trusted would
+    // be meaningless — so fall back to whole-device filtering.
+    this.appSplitMode = (mode === 'bypass' || mode === 'only') && bundles.length > 0 ? mode : 'off';
+    hilog.info(DOMAIN, TAG, '==/vpn_ext/app_split/ mode=%{public}s count=%{public}d',
+      this.appSplitMode, this.appSplitBundles.length);
+  }
+
+  private appSplitKey(): string {
+    return `${this.appSplitMode}|${this.appSplitBundles.join(',')}`;
+  }
+
+  private appSplitFileSignature(): string {
+    try {
+      const stat = fileIo.statSync(this.appSplitFilePath);
+      return `${stat.mtime}:${stat.size}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // Detect live per-app edits and rebuild the tun when the effective lists
+  // changed. Goes through onNetworkChanged so it never races a network-change
+  // rebuild.
+  private checkAppSplitReload(): void {
+    const signature: string = this.appSplitFileSignature();
+    if (signature.length === 0 || signature === this.lastAppSplitSignature) {
+      return;
+    }
+    this.lastAppSplitSignature = signature;
+    const previous: string = this.appSplitKey();
+    this.loadAppSplitContent(this.readTextFile(this.appSplitFilePath));
+    if (this.appSplitKey() === previous || this.tunFd < 0) {
+      return;
+    }
+    this.appendDebugLog(`==/vpn_ext/app_split_changed/ mode=${this.appSplitMode} count=${this.appSplitBundles.length}`);
+    this.appSplitDirty = true;
+    this.onNetworkChanged('appSplit').catch((err: BusinessError) => {
+      this.appendDebugLog(`==/vpn_ext/app_split_reapply_error/ ${this.errorMessage(err)}`);
+      this.writeStatus('error', false, this.errorMessage(err));
+    });
   }
 
   // Build a single-host (/32 or /128) tun route for one resolver IP.
@@ -675,7 +798,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       IPV6_PREFIX_LENGTH,
       this.upstreamDnsIp
     );
-    this.appendDebugLog(`==/vpn_ext/config/ tun4=${TUN_ADDRESS_IP} dns4=${DNS_SERVER_IP} route4=${IPV4_ROUTE}/${IPV4_PREFIX_LENGTH} tun6=${TUN_ADDRESS_IPV6} dns6=${DNS_SERVER_IPV6} route6=${IPV6_ROUTE}/${IPV6_PREFIX_LENGTH} upstream=${this.upstreamDnsIp}`);
+    this.appendDebugLog(`==/vpn_ext/config/ tun4=${TUN_ADDRESS_IP} dns4=${DNS_SERVER_IP} route4=${IPV4_ROUTE}/${IPV4_PREFIX_LENGTH} tun6=${TUN_ADDRESS_IPV6} dns6=${DNS_SERVER_IPV6} route6=${IPV6_ROUTE}/${IPV6_PREFIX_LENGTH} upstream=${this.upstreamDnsIp} appSplit=${this.appSplitMode}:${this.appSplitBundles.length}`);
   }
 
   private async setupVpn(): Promise<void> {
@@ -914,7 +1037,13 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
           break;  // VPN not active; nothing to reconfigure
         }
         const underlyingDns: string[] = await this.queryUnderlyingDnsServers();
-        if (underlyingDns.length === 0) {
+        const appSplitChanged: boolean = this.appSplitDirty;
+        this.appSplitDirty = false;
+        if (appSplitChanged) {
+          // Per-app lists are fixed at tun creation; rebuild regardless of DNS.
+          this.appendDebugLog(`==/vpn_ext/app_split_reconfigure/ reason=${reason}`);
+          await this.reapplyVpnConfig();
+        } else if (underlyingDns.length === 0) {
           // No usable default network yet (transient loss / mid-switch). Keep the
           // current routes; a later netAvailable carrying real DNS reconfigures.
           this.appendDebugLog(`==/vpn_ext/net_change_skip_empty/ reason=${reason}`);
@@ -944,6 +1073,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.statusTimer = setInterval(() => {
       this.checkRulesReload();
       this.checkUpstreamReload();
+      this.checkAppSplitReload();
       // Pick up live notify.json edits (toggle / interval / language) and refresh
       // the persistent stats notification. Runs before the idle early-return
       // below so the notification stays live even while the UI isn't watching.

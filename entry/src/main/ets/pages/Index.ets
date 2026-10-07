@@ -8,7 +8,10 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { media } from '@kit.MediaKit';
 import { audio } from '@kit.AudioKit';
-import { hdsMaterial, HdsTabs } from '@kit.UIDesignKit';
+import {
+  hdsMaterial, HdsNavDestination, HdsNavDestinationTitleMode, HdsNavigation, HdsNavigationMenuItemOptions,
+  HdsNavigationTitleBarOptions, HdsNavigationTitleMode, HdsTabs
+} from '@kit.UIDesignKit';
 import { SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { geoLocationManager } from '@kit.LocationKit';
 import { webview } from '@kit.ArkWeb';
@@ -16,6 +19,11 @@ import { util } from '@kit.ArkTS';
 import { BLOCKED_SERVICES, BlockedServiceDef } from '../data/BlockedServices';
 import { dnsLogDb, DnsLogRow, DnsLogSummary } from '../data/DnsLogDb';
 import { dnsStats } from '../data/DnsStats';
+import { blurTitleBar } from '../components/BlurTitleBar';
+import {
+  APP_SPLIT_MAX_BUNDLES, APP_SPLIT_PRESETS, AppSplitEntry, AppSplitMode, AppSplitPreset, findAppSplitPreset,
+  isValidBundleName, normalizeAppSplitList, normalizeAppSplitMode
+} from '../data/AppSplit';
 import type { PromptAction } from '@ohos.arkui.UIContext';
 import abilityAccessCtrl, { Permissions } from '@ohos.abilityAccessCtrl';
 import bundleManager from '@ohos.bundle.bundleManager';
@@ -100,12 +108,21 @@ const NOTIFY_CONFIG_FILE_NAME = 'notify.json';
 // home-page cumulative counts + the native session counts at capture time, so
 // the VPN extension can show cumulative numbers that keep ticking in background.
 const NOTIFY_COUNTS_FILE_NAME = 'notify_counts.json';
+// Per-app routing settings mirrored for the running VPN extension, which
+// watches the file and rebuilds the tun on change (must match MyVpnExtAbility).
+const APP_SPLIT_FILE_NAME = 'app_split.json';
 // Must match STATS_NOTIFICATION_ID in MyVpnExtAbility so proxy-mode (UI) and
 // VPN-mode (extension) publish/cancel the same notification.
 const STATS_NOTIFICATION_ID = 10010;
 const DEFAULT_NOTIFICATION_REFRESH_SECONDS = 2;
 const NOTIFICATION_REFRESH_MIN_SECONDS = 1;
 const NOTIFICATION_REFRESH_MAX_SECONDS = 5;
+// DATA_TRANSFER keep-alive progress refresh. The system cancels the task if the
+// progress isn't updated for 10 minutes; once a minute leaves ample margin.
+const DATA_TRANSFER_PROGRESS_INTERVAL_MS = 60000;
+// Sub page names on the "Me" tab's navigation stack.
+const ME_PAGE_SETTINGS = 'settings';
+const ME_PAGE_APP_SPLIT = 'appSplit';
 // Mirror of the extension's idle heartbeat. While the extension may still be
 // idling (right after this page becomes visible, before it notices ui_watch),
 // a "running" snapshot is allowed to be up to a heartbeat old; only once the
@@ -195,7 +212,8 @@ type LanguageKey =
   | 'configBackupGroup' | 'importConfig' | 'importConfigHint' | 'exportConfig' | 'exportConfigHint'
   | 'configImportInvalid' | 'configImportedSummary' | 'configImportSkipped'
   | 'upstreamAutoTitle' | 'upstreamAutoHint' | 'upstreamAutoCurrent' | 'upstreamAutoWaiting'
-  | 'importRuleInvalid';
+  | 'importRuleInvalid'
+  | 'quickImport' | 'dataTransferKeepAlive' | 'dataTransferKeepAliveHint' | 'dataTransferMode' | 'dataTransferNotifyTitle' | 'keepAliveCancelledBySystem' | 'appSplitTitle' | 'appSplitEntryHint' | 'appSplitDesc' | 'appSplitProxyModeNote' | 'appSplitModeOff' | 'appSplitModeBypass' | 'appSplitModeOnly' | 'appSplitModeOffHint' | 'appSplitModeBypassHint' | 'appSplitModeOnlyHint' | 'appSplitCount' | 'appSplitListTitle' | 'appSplitEmpty' | 'appSplitApplying' | 'appSplitAddTitle' | 'appSplitQuickPick' | 'appSplitQuickPickHint' | 'appSplitBundlePlaceholder' | 'appSplitNameLabel' | 'appSplitNamePlaceholder' | 'appSplitAdd' | 'appSplitInvalidBundle' | 'appSplitSelfBundle' | 'appSplitDuplicate' | 'appSplitLimitReached';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -481,6 +499,37 @@ function resolveStringResource(key: LanguageKey): number {
     case 'upstreamAutoCurrent': return $r('app.string.upstreamAutoCurrent').id;
     case 'upstreamAutoWaiting': return $r('app.string.upstreamAutoWaiting').id;
     case 'importRuleInvalid': return $r('app.string.importRuleInvalid').id;
+    case 'quickImport': return $r('app.string.quickImport').id;
+    case 'dataTransferKeepAlive': return $r('app.string.dataTransferKeepAlive').id;
+    case 'dataTransferKeepAliveHint': return $r('app.string.dataTransferKeepAliveHint').id;
+    case 'dataTransferMode': return $r('app.string.dataTransferMode').id;
+    case 'dataTransferNotifyTitle': return $r('app.string.dataTransferNotifyTitle').id;
+    case 'keepAliveCancelledBySystem': return $r('app.string.keepAliveCancelledBySystem').id;
+    case 'appSplitTitle': return $r('app.string.appSplitTitle').id;
+    case 'appSplitEntryHint': return $r('app.string.appSplitEntryHint').id;
+    case 'appSplitDesc': return $r('app.string.appSplitDesc').id;
+    case 'appSplitProxyModeNote': return $r('app.string.appSplitProxyModeNote').id;
+    case 'appSplitModeOff': return $r('app.string.appSplitModeOff').id;
+    case 'appSplitModeBypass': return $r('app.string.appSplitModeBypass').id;
+    case 'appSplitModeOnly': return $r('app.string.appSplitModeOnly').id;
+    case 'appSplitModeOffHint': return $r('app.string.appSplitModeOffHint').id;
+    case 'appSplitModeBypassHint': return $r('app.string.appSplitModeBypassHint').id;
+    case 'appSplitModeOnlyHint': return $r('app.string.appSplitModeOnlyHint').id;
+    case 'appSplitCount': return $r('app.string.appSplitCount').id;
+    case 'appSplitListTitle': return $r('app.string.appSplitListTitle').id;
+    case 'appSplitEmpty': return $r('app.string.appSplitEmpty').id;
+    case 'appSplitApplying': return $r('app.string.appSplitApplying').id;
+    case 'appSplitAddTitle': return $r('app.string.appSplitAddTitle').id;
+    case 'appSplitQuickPick': return $r('app.string.appSplitQuickPick').id;
+    case 'appSplitQuickPickHint': return $r('app.string.appSplitQuickPickHint').id;
+    case 'appSplitBundlePlaceholder': return $r('app.string.appSplitBundlePlaceholder').id;
+    case 'appSplitNameLabel': return $r('app.string.appSplitNameLabel').id;
+    case 'appSplitNamePlaceholder': return $r('app.string.appSplitNamePlaceholder').id;
+    case 'appSplitAdd': return $r('app.string.appSplitAdd').id;
+    case 'appSplitInvalidBundle': return $r('app.string.appSplitInvalidBundle').id;
+    case 'appSplitSelfBundle': return $r('app.string.appSplitSelfBundle').id;
+    case 'appSplitDuplicate': return $r('app.string.appSplitDuplicate').id;
+    case 'appSplitLimitReached': return $r('app.string.appSplitLimitReached').id;
   }
 }
 
@@ -728,10 +777,17 @@ const SUBSCRIPTION_PRESETS: SubscriptionPreset[] = [
   { name: '1Hosts (Lite)', url: 'https://o0.pages.dev/Lite/adblock.txt' },
 ];
 
+// Shape of vpn/app_split.json (see MyVpnExtAbility AppSplitFile).
+interface AppSplitFile {
+  mode: string;
+  bundles: string[];
+}
+
 interface PersistState {
   keepAliveEnabled?: boolean;
   audioKeepAliveEnabled?: boolean;
   locationKeepAliveEnabled?: boolean;
+  dataTransferKeepAliveEnabled?: boolean;
   autoStartFilterEnabled?: boolean;
   persistentNotificationEnabled?: boolean;
   notificationRefreshSeconds?: number;
@@ -755,6 +811,8 @@ interface PersistState {
   dnsRewrites?: DnsRewriteRule[];
   advancedDns?: AdvancedDnsConfig;
   disclaimerAccepted?: boolean;
+  appSplitMode?: string;
+  appSplitList?: AppSplitEntry[];
   currentTab: number;
 }
 
@@ -917,6 +975,13 @@ struct Index {
   @State keepAliveEnabled: boolean = false;
   @State audioKeepAliveEnabled: boolean = true;
   @State locationKeepAliveEnabled: boolean = false;
+  @State dataTransferKeepAliveEnabled: boolean = false;
+  @State appSplitMode: AppSplitMode = 'off';
+  @State appSplitList: AppSplitEntry[] = [];
+  @State showAppSplitAddSheet: boolean = false;
+  @State appSplitBundleInput: string = '';
+  @State appSplitNameInput: string = '';
+  @State appSplitAddError: string = '';
   @State autoStartFilterEnabled: boolean = false;
   // Persistent status-bar notification ("常驻通知栏") showing live filtered /
   // allowed / total DNS counts. Default OFF to save battery (republishing wakes
@@ -1031,7 +1096,6 @@ struct Index {
   @State cacheSizeInput: string = '4';
   @State ratelimitInput: string = '0';
   private aghWebController: webview.WebviewController = new webview.WebviewController();
-  @State showSettingsPage: boolean = false;
   @State showImportMenu: boolean = false;
   @State showRecommendedLibrary: boolean = false;
   @State showAllMySubscriptions: boolean = false;
@@ -1087,6 +1151,8 @@ struct Index {
   private lastUiWatchTouchMs: number = 0;
   private notifyConfigFilePath: string = '';
   private notifyCountsFilePath: string = '';
+  private appSplitFilePath: string = '';
+  private lastAppSplitFileContent: string = '';
   private lastNotifyCountsSignature: string = '';
   // Proxy-mode notification: published by THIS process (no VPN extension exists in
   // DNS-proxy mode). Driven by a timer that runs regardless of page visibility so
@@ -1111,7 +1177,24 @@ struct Index {
   private overrideResManagerLocale: string = '';
   private dnsListScroller: Scroller = new Scroller();
   private domainListScroller: Scroller = new Scroller();
+  // One per scrolling page: HdsNavigation / HdsNavDestination bind to these to
+  // drive the title bar's scroll blur.
+  private homeScroller: Scroller = new Scroller();
+  private configScroller: Scroller = new Scroller();
+  private meScroller: Scroller = new Scroller();
+  private settingsScroller: Scroller = new Scroller();
+  private appSplitScroller: Scroller = new Scroller();
+  // Sub pages of the "Me" tab (settings, per-app routing) live on this stack so
+  // they get the same immersive title bar, back button and swipe-back.
+  private meStack: NavPathStack = new NavPathStack();
   private continuousTaskId: number = -1;
+  // DATA_TRANSFER keep-alive: the system cancels the task unless its live-view
+  // progress notification is refreshed (first update within 10 min), so a timer
+  // republishes it on the notification id returned by startBackgroundRunning.
+  private dataTransferNotificationId: number = -1;
+  private dataTransferTimer: number = -1;
+  private dataTransferTick: number = 0;
+  private continuousTaskListenersOn: boolean = false;
   private accessTokenId: number = -1;
   private avPlayer?: media.AVPlayer;
   private audioSessionManager?: audio.AudioSessionManager;
@@ -1128,8 +1211,10 @@ struct Index {
       this.closeSubContentSheet();
       return true;
     }
-    if (this.showSettingsPage) {
-      this.showSettingsPage = false;
+    // Normally the Navigation consumes back itself; this covers the case where
+    // the event reaches the page first.
+    if (this.meStack.size() > 0) {
+      this.meStack.pop();
       return true;
     }
     const now: number = Date.now();
@@ -4169,6 +4254,7 @@ struct Index {
     this.uiWatchFilePath = `${vpnDir}/${UI_WATCH_FILE_NAME}`;
     this.notifyConfigFilePath = `${vpnDir}/${NOTIFY_CONFIG_FILE_NAME}`;
     this.notifyCountsFilePath = `${vpnDir}/${NOTIFY_COUNTS_FILE_NAME}`;
+    this.appSplitFilePath = `${vpnDir}/${APP_SPLIT_FILE_NAME}`;
     try {
       fileIo.mkdirSync(vpnDir, true);
     } catch (_) {
@@ -4219,6 +4305,8 @@ struct Index {
         aghAdvancedJson: JSON.stringify(this.advancedDns),
         aghHttpPort: this.aghHttpPortNumber(),
         aghWebEnabled: this.aghWebEnabled,
+        appSplitMode: this.appSplitMode,
+        appSplitBundles: JSON.stringify(this.appSplitEnabledBundles()),
       },
     };
   }
@@ -4473,6 +4561,11 @@ struct Index {
       if (typeof state.locationKeepAliveEnabled === 'boolean') {
         this.locationKeepAliveEnabled = state.locationKeepAliveEnabled;
       }
+      if (typeof state.dataTransferKeepAliveEnabled === 'boolean') {
+        this.dataTransferKeepAliveEnabled = state.dataTransferKeepAliveEnabled;
+      }
+      this.appSplitMode = normalizeAppSplitMode(state.appSplitMode);
+      this.appSplitList = normalizeAppSplitList(state.appSplitList);
       if (typeof state.autoStartFilterEnabled === 'boolean') {
         this.autoStartFilterEnabled = state.autoStartFilterEnabled;
       }
@@ -4621,6 +4714,7 @@ struct Index {
       keepAliveEnabled: this.keepAliveEnabled,
       audioKeepAliveEnabled: this.audioKeepAliveEnabled,
       locationKeepAliveEnabled: this.locationKeepAliveEnabled,
+      dataTransferKeepAliveEnabled: this.dataTransferKeepAliveEnabled,
       autoStartFilterEnabled: this.autoStartFilterEnabled,
       persistentNotificationEnabled: this.persistentNotificationEnabled,
       notificationRefreshSeconds: this.notificationRefreshSeconds,
@@ -4644,6 +4738,8 @@ struct Index {
       dnsRewrites: this.dnsRewrites,
       advancedDns: this.advancedDns,
       disclaimerAccepted: this.disclaimerAccepted,
+      appSplitMode: this.appSplitMode,
+      appSplitList: this.appSplitList,
       currentTab: this.currentTab,
     };
     this.writeTextFile(this.stateFilePath, JSON.stringify(state));
@@ -5328,6 +5424,7 @@ struct Index {
         throw new Error('Failed to write rules file');
       }
       this.writeUpstreamFile();
+      this.writeAppSplitFile();
       // Refresh notify.json and (if enabled) prompt for notification permission
       // before the extension comes up, so the persistent stats notification can
       // appear immediately.
@@ -5588,7 +5685,8 @@ struct Index {
   }
 
   private syncKeepAliveEnabledFlag(): void {
-    this.keepAliveEnabled = this.audioKeepAliveEnabled || this.locationKeepAliveEnabled;
+    this.keepAliveEnabled = this.audioKeepAliveEnabled || this.locationKeepAliveEnabled ||
+      this.dataTransferKeepAliveEnabled;
   }
 
   private keepAliveModeList(): Array<string> {
@@ -5598,6 +5696,9 @@ struct Index {
     }
     if (this.locationKeepAliveEnabled) {
       list.push('location');
+    }
+    if (this.dataTransferKeepAliveEnabled) {
+      list.push('dataTransfer');
     }
     return list;
   }
@@ -5609,6 +5710,9 @@ struct Index {
     }
     if (this.locationKeepAliveEnabled) {
       modes.push(this.t('locationMode'));
+    }
+    if (this.dataTransferKeepAliveEnabled) {
+      modes.push(this.t('dataTransferMode'));
     }
     if (modes.length === 0) {
       return this.t('keepAliveOffStatus');
@@ -5651,6 +5755,107 @@ struct Index {
     this.syncKeepAliveEnabledFlag();
     this.savePersistState();
     await this.syncLongTaskKeepAlive();
+  }
+
+  private async onDataTransferKeepAliveChange(enabled: boolean): Promise<void> {
+    this.dataTransferKeepAliveEnabled = enabled;
+    if (enabled) {
+      // The progress live view is a notification; without permission the task
+      // can't be kept alive, so ask up front.
+      await this.ensureNotificationPermission();
+    }
+    this.syncKeepAliveEnabledFlag();
+    this.savePersistState();
+    await this.syncLongTaskKeepAlive();
+  }
+
+  private dataTransferNotifyText(): string {
+    return `${this.t('blocked')} ${this.formatCount(this.querySummary.blocked)}  ·  ` +
+      `${this.t('allowed')} ${this.formatCount(this.querySummary.allowed)}`;
+  }
+
+  private publishDataTransferProgress(): void {
+    if (this.dataTransferNotificationId < 0) {
+      return;
+    }
+    // There is no real "download" — the bar just keeps advancing so the system
+    // sees a live, updating transfer task.
+    this.dataTransferTick = (this.dataTransferTick + 1) % 100;
+    const template: notificationManager.NotificationTemplate = {
+      name: 'downloadTemplate',
+      data: {
+        title: this.t('dataTransferNotifyTitle'),
+        fileName: this.dataTransferNotifyText(),
+        progressValue: this.dataTransferTick,
+      }
+    };
+    const request: notificationManager.NotificationRequest = {
+      id: this.dataTransferNotificationId,
+      notificationSlotType: notificationManager.SlotType.LIVE_VIEW,
+      content: {
+        notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW,
+        systemLiveView: {
+          typeCode: 8,
+          title: this.t('dataTransferNotifyTitle'),
+          text: this.dataTransferNotifyText(),
+        }
+      },
+      template: template,
+    };
+    notificationManager.publish(request).catch((err: BusinessError) => {
+      this.appendDebugLog(`==/vpn_ui/data_transfer_publish_error/ ${this.errorMessage(err)}`);
+    });
+  }
+
+  private startDataTransferProgress(notificationId: number): void {
+    this.stopDataTransferProgress();
+    this.dataTransferNotificationId = notificationId;
+    this.dataTransferTick = 0;
+    this.publishDataTransferProgress();
+    this.dataTransferTimer = setInterval(() => {
+      this.publishDataTransferProgress();
+    }, DATA_TRANSFER_PROGRESS_INTERVAL_MS);
+    this.appendDebugLog(`==/vpn_ui/data_transfer_started/ notificationId=${notificationId}`);
+  }
+
+  private stopDataTransferProgress(): void {
+    if (this.dataTransferTimer >= 0) {
+      clearInterval(this.dataTransferTimer);
+      this.dataTransferTimer = -1;
+    }
+    this.dataTransferNotificationId = -1;
+  }
+
+  // The system may cancel or suspend a continuous task on its own (e.g. a
+  // DATA_TRANSFER task whose throughput is too low, or audio that isn't
+  // playing). Registering the suspend listener makes the system suspend the
+  // task first instead of cancelling it outright; either way, reflect it in the
+  // UI so the keep-alive state shown isn't stale.
+  private registerContinuousTaskListeners(): void {
+    if (this.continuousTaskListenersOn) {
+      return;
+    }
+    try {
+      backgroundTaskManager.on('continuousTaskCancel', (info: backgroundTaskManager.ContinuousTaskCancelInfo) => {
+        this.appendDebugLog(`==/vpn_ui/keepalive_cancelled/ id=${info.id} reason=${info.reason}`);
+        if (info.id !== this.continuousTaskId) {
+          return;
+        }
+        this.stopDataTransferProgress();
+        this.continuousTaskId = -1;
+        this.keepAliveRunning = false;
+        this.keepAliveStatusText = this.t('keepAliveCancelledBySystem');
+      });
+      backgroundTaskManager.on('continuousTaskSuspend', (info: backgroundTaskManager.ContinuousTaskSuspendInfo) => {
+        this.appendDebugLog(`==/vpn_ui/keepalive_suspend/ id=${info.continuousTaskId} suspended=${info.suspendState} reason=${info.suspendReason}`);
+      });
+      backgroundTaskManager.on('continuousTaskActive', (info: backgroundTaskManager.ContinuousTaskActiveInfo) => {
+        this.appendDebugLog(`==/vpn_ui/keepalive_active/ id=${info.id}`);
+      });
+      this.continuousTaskListenersOn = true;
+    } catch (err) {
+      this.appendDebugLog(`==/vpn_ui/keepalive_listener_error/ ${this.errorMessage(err)}`);
+    }
   }
 
   private async startLocationPolling(): Promise<void> {
@@ -5770,6 +5975,12 @@ struct Index {
         return;
       }
       this.continuousTaskId = taskInfo.continuousTaskId;
+      this.registerContinuousTaskListeners();
+      if (this.dataTransferKeepAliveEnabled) {
+        // With several modes the returned notificationId is the data-transfer
+        // one (the others share a merged notification).
+        this.startDataTransferProgress(taskInfo.notificationId);
+      }
       if (this.audioKeepAliveEnabled) {
         await this.startSilentAudioPlayback();
       }
@@ -5787,6 +5998,7 @@ struct Index {
   }
 
   private async stopLongTaskKeepAlive(notify: boolean): Promise<void> {
+    this.stopDataTransferProgress();
     await this.stopSilentAudioPlayback();
     this.stopLocationPolling();
     if (this.continuousTaskId < 0) {
@@ -6640,8 +6852,10 @@ struct Index {
     return this.isDarkModeActive() ? '#7E8795' : '#97A0AD';
   }
 
+  // Single solid page colour (HarmonyOS secondary background in light mode);
+  // cards carry the hierarchy. The title bar fades from this same RGB.
   private canvasTone(): string {
-    return this.isDarkModeActive() ? '#0E1320' : '#EDEFF3';
+    return this.isDarkModeActive() ? '#0E1320' : '#F1F3F5';
   }
 
   private cardSurfaceTone(): string {
@@ -8597,16 +8811,564 @@ struct Index {
     .shadow({ radius: 18, color: this.sheetShadowTone(), offsetX: 0, offsetY: -4 })
   }
 
+  // ===== Immersive shell: page backdrop, tab roots, sub pages =================
+
+  // The title bar fades between the page colour at alpha 0 and the blur, so the
+  // RGB must match canvasTone (see components/BlurTitleBar.ets).
+  private pageToneClear(): string {
+    return this.isDarkModeActive() ? '#000E1320' : '#00F1F3F5';
+  }
+
+  private pageTitleBar(title: string, menu?: Array<HdsNavigationMenuItemOptions>): HdsNavigationTitleBarOptions {
+    return blurTitleBar(title, this.primaryTextColor(), this.secondaryTextColor(), this.canvasTone(),
+      this.pageToneClear(), { menu: menu });
+  }
+
+  private configTitleMenu(): Array<HdsNavigationMenuItemOptions> {
+    return [{
+      content: {
+        icon: new SymbolGlyphModifier($r(this.showImportMenu ? 'sys.symbol.xmark' : 'sys.symbol.plus')),
+        label: this.t('quickImport'),
+        action: () => {
+          this.showImportMenu = !this.showImportMenu;
+          if (this.showImportMenu) {
+            this.configScroller.scrollEdge(Edge.Top);
+          }
+        }
+      }
+    }];
+  }
+
+  private appSplitTitleMenu(): Array<HdsNavigationMenuItemOptions> {
+    return [{
+      content: {
+        icon: new SymbolGlyphModifier($r('sys.symbol.plus')),
+        label: this.t('appSplitAddTitle'),
+        action: () => {
+          this.openAppSplitAddSheet();
+        }
+      }
+    }];
+  }
+
+  // Plain page colour behind tab roots and sub pages (sub pages need an opaque
+  // fill so the tab root doesn't show through during the push transition).
+  @Builder
+  private PageBackdrop() {
+    Column() {}
+      .width('100%')
+      .height('100%')
+      .backgroundColor(this.canvasTone())
+  }
+
+  // Each tab is its own HdsNavigation so the immersive title bar tracks that
+  // tab's scroller. The "Me" tab also hosts sub pages on meStack.
+  @Builder
+  private TabRoot(index: number) {
+    if (index === 0) {
+      HdsNavigation() {
+        this.HomeTab()
+      }
+      .titleBar(this.pageTitleBar(this.t('appTitle')))
+      .bindToScrollable([this.homeScroller])
+      .titleMode(HdsNavigationTitleMode.MINI)
+      .mode(NavigationMode.Stack)
+      .hideBackButton(true)
+      .hideToolBar(true)
+      .backgroundColor(Color.Transparent)
+      .width('100%')
+      .height('100%')
+    } else if (index === 1) {
+      HdsNavigation() {
+        this.ConfigTab()
+      }
+      .titleBar(this.pageTitleBar(this.t('configTitle'), this.configTitleMenu()))
+      .bindToScrollable([this.configScroller])
+      .titleMode(HdsNavigationTitleMode.MINI)
+      .mode(NavigationMode.Stack)
+      .hideBackButton(true)
+      .hideToolBar(true)
+      .backgroundColor(Color.Transparent)
+      .width('100%')
+      .height('100%')
+    } else {
+      HdsNavigation(this.meStack) {
+        this.MeTab()
+      }
+      .titleBar(this.pageTitleBar(this.t('tabMe')))
+      .bindToScrollable([this.meScroller])
+      .navDestination(this.MePageMap)
+      .titleMode(HdsNavigationTitleMode.MINI)
+      .mode(NavigationMode.Stack)
+      .hideBackButton(true)
+      .hideToolBar(true)
+      .backgroundColor(Color.Transparent)
+      .width('100%')
+      .height('100%')
+    }
+  }
+
+  @Builder
+  private MePageMap(name: string) {
+    if (name === ME_PAGE_SETTINGS) {
+      HdsNavDestination() {
+        this.SettingsSubPage()
+      }
+      .titleBar(this.pageTitleBar(this.t('settingsTitle')))
+      .bindToScrollable([this.settingsScroller])
+      .titleMode(HdsNavDestinationTitleMode.MINI)
+      .hideToolBar(true)
+      .background(this.PageBackdrop())
+    } else if (name === ME_PAGE_APP_SPLIT) {
+      HdsNavDestination() {
+        this.AppSplitPage()
+      }
+      .titleBar(this.pageTitleBar(this.t('appSplitTitle'), this.appSplitTitleMenu()))
+      .bindToScrollable([this.appSplitScroller])
+      .titleMode(HdsNavDestinationTitleMode.MINI)
+      .hideToolBar(true)
+      .background(this.PageBackdrop())
+      .bindSheet(this.showAppSplitAddSheet, this.AppSplitAddSheet(), {
+        height: SheetSize.FIT_CONTENT,
+        backgroundColor: this.canvasTone(),
+        showClose: false,
+        onDisappear: () => {
+          this.showAppSplitAddSheet = false;
+        }
+      })
+    }
+  }
+
+  // ===== Per-app routing (分应用代理) ========================================
+
+  private appSplitEnabledBundles(): string[] {
+    return this.appSplitList
+      .filter((e: AppSplitEntry) => e.enabled)
+      .map((e: AppSplitEntry) => e.bundle);
+  }
+
+  private appSplitDisplayName(e: AppSplitEntry): string {
+    if (e.name.length > 0) {
+      return e.name;
+    }
+    const preset: AppSplitPreset | undefined = findAppSplitPreset(e.bundle);
+    if (preset !== undefined) {
+      return this.appSplitPresetLabel(preset);
+    }
+    return e.bundle;
+  }
+
+  private appSplitPresetLabel(preset: AppSplitPreset): string {
+    return this.language === 'en' ? preset.nameEn : preset.name;
+  }
+
+  // Presets not yet in the list, for the quick-pick menu.
+  private availableAppSplitPresets(): AppSplitPreset[] {
+    return APP_SPLIT_PRESETS.filter((p: AppSplitPreset) =>
+      this.appSplitList.find((e: AppSplitEntry) => e.bundle === p.bundle) === undefined);
+  }
+
+  private appSplitModeHint(): string {
+    if (this.appSplitMode === 'bypass') {
+      return this.t('appSplitModeBypassHint');
+    }
+    if (this.appSplitMode === 'only') {
+      return this.t('appSplitModeOnlyHint');
+    }
+    return this.t('appSplitModeOffHint');
+  }
+
+  // One-line state for the entry row on the "Me" tab.
+  private appSplitSummary(): string {
+    if (this.appSplitMode === 'off') {
+      return this.t('appSplitEntryHint');
+    }
+    const label: string = this.appSplitMode === 'bypass' ? this.t('appSplitModeBypass') : this.t('appSplitModeOnly');
+    return `${label} · ${this.t('appSplitCount', this.appSplitEnabledBundles().length)}`;
+  }
+
+  private onAppSplitChanged(): void {
+    this.appSplitList = normalizeAppSplitList(this.appSplitList);
+    this.savePersistState();
+    if (this.writeAppSplitFile() && this.status.running && !this.proxyModeEnabled) {
+      // The running extension picks the file up within a second and rebuilds
+      // the tun (a brief network blip), so no manual restart is needed.
+      try {
+        this.ensurePromptAction()?.showToast({ message: this.t('appSplitApplying') });
+      } catch (_) {
+      }
+    }
+  }
+
+  // Mirror the effective per-app settings to vpn/app_split.json. Returns true
+  // when the content actually changed (deduped so unrelated saves don't touch
+  // the file the extension watches).
+  private writeAppSplitFile(): boolean {
+    if (this.appSplitFilePath.length === 0) {
+      return false;
+    }
+    const content: string = JSON.stringify({ mode: this.appSplitMode, bundles: this.appSplitEnabledBundles() } as AppSplitFile);
+    if (content === this.lastAppSplitFileContent) {
+      return false;
+    }
+    this.lastAppSplitFileContent = content;
+    this.writeTextFile(this.appSplitFilePath, content);
+    return true;
+  }
+
+  private setAppSplitMode(mode: AppSplitMode): void {
+    if (this.appSplitMode === mode) {
+      return;
+    }
+    this.appSplitMode = mode;
+    this.onAppSplitChanged();
+  }
+
+  private setAppSplitEntryEnabled(bundle: string, enabled: boolean): void {
+    this.appSplitList = this.appSplitList.map((e: AppSplitEntry): AppSplitEntry =>
+      e.bundle === bundle ? { bundle: e.bundle, name: e.name, enabled: enabled } : e);
+    this.onAppSplitChanged();
+  }
+
+  private removeAppSplitEntry(bundle: string): void {
+    this.appSplitList = this.appSplitList.filter((e: AppSplitEntry) => e.bundle !== bundle);
+    this.onAppSplitChanged();
+  }
+
+  private openAppSplitAddSheet(): void {
+    this.appSplitBundleInput = '';
+    this.appSplitNameInput = '';
+    this.appSplitAddError = '';
+    this.showAppSplitAddSheet = true;
+  }
+
+  private addAppSplitEntry(): void {
+    const bundle: string = this.appSplitBundleInput.trim();
+    if (!isValidBundleName(bundle)) {
+      this.appSplitAddError = this.t('appSplitInvalidBundle');
+      return;
+    }
+    if (bundle === VPN_BUNDLE_NAME) {
+      this.appSplitAddError = this.t('appSplitSelfBundle');
+      return;
+    }
+    if (this.appSplitList.find((e: AppSplitEntry) => e.bundle === bundle) !== undefined) {
+      this.appSplitAddError = this.t('appSplitDuplicate');
+      return;
+    }
+    if (this.appSplitList.length >= APP_SPLIT_MAX_BUNDLES) {
+      this.appSplitAddError = this.t('appSplitLimitReached', APP_SPLIT_MAX_BUNDLES);
+      return;
+    }
+    const entry: AppSplitEntry = { bundle: bundle, name: this.appSplitNameInput.trim(), enabled: true };
+    this.appSplitList = this.appSplitList.concat([entry]);
+    // Adding the first app while still "off" almost always means "bypass it".
+    if (this.appSplitMode === 'off') {
+      this.appSplitMode = 'bypass';
+    }
+    this.onAppSplitChanged();
+    this.showAppSplitAddSheet = false;
+  }
+
+  @Builder
+  private AppSplitModeSegButton(label: string, mode: AppSplitMode) {
+    Button(label)
+      .type(ButtonType.Normal)
+      .layoutWeight(1)
+      .height(36)
+      .fontSize(13)
+      .fontWeight(this.appSplitMode === mode ? FontWeight.Bold : FontWeight.Medium)
+      .backgroundColor(this.appSplitMode === mode ? this.cardSurfaceTone() : Color.Transparent)
+      .fontColor(this.appSplitMode === mode ? this.accentBlueTone() : this.secondaryTextColor())
+      .borderRadius(11)
+      .shadow(this.appSplitMode === mode
+        ? { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 }
+        : { radius: 0, color: '#00000000' })
+      .onClick(() => {
+        this.setAppSplitMode(mode);
+      })
+  }
+
+  @Builder
+  private AppSplitRow(e: AppSplitEntry) {
+    Row({ space: 12 }) {
+      Stack() {
+        Text(this.appSplitDisplayName(e).substring(0, 1).toUpperCase())
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#FFFFFF')
+      }
+      .width(40)
+      .height(40)
+      .borderRadius(12)
+      .linearGradient({
+        angle: 135,
+        colors: e.enabled
+          ? [['#22C1E0', 0.0], ['#2F6FDB', 1.0]]
+          : (this.isDarkModeActive() ? [['#3A4558', 0.0], ['#2C3545', 1.0]] : [['#C3CAD5', 0.0], ['#A9B2BF', 1.0]])
+      })
+
+      Column({ space: 2 }) {
+        Text(this.appSplitDisplayName(e))
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(e.bundle)
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Toggle({ type: ToggleType.Switch, isOn: e.enabled })
+        .onChange((value: boolean) => {
+          this.setAppSplitEntryEnabled(e.bundle, value);
+        })
+
+      SymbolGlyph($r('sys.symbol.trash'))
+        .fontSize(18)
+        .fontColor([this.mutedTextColor()])
+        .padding(6)
+        .onClick(() => {
+          this.removeAppSplitEntry(e.bundle);
+        })
+    }
+    .width('100%')
+    .padding({ left: 14, right: 10, top: 12, bottom: 12 })
+    .alignItems(VerticalAlign.Center)
+    .backgroundColor(this.elevatedSurfaceTone())
+    .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+    .borderRadius(18)
+    .border({ width: 1, color: this.cardBorderTone() })
+    .shadow({ radius: 10, color: this.cardShadowTone() })
+  }
+
+  @Builder
+  private AppSplitPage() {
+    Scroll(this.appSplitScroller) {
+      Column({ space: 14 }) {
+        Text(this.t('appSplitDesc'))
+          .fontSize(13)
+          .lineHeight(19)
+          .fontColor(this.secondaryTextColor())
+          .width('100%')
+          .padding({ left: 4, right: 4 })
+
+        if (this.proxyModeEnabled) {
+          Text(this.t('appSplitProxyModeNote'))
+            .fontSize(12)
+            .lineHeight(18)
+            .fontColor(this.isDarkModeActive() ? '#F5C26B' : '#9A5B00')
+            .padding(12)
+            .width('100%')
+            .backgroundColor(this.isDarkModeActive() ? '#2A2312' : '#FFF4DE')
+            .borderRadius(14)
+        }
+
+        Column({ space: 10 }) {
+          Row({ space: 5 }) {
+            this.AppSplitModeSegButton(this.t('appSplitModeOff'), 'off')
+            this.AppSplitModeSegButton(this.t('appSplitModeBypass'), 'bypass')
+            this.AppSplitModeSegButton(this.t('appSplitModeOnly'), 'only')
+          }
+          .width('100%')
+          .padding(5)
+          .backgroundColor(this.softPanelTone())
+          .borderRadius(14)
+          .border({ width: 1, color: this.cardBorderTone() })
+
+          Text(this.appSplitModeHint())
+            .fontSize(12)
+            .lineHeight(18)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+            .padding({ left: 4, right: 4 })
+        }
+        .width('100%')
+        .padding(14)
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(22)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+
+        this.SettingsGroupTitle({ text: this.t('appSplitListTitle', this.appSplitList.length) })
+
+        if (this.appSplitList.length === 0) {
+          Column({ space: 8 }) {
+            SymbolGlyph($r('sys.symbol.square_grid_2x2'))
+              .fontSize(34)
+              .fontColor([this.mutedTextColor()])
+            Text(this.t('appSplitEmpty'))
+              .fontSize(13)
+              .fontColor(this.mutedTextColor())
+              .textAlign(TextAlign.Center)
+            Button(this.t('appSplitAddTitle'))
+              .height(36)
+              .fontSize(14)
+              .margin({ top: 4 })
+              .backgroundColor(this.accentBlueTone())
+              .fontColor('#FFFFFF')
+              .onClick(() => {
+                this.openAppSplitAddSheet();
+              })
+          }
+          .width('100%')
+          .padding({ top: 28, bottom: 28 })
+          .alignItems(HorizontalAlign.Center)
+        } else {
+          ForEach(this.appSplitList, (e: AppSplitEntry) => {
+            this.AppSplitRow(e)
+          }, (e: AppSplitEntry) => `${e.bundle}:${e.enabled}:${e.name}`)
+        }
+      }
+      .width('100%')
+      .constraintSize({ minHeight: '100%' })
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
+    }
+    .width('100%')
+    .height('100%')
+    .scrollBar(BarState.Off)
+    .clip(false)
+    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+  }
+
+  @Builder
+  private AppSplitFieldLabel(label: string) {
+    Text(label)
+      .fontSize(15)
+      .fontColor(this.primaryTextColor())
+      .width(84)
+  }
+
+  // Add-app sheet, modelled on the familiar "whitelist" pattern: a quick-pick
+  // of common apps (bundle names verified on-device), or a manual bundle name.
+  @Builder
+  private AppSplitAddSheet() {
+    Column({ space: 12 }) {
+      Row() {
+        Text(this.t('appSplitAddTitle'))
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.primaryTextColor())
+        Blank()
+        Button() {
+          SymbolGlyph($r('sys.symbol.xmark'))
+            .fontSize(18)
+            .fontColor([this.primaryTextColor()])
+        }
+        .type(ButtonType.Circle)
+        .width(40)
+        .height(40)
+        .backgroundColor(this.softPanelTone())
+        .onClick(() => {
+          this.showAppSplitAddSheet = false;
+        })
+      }
+      .width('100%')
+      .margin({ bottom: 8 })
+
+      Column() {
+        Row() {
+          this.AppSplitFieldLabel(this.t('appSplitQuickPick'))
+          Select(this.availableAppSplitPresets().map((p: AppSplitPreset): SelectOption => {
+            return { value: this.appSplitPresetLabel(p) };
+          }))
+            .layoutWeight(1)
+            .value(this.t('appSplitQuickPickHint'))
+            .font({ size: 15, weight: FontWeight.Medium })
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(Color.Transparent)
+            .onSelect((index: number) => {
+              const presets: AppSplitPreset[] = this.availableAppSplitPresets();
+              if (index >= 0 && index < presets.length) {
+                this.appSplitBundleInput = presets[index].bundle;
+                this.appSplitNameInput = this.appSplitPresetLabel(presets[index]);
+                this.appSplitAddError = '';
+              }
+            })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 8, top: 6, bottom: 6 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone()).margin({ left: 16, right: 16 })
+
+        Row() {
+          this.AppSplitFieldLabel('Bundle')
+          TextInput({ text: this.appSplitBundleInput, placeholder: this.t('appSplitBundlePlaceholder') })
+            .layoutWeight(1)
+            .fontSize(15)
+            .backgroundColor(Color.Transparent)
+            .onChange((value: string) => {
+              this.appSplitBundleInput = value;
+              this.appSplitAddError = '';
+            })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 8, top: 4, bottom: 4 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone()).margin({ left: 16, right: 16 })
+
+        Row() {
+          this.AppSplitFieldLabel(this.t('appSplitNameLabel'))
+          TextInput({ text: this.appSplitNameInput, placeholder: this.t('appSplitNamePlaceholder') })
+            .layoutWeight(1)
+            .fontSize(15)
+            .backgroundColor(Color.Transparent)
+            .onChange((value: string) => {
+              this.appSplitNameInput = value;
+            })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 8, top: 4, bottom: 4 })
+        .alignItems(VerticalAlign.Center)
+      }
+      .width('100%')
+      .backgroundColor(this.cardSurfaceTone())
+      .borderRadius(18)
+
+      if (this.appSplitAddError.length > 0) {
+        Text(this.appSplitAddError)
+          .fontSize(12)
+          .fontColor('#D92D20')
+          .width('100%')
+          .padding({ left: 4 })
+      }
+
+      Button() {
+        Row({ space: 8 }) {
+          SymbolGlyph($r('sys.symbol.plus'))
+            .fontSize(18)
+            .fontColor(['#FFFFFF'])
+          Text(this.t('appSplitAdd'))
+            .fontSize(16)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FFFFFF')
+        }
+      }
+      .width('100%')
+      .height(48)
+      .margin({ top: 4 })
+      .backgroundColor(this.accentBlueTone())
+      .onClick(() => {
+        this.addAppSplitEntry();
+      })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 20, bottom: 28 })
+  }
+
   @Builder
   private CurrentTabPage() {
     Column() {
-      if (this.currentTab === 0) {
-        this.HomeTab();
-      } else if (this.currentTab === 1) {
-        this.ConfigTab();
-      } else {
-        this.MeTab();
-      }
+      this.TabRoot(this.currentTab)
     }
     .width('100%')
     .height('100%')
@@ -8635,7 +9397,7 @@ struct Index {
         return;
       }
       this.currentTab = index;
-      this.showSettingsPage = false;
+      this.meStack.clear(false);
       this.savePersistState();
     })
   }
@@ -8659,15 +9421,16 @@ struct Index {
 
   @Builder
   private HomeTab() {
-    Scroll() {
+    Scroll(this.homeScroller) {
       Column({ space: 16 }) {
         // ===== Brand Hero: status at a glance + one primary action =====
         Column({ space: 18 }) {
           Row() {
-            Text(this.t('appTitle'))
-              .fontSize(17)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.primaryTextColor())
+            // The app name now lives in the immersive title bar.
+            Text(this.t('filterStatus'))
+              .fontSize(13)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.secondaryTextColor())
             Blank()
             Row({ space: 10 }) {
               Button(this.engineModeLabel() + ' ▾')
@@ -9066,8 +9829,7 @@ struct Index {
       .constraintSize({ minHeight: '100%' })
       .justifyContent(FlexAlign.Start)
       .alignItems(HorizontalAlign.Start)
-      .margin({ top: 0 })
-      .padding({ bottom: this.contentBottomInset() })
+      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
       // Bound on the shared parent (ancestor of the Allowed/Blocked cards and the
       // recent-requests card) so any of them opens it reliably — a cross-component
       // bindSheet anchored on one sibling card was flaky when triggered from another.
@@ -9083,63 +9845,23 @@ struct Index {
     .width('100%')
     .height('100%')
     .scrollBar(BarState.Off)
+    .clip(false)
+    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
   }
 
   @Builder
   private ConfigTab() {
-    Scroll() {
+    Scroll(this.configScroller) {
       Column({ space: 16 }) {
-        Column({ space: 16 }) {
-          Row({ space: 12 }) {
-            this.IconBubble(this.sectionGlyph('rules'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 26, 12)
-            Column({ space: 2 }) {
-              Text(this.tri('RULE MANAGEMENT', '规则管理', '規則管理'))
-                .fontSize(11)
-                .fontWeight(FontWeight.Bold)
-                .letterSpacing(1.5)
-                .fontColor(this.selectedChipTextTone())
-              Text(this.t('configTitle'))
-                .fontSize(26)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(this.primaryTextColor())
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-            .justifyContent(FlexAlign.Center)
-
-            Stack() {
-              Text('+')
-                .fontSize(26)
-                .fontWeight(FontWeight.Medium)
-                .fontColor('#FFFFFF')
-            }
-            .width(46)
-            .height(46)
-            .borderRadius(23)
-            .backgroundColor(this.accentBlueTone())
-            .shadow({ radius: 10, color: '#33255DFF' })
-            .rotate({ angle: this.showImportMenu ? 45 : 0 })
-            .animation({ duration: 200, curve: Curve.EaseInOut })
-            .onClick(() => {
-              this.showImportMenu = !this.showImportMenu;
-            })
-          }
-          .alignItems(VerticalAlign.Center)
-
-          if (this.configFeedbackText.length > 0) {
-            Text(this.configFeedbackText)
-              .fontSize(12)
-              .fontColor(this.accentBlueTone())
-              .fontWeight(FontWeight.Medium)
-              .width('100%')
-          }
+        // Title and the "+" quick-import toggle live in the immersive title bar.
+        if (this.configFeedbackText.length > 0) {
+          Text(this.configFeedbackText)
+            .fontSize(12)
+            .fontColor(this.accentBlueTone())
+            .fontWeight(FontWeight.Medium)
+            .width('100%')
+            .padding({ left: 4, right: 4 })
         }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding({ left: 20, right: 20, top: 22, bottom: 24 })
-        .backgroundColor(this.cardSurfaceTone())
-        .borderRadius(22)
-        .shadow({ radius: 16, color: this.cardShadowTone() })
 
         // ===== Quick import menu (toggled by the + button) =====
         if (this.showImportMenu) {
@@ -9511,415 +10233,405 @@ struct Index {
       .constraintSize({ minHeight: '100%' })
       .justifyContent(FlexAlign.Start)
       .alignItems(HorizontalAlign.Start)
-      .margin({ top: 0 })
-      .padding({ bottom: this.contentBottomInset() })
+      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
     }
     .width('100%')
     .height('100%')
     .scrollBar(BarState.Off)
+    .clip(false)
+    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
   }
 
   @Builder
   private MeTab() {
-    if (this.showSettingsPage) {
-      this.SettingsSubPage();
-    } else {
-      Scroll() {
-        Column({ space: 16 }) {
-        Text(this.t('tabMe'))
-          .fontSize(28)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.primaryTextColor())
+    Scroll(this.meScroller) {
+      Column({ space: 16 }) {
+      // 🎨 外观
+      Column({ space: 8 }) {
+        this.SettingsGroupTitle({ text: this.tri('🎨 Appearance', '🎨 外观', '🎨 外觀') })
+        Column({ space: 12 }) {
+          Text(this.tri('Theme', '主题', '主題'))
+            .fontSize(14)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+            .width('100%')
+          Row({ space: 5 }) {
+            this.ThemeSegButton({ label: this.t('themeAuto'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET })
+            this.ThemeSegButton({ label: this.t('themeLight'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT })
+            this.ThemeSegButton({ label: this.t('themeDark'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_DARK })
+          }
           .width('100%')
-          .margin({ left: 4, bottom: 2 })
+          .padding(5)
+          .backgroundColor(this.softPanelTone())
+          .borderRadius(14)
+          .border({ width: 1, color: this.cardBorderTone() })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(16)
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(22)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+        })
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
 
-        // 🎨 外观
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('🎨 Appearance', '🎨 外观', '🎨 外觀') })
-          Column({ space: 12 }) {
-            Text(this.tri('Theme', '主题', '主題'))
-              .fontSize(14)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.primaryTextColor())
+      // ⚙️ 功能
+      Column({ space: 8 }) {
+        this.SettingsGroupTitle({ text: this.tri('⚙️ Features', '⚙️ 功能', '⚙️ 功能') })
+        Column() {
+          Row({ space: 12 }) {
+            this.SettingsIconText({ glyph: this.sectionGlyph('settings'), iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+              title: this.t('settingsTitle'), desc: this.t('settingsEntryHint') })
+            Text('›')
+              .fontSize(20)
+              .fontColor(this.secondaryTextColor())
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 10 })
+          .alignItems(VerticalAlign.Center)
+          .onClick(() => {
+            this.meStack.pushPathByName(ME_PAGE_SETTINGS, null);
+          })
+
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row({ space: 12 }) {
+            this.SettingsIconText({ glyph: '⊞', iconBg: this.isDarkModeActive() ? '#163238' : '#E3F6F9', iconFg: '#0891B2',
+              title: this.t('appSplitTitle'), desc: this.appSplitSummary() })
+            Text('›')
+              .fontSize(20)
+              .fontColor(this.secondaryTextColor())
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 10 })
+          .alignItems(VerticalAlign.Center)
+          .onClick(() => {
+            this.meStack.pushPathByName(ME_PAGE_APP_SPLIT, null);
+          })
+
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row({ space: 12 }) {
+            this.SettingsIconText({ glyph: '⚡', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+              title: this.t('autoStartFilter'), desc: this.t('autoStartFilterHint') })
+            Toggle({ type: ToggleType.Switch, isOn: this.autoStartFilterEnabled })
+              .onChange((value: boolean) => {
+                this.onAutoStartFilterChange(value).catch((err: BusinessError) => {
+                  this.errorText = this.errorMessage(err);
+                });
+              })
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 10 })
+          .alignItems(VerticalAlign.Center)
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding({ left: 16, right: 16, top: 6, bottom: 6 })
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(22)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+        })
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+
+      // 🔋 后台保活
+      Column({ space: 8 }) {
+        this.SettingsGroupTitle({ text: this.tri('🔋 Background', '🔋 后台保活', '🔋 背景保活') })
+        Column() {
+          Row({ space: 12 }) {
+            this.SettingsIconText({ glyph: '♪', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF8F2', iconFg: '#179160',
+              title: this.t('audioKeepAlive'), desc: this.t('audioKeepAliveHint') })
+            Toggle({ type: ToggleType.Switch, isOn: this.audioKeepAliveEnabled })
+              .selectedColor(this.accentGreenTone())
+              .onChange((value: boolean) => {
+                this.toggleAudioKeepAlive(value).catch((err: BusinessError) => {
+                  this.errorText = this.errorMessage(err);
+                });
+              })
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 10 })
+          .alignItems(VerticalAlign.Center)
+
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row({ space: 12 }) {
+            this.SettingsIconText({ glyph: '◉', iconBg: this.isDarkModeActive() ? '#3A2E12' : '#FBEFD7', iconFg: '#C77E12',
+              title: this.t('locationKeepAlive'), desc: this.t('locationKeepAliveHint') })
+            Toggle({ type: ToggleType.Switch, isOn: this.locationKeepAliveEnabled })
+              .onChange((value: boolean) => {
+                this.onLocationKeepAliveChange(value).catch((err: BusinessError) => {
+                  this.errorText = this.errorMessage(err);
+                });
+              })
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 10 })
+          .alignItems(VerticalAlign.Center)
+
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row({ space: 12 }) {
+            this.SettingsIconText({ glyph: '⇅', iconBg: this.isDarkModeActive() ? '#1E2E4A' : '#E8F1FE', iconFg: '#2F6FDB',
+              title: this.t('dataTransferKeepAlive'), desc: this.t('dataTransferKeepAliveHint') })
+            Toggle({ type: ToggleType.Switch, isOn: this.dataTransferKeepAliveEnabled })
+              .onChange((value: boolean) => {
+                this.onDataTransferKeepAliveChange(value).catch((err: BusinessError) => {
+                  this.errorText = this.errorMessage(err);
+                });
+              })
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 10 })
+          .alignItems(VerticalAlign.Center)
+
+          if (this.keepAliveStatusText.length > 0) {
+            Text(this.keepAliveStatusText)
+              .fontSize(12)
+              .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.secondaryTextColor())
               .width('100%')
+              .margin({ top: 4, bottom: 4 })
+          }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding({ left: 16, right: 16, top: 6, bottom: 6 })
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(22)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+        })
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+
+      // 🔔 通知栏
+      Column({ space: 8 }) {
+        this.SettingsGroupTitle({ text: this.t('notificationGroup') })
+        Column() {
+          Row({ space: 12 }) {
+            this.SettingsIconText({ glyph: '🔔', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+              title: this.t('persistentNotification'), desc: this.t('persistentNotificationHint') })
+            Toggle({ type: ToggleType.Switch, isOn: this.persistentNotificationEnabled })
+              .onChange((value: boolean) => {
+                this.onPersistentNotificationChange(value).catch((err: BusinessError) => {
+                  this.errorText = this.errorMessage(err);
+                });
+              })
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 10 })
+          .alignItems(VerticalAlign.Center)
+
+          if (this.persistentNotificationEnabled) {
+            Divider().strokeWidth(1).color(this.cardBorderTone())
+
+            Row({ space: 12 }) {
+              Column({ space: 2 }) {
+                Text(this.t('notificationRefreshInterval'))
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.primaryTextColor())
+                Text(this.t('notificationRefreshIntervalHint'))
+                  .fontSize(12)
+                  .lineHeight(17)
+                  .fontColor(this.secondaryTextColor())
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+            }
+            .width('100%')
+            .padding({ top: 10, bottom: 6 })
+            .alignItems(VerticalAlign.Center)
+
             Row({ space: 5 }) {
-              this.ThemeSegButton({ label: this.t('themeAuto'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET })
-              this.ThemeSegButton({ label: this.t('themeLight'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT })
-              this.ThemeSegButton({ label: this.t('themeDark'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_DARK })
+              this.NotifyIntervalSegButton(1)
+              this.NotifyIntervalSegButton(2)
+              this.NotifyIntervalSegButton(3)
+              this.NotifyIntervalSegButton(4)
+              this.NotifyIntervalSegButton(5)
             }
             .width('100%')
             .padding(5)
+            .margin({ bottom: 6 })
             .backgroundColor(this.softPanelTone())
             .borderRadius(14)
             .border({ width: 1, color: this.cardBorderTone() })
           }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding(16)
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)
-
-        // ⚙️ 功能
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('⚙️ Features', '⚙️ 功能', '⚙️ 功能') })
-          Column() {
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: this.sectionGlyph('settings'), iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.t('settingsTitle'), desc: this.t('settingsEntryHint') })
-              Text('›')
-                .fontSize(20)
-                .fontColor(this.secondaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            .onClick(() => {
-              this.showSettingsPage = true;
-            })
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '⚡', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.t('autoStartFilter'), desc: this.t('autoStartFilterHint') })
-              Toggle({ type: ToggleType.Switch, isOn: this.autoStartFilterEnabled })
-                .onChange((value: boolean) => {
-                  this.onAutoStartFilterChange(value).catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                })
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // 🔋 后台保活
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('🔋 Background', '🔋 后台保活', '🔋 背景保活') })
-          Column() {
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '♪', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF8F2', iconFg: '#179160',
-                title: this.t('audioKeepAlive'), desc: this.t('audioKeepAliveHint') })
-              Toggle({ type: ToggleType.Switch, isOn: this.audioKeepAliveEnabled })
-                .selectedColor(this.accentGreenTone())
-                .onChange((value: boolean) => {
-                  this.toggleAudioKeepAlive(value).catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                })
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '◉', iconBg: this.isDarkModeActive() ? '#3A2E12' : '#FBEFD7', iconFg: '#C77E12',
-                title: this.t('locationKeepAlive'), desc: this.t('locationKeepAliveHint') })
-              Toggle({ type: ToggleType.Switch, isOn: this.locationKeepAliveEnabled })
-                .onChange((value: boolean) => {
-                  this.onLocationKeepAliveChange(value).catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                })
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-
-            if (this.keepAliveStatusText.length > 0) {
-              Text(this.keepAliveStatusText)
-                .fontSize(12)
-                .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.secondaryTextColor())
-                .width('100%')
-                .margin({ top: 4, bottom: 4 })
-            }
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // 🔔 通知栏
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.t('notificationGroup') })
-          Column() {
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '🔔', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.t('persistentNotification'), desc: this.t('persistentNotificationHint') })
-              Toggle({ type: ToggleType.Switch, isOn: this.persistentNotificationEnabled })
-                .onChange((value: boolean) => {
-                  this.onPersistentNotificationChange(value).catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                })
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-
-            if (this.persistentNotificationEnabled) {
-              Divider().strokeWidth(1).color(this.cardBorderTone())
-
-              Row({ space: 12 }) {
-                Column({ space: 2 }) {
-                  Text(this.t('notificationRefreshInterval'))
-                    .fontSize(15)
-                    .fontWeight(FontWeight.Medium)
-                    .fontColor(this.primaryTextColor())
-                  Text(this.t('notificationRefreshIntervalHint'))
-                    .fontSize(12)
-                    .lineHeight(17)
-                    .fontColor(this.secondaryTextColor())
-                }
-                .layoutWeight(1)
-                .alignItems(HorizontalAlign.Start)
-              }
-              .width('100%')
-              .padding({ top: 10, bottom: 6 })
-              .alignItems(VerticalAlign.Center)
-
-              Row({ space: 5 }) {
-                this.NotifyIntervalSegButton(1)
-                this.NotifyIntervalSegButton(2)
-                this.NotifyIntervalSegButton(3)
-                this.NotifyIntervalSegButton(4)
-                this.NotifyIntervalSegButton(5)
-              }
-              .width('100%')
-              .padding(5)
-              .margin({ bottom: 6 })
-              .backgroundColor(this.softPanelTone())
-              .borderRadius(14)
-              .border({ width: 1, color: this.cardBorderTone() })
-            }
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // ℹ️ 关于
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('ℹ️ About', 'ℹ️ 关于', 'ℹ️ 關於') })
-          Column() {
-            Row() {
-              Text(this.tri('Version', '版本', '版本'))
-                .fontSize(14)
-                .fontColor(this.secondaryTextColor())
-              Blank()
-              Text(`${this.appVersionName} (${this.appVersionCode})`)
-                .fontSize(14)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(this.primaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 11, bottom: 11 })
-            .alignItems(VerticalAlign.Center)
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row() {
-              Text(this.tri('Mode', '模式', '模式'))
-                .fontSize(14)
-                .fontColor(this.secondaryTextColor())
-              Blank()
-              Text(this.t('modeValue'))
-                .fontSize(14)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(this.primaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 11, bottom: 11 })
-            .alignItems(VerticalAlign.Center)
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row() {
-              Text('IPv6 DNS')
-                .fontSize(14)
-                .fontColor(this.secondaryTextColor())
-              Blank()
-              Text(this.t('enabled'))
-                .fontSize(14)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(this.primaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 11, bottom: 11 })
-            .alignItems(VerticalAlign.Center)
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row() {
-              Text(this.tri('License', '许可证', '授權'))
-                .fontSize(14)
-                .fontColor(this.secondaryTextColor())
-              Blank()
-              Text('GPL-3.0  ›')
-                .fontSize(14)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(this.accentBlueTone())
-            }
-            .width('100%')
-            .padding({ top: 11, bottom: 11 })
-            .alignItems(VerticalAlign.Center)
-            .onClick(() => {
-              this.openLicensePage();
-            })
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row() {
-              Text(this.tri('Disclaimer', '免责声明', '免責聲明'))
-                .fontSize(14)
-                .fontColor(this.secondaryTextColor())
-              Blank()
-              Text(this.tri('View ›', '查看 ›', '查看 ›'))
-                .fontSize(14)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(this.accentBlueTone())
-            }
-            .width('100%')
-            .padding({ top: 11, bottom: 11 })
-            .alignItems(VerticalAlign.Center)
-            .onClick(() => {
-              this.showDisclaimerSheet = true;
-            })
-            .bindSheet(this.showDisclaimerSheet, this.DisclaimerSheet(), {
-              height: '60%',
-              backgroundColor: this.sheetSurfaceTone(),
-              showClose: false,
-              onDisappear: () => {
-                this.showDisclaimerSheet = false;
-              }
-            })
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 4, bottom: 4 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        }
-        .width('100%')
-        .constraintSize({ minHeight: '100%' })
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Start)
-        .margin({ top: 0 })
-        .padding({ bottom: this.contentBottomInset() })
+        .padding({ left: 16, right: 16, top: 6, bottom: 6 })
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(22)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+        })
       }
       .width('100%')
-      .height('100%')
-      .scrollBar(BarState.Off)
+      .alignItems(HorizontalAlign.Start)
+
+      // ℹ️ 关于
+      Column({ space: 8 }) {
+        this.SettingsGroupTitle({ text: this.tri('ℹ️ About', 'ℹ️ 关于', 'ℹ️ 關於') })
+        Column() {
+          Row() {
+            Text(this.tri('Version', '版本', '版本'))
+              .fontSize(14)
+              .fontColor(this.secondaryTextColor())
+            Blank()
+            Text(`${this.appVersionName} (${this.appVersionCode})`)
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.primaryTextColor())
+          }
+          .width('100%')
+          .padding({ top: 11, bottom: 11 })
+          .alignItems(VerticalAlign.Center)
+
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row() {
+            Text(this.tri('Mode', '模式', '模式'))
+              .fontSize(14)
+              .fontColor(this.secondaryTextColor())
+            Blank()
+            Text(this.t('modeValue'))
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.primaryTextColor())
+          }
+          .width('100%')
+          .padding({ top: 11, bottom: 11 })
+          .alignItems(VerticalAlign.Center)
+
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row() {
+            Text('IPv6 DNS')
+              .fontSize(14)
+              .fontColor(this.secondaryTextColor())
+            Blank()
+            Text(this.t('enabled'))
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.primaryTextColor())
+          }
+          .width('100%')
+          .padding({ top: 11, bottom: 11 })
+          .alignItems(VerticalAlign.Center)
+
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row() {
+            Text(this.tri('License', '许可证', '授權'))
+              .fontSize(14)
+              .fontColor(this.secondaryTextColor())
+            Blank()
+            Text('GPL-3.0  ›')
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.accentBlueTone())
+          }
+          .width('100%')
+          .padding({ top: 11, bottom: 11 })
+          .alignItems(VerticalAlign.Center)
+          .onClick(() => {
+            this.openLicensePage();
+          })
+
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row() {
+            Text(this.tri('Disclaimer', '免责声明', '免責聲明'))
+              .fontSize(14)
+              .fontColor(this.secondaryTextColor())
+            Blank()
+            Text(this.tri('View ›', '查看 ›', '查看 ›'))
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.accentBlueTone())
+          }
+          .width('100%')
+          .padding({ top: 11, bottom: 11 })
+          .alignItems(VerticalAlign.Center)
+          .onClick(() => {
+            this.showDisclaimerSheet = true;
+          })
+          .bindSheet(this.showDisclaimerSheet, this.DisclaimerSheet(), {
+            height: '60%',
+            backgroundColor: this.sheetSurfaceTone(),
+            showClose: false,
+            onDisappear: () => {
+              this.showDisclaimerSheet = false;
+            }
+          })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(22)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+        })
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .constraintSize({ minHeight: '100%' })
+      .justifyContent(FlexAlign.Start)
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
     }
+    .width('100%')
+    .height('100%')
+    .scrollBar(BarState.Off)
+    .clip(false)
+    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
   }
 
   @Builder
   private SettingsSubPage() {
-    Scroll() {
+    Scroll(this.settingsScroller) {
       Column({ space: 14 }) {
-        // ===== Slim header =====
-        Row({ space: 12 }) {
-          Button(this.t('back'))
-            .height(38)
-            .padding({ left: 14, right: 14 })
-            .fontSize(14)
-            .backgroundColor(this.coolNeutralChipSurfaceTone())
-            .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-            .fontColor(this.primaryTextColor())
-            .borderRadius(12)
-            .border({ width: 1, color: this.cardBorderTone() })
-            .onClick(() => {
-              this.showSettingsPage = false;
-            })
-
-          Column({ space: 2 }) {
-            Text(this.t('settingsTitle'))
-              .fontSize(22)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.primaryTextColor())
-            Text(this.t('settingsSubtitle'))
-              .fontSize(13)
-              .fontColor(this.secondaryTextColor())
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-        .padding({ left: 4, right: 4, top: 4, bottom: 2 })
-
         // ===== 🌍 语言 =====
         Column({ space: 8 }) {
           this.SettingsGroupTitle({ text: this.tri('🌍 Language', '🌍 语言', '🌍 語言') })
@@ -10772,12 +11484,13 @@ struct Index {
       .constraintSize({ minHeight: '100%' })
       .justifyContent(FlexAlign.Start)
       .alignItems(HorizontalAlign.Start)
-      .margin({ top: 0 })
-      .padding({ bottom: this.contentBottomInset() })
+      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
     }
     .width('100%')
     .height('100%')
     .scrollBar(BarState.Off)
+    .clip(false)
+    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
   }
 
   @Builder
@@ -10997,45 +11710,14 @@ struct Index {
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
-      Stack() {
-        Column() {}
-          .width('100%')
-          .height('100%')
-          .linearGradient({
-            angle: 180,
-            colors: this.isDarkModeActive()
-              ? [['#0E1320', 0.0], ['#0C111C', 1.0]]
-              : [['#F3F5F8', 0.0], ['#EDEFF3', 1.0]]
-          })
-      }
-      .width('100%')
-      .height('100%')
-      .align(Alignment.TopStart)
+      this.PageBackdrop()
 
       Stack({ alignContent: Alignment.TopStart }) {
-        Column({ space: 16 }) {
-          if (this.errorText.length > 0) {
-            Text(this.errorText)
-              .fontSize(13)
-              .fontColor('#B42318')
-              .padding(12)
-              .backgroundColor(this.softRedTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .borderRadius(14)
-              .width('100%')
-          }
-
+        Column() {
           if (deviceInfo.sdkApiVersion >= 23) {
             HdsTabs({ barPosition: BarPosition.End, index: this.currentTab }) {
               TabContent() {
-                Column() {
-                  this.HomeTab();
-                }
-                .width('100%')
-                .height('100%')
-                .layoutWeight(1)
-                .justifyContent(FlexAlign.Start)
-                .alignItems(HorizontalAlign.Start)
+                this.TabRoot(0)
               }
               .width('100%')
               .height('100%')
@@ -11046,14 +11728,7 @@ struct Index {
               ))
 
               TabContent() {
-                Column() {
-                  this.ConfigTab();
-                }
-                .width('100%')
-                .height('100%')
-                .layoutWeight(1)
-                .justifyContent(FlexAlign.Start)
-                .alignItems(HorizontalAlign.Start)
+                this.TabRoot(1)
               }
               .width('100%')
               .height('100%')
@@ -11064,14 +11739,7 @@ struct Index {
               ))
 
               TabContent() {
-                Column() {
-                  this.MeTab();
-                }
-                .width('100%')
-                .height('100%')
-                .layoutWeight(1)
-                .justifyContent(FlexAlign.Start)
-                .alignItems(HorizontalAlign.Start)
+                this.TabRoot(2)
               }
               .width('100%')
               .height('100%')
@@ -11104,7 +11772,6 @@ struct Index {
         }
         .width('100%')
         .height('100%')
-        .padding({ left: 16, right: 16, top: this.contentTopInset(), bottom: 0 })
         .justifyContent(FlexAlign.Start)
         .alignItems(HorizontalAlign.Start)
         .align(Alignment.TopStart)
@@ -11121,6 +11788,28 @@ struct Index {
       .height('100%')
       if (deviceInfo.sdkApiVersion < 23) {
         this.ClassicTabHost()
+      }
+
+      // Error banner floats just below the title bar so it never shifts the
+      // immersive layout; tap to dismiss.
+      if (this.errorText.length > 0) {
+        Column() {
+          Text(this.errorText)
+            .fontSize(13)
+            .fontColor('#B42318')
+            .padding(12)
+            .backgroundColor(this.softRedTone())
+            .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+            .borderRadius(14)
+            .width('100%')
+            .onClick(() => {
+              this.errorText = '';
+            })
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ left: 16, right: 16, top: this.contentTopInset() + 60 })
+        .hitTestBehavior(HitTestMode.Transparent)
       }
 
       // Subscription content viewer — a plain top-of-Stack overlay (like the
