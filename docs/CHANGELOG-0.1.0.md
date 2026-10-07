@@ -33,7 +33,6 @@ Changes since `v0.0.9`. Theme of this release: **a new immersive UI, per-app rou
 
 - **沉浸式标题栏 + 滚动动态模糊**：各页面标题栏与状态栏融为一体，内容滚到标题栏下方时逐渐模糊（HarmonyOS 6.1 / API 23 及以上为沉浸式渐变模糊）；返回键、菜单键使用系统玻璃材质。
 - **设置页、分应用页改为独立子页面**，支持系统返回键与侧滑返回。
-- **页面背景改为纯色**（浅色 `#F1F3F5`、深色 `#0E1320`），去掉原来的上下渐变，卡片层次更清晰。
 - **配置页精简**：原来的大标题卡片改为标题栏右上角的 **+**（快速导入），再点一次收起。
 - **错误提示**改为悬浮在标题栏下方，点击即可关闭，不再挤压页面内容。
 - 「设置」入口的说明文字更新为实际包含的内容（语言、上游 DNS、缓存与日志、配置备份）。
@@ -62,7 +61,6 @@ Changes since `v0.0.9`. Theme of this release: **a new immersive UI, per-app rou
 
 - **Immersive title bar with scroll-driven blur**: the title bar blends into the status bar and content scrolling beneath it is progressively blurred (immersive gradient blur on HarmonyOS 6.1 / API 23+); back and menu buttons use the system glass material.
 - **Settings and per-app routing are now separate sub pages**, with system back and swipe-back support.
-- **Solid page background** (light `#F1F3F5`, dark `#0E1320`) replaces the previous vertical gradient, giving cards clearer hierarchy.
 - **Leaner config page**: the large header card is replaced by a **+** (quick import) in the title bar; tap again to collapse.
 - **Error banner** now floats just below the title bar and is dismissed with a tap, instead of pushing the page content down.
 - The "Settings" entry description now lists what's actually inside (language, upstream DNS, cache & logs, backup).

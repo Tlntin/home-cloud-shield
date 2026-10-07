@@ -80,7 +80,7 @@ Current version **v0.1.0** (2026-10-07), themed around **a new immersive UI, per
 
 - **Per-app routing** (Me → "Per-app routing", VPN mode only): three modes — Off (default) / Bypass (listed apps skip filtering) / Only (filter just the listed apps); pick from 26 common apps or enter a bundle name, toggle each one; **changes apply automatically** without restarting the filter; included in config import / export.
 - **Data-transfer keep-alive** (Me → "Background keep-alive"): a third continuous-task mode with a live-view notification showing status and blocked counts, refreshed every 60 s; off by default.
-- **Immersive UI**: the title bar blends into the status bar and blurs as content scrolls beneath it (immersive gradient blur on API 23+), with system glass buttons; Settings and Per-app routing are separate sub pages with swipe-back; solid page background; the config page's header is reduced to a "+" in the title bar.
+- **Immersive UI**: the title bar blends into the status bar and blurs as content scrolls beneath it (immersive gradient blur on API 23+), with system glass buttons; Settings and Per-app routing are separate sub pages with swipe-back; the config page's header is reduced to a "+" in the title bar.
 
 Full bilingual changelogs: [v0.1.0](./docs/CHANGELOG-0.1.0.md) | [v0.0.9](./docs/CHANGELOG-0.0.9.md) | [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
 
