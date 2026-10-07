@@ -316,6 +316,7 @@
     { "name": "appSplitInvalidBundle", "value": "套件名格式不正確，例如 com.example.app" },
     { "name": "appSplitSelfBundle", "value": "本應用始終不經過自身的 VPN，無需新增" },
     { "name": "appSplitDuplicate", "value": "該應用已在清單中" },
-    { "name": "appSplitLimitReached", "value": "最多可新增 %d 個應用" }
+    { "name": "appSplitLimitReached", "value": "最多可新增 %d 個應用" },
+    { "name": "configImportedAppSplit", "value": " · 分應用 %d" }
   ]
 }

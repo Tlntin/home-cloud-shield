@@ -213,7 +213,8 @@ type LanguageKey =
   | 'configImportInvalid' | 'configImportedSummary' | 'configImportSkipped'
   | 'upstreamAutoTitle' | 'upstreamAutoHint' | 'upstreamAutoCurrent' | 'upstreamAutoWaiting'
   | 'importRuleInvalid'
-  | 'quickImport' | 'dataTransferKeepAlive' | 'dataTransferKeepAliveHint' | 'dataTransferMode' | 'dataTransferNotifyTitle' | 'keepAliveCancelledBySystem' | 'appSplitTitle' | 'appSplitEntryHint' | 'appSplitDesc' | 'appSplitProxyModeNote' | 'appSplitModeOff' | 'appSplitModeBypass' | 'appSplitModeOnly' | 'appSplitModeOffHint' | 'appSplitModeBypassHint' | 'appSplitModeOnlyHint' | 'appSplitCount' | 'appSplitListTitle' | 'appSplitEmpty' | 'appSplitApplying' | 'appSplitAddTitle' | 'appSplitQuickPick' | 'appSplitQuickPickHint' | 'appSplitBundlePlaceholder' | 'appSplitNameLabel' | 'appSplitNamePlaceholder' | 'appSplitAdd' | 'appSplitInvalidBundle' | 'appSplitSelfBundle' | 'appSplitDuplicate' | 'appSplitLimitReached';
+  | 'quickImport' | 'dataTransferKeepAlive' | 'dataTransferKeepAliveHint' | 'dataTransferMode' | 'dataTransferNotifyTitle' | 'keepAliveCancelledBySystem' | 'appSplitTitle' | 'appSplitEntryHint' | 'appSplitDesc' | 'appSplitProxyModeNote' | 'appSplitModeOff' | 'appSplitModeBypass' | 'appSplitModeOnly' | 'appSplitModeOffHint' | 'appSplitModeBypassHint' | 'appSplitModeOnlyHint' | 'appSplitCount' | 'appSplitListTitle' | 'appSplitEmpty' | 'appSplitApplying' | 'appSplitAddTitle' | 'appSplitQuickPick' | 'appSplitQuickPickHint' | 'appSplitBundlePlaceholder' | 'appSplitNameLabel' | 'appSplitNamePlaceholder' | 'appSplitAdd' | 'appSplitInvalidBundle' | 'appSplitSelfBundle' | 'appSplitDuplicate' | 'appSplitLimitReached'
+  | 'configImportedAppSplit';
 
 function resolveStringResource(key: LanguageKey): number {
   switch (key) {
@@ -530,6 +531,7 @@ function resolveStringResource(key: LanguageKey): number {
     case 'appSplitSelfBundle': return $r('app.string.appSplitSelfBundle').id;
     case 'appSplitDuplicate': return $r('app.string.appSplitDuplicate').id;
     case 'appSplitLimitReached': return $r('app.string.appSplitLimitReached').id;
+    case 'configImportedAppSplit': return $r('app.string.configImportedAppSplit').id;
   }
 }
 
@@ -884,6 +886,9 @@ interface ConfigAppSettings {
   logRetentionDays?: number;
   logMaxSizeMb?: number;
   ruleProfiles?: ConfigRuleProfile[];
+  // Per-app routing (data/AppSplit.ets): 'off' | 'bypass' | 'only', plus the list.
+  appSplitMode?: string;
+  appSplitApps?: AppSplitEntry[];
 }
 
 interface ConfigExport {
@@ -902,6 +907,7 @@ interface ConfigImportResult {
   redirected: number;
   ruleFiles: number;
   skippedSources: number;
+  appSplitApps: number;
 }
 
 // mergeImportedSources outcome: added vs skipped (unusable, non-http(s) URLs).
@@ -2145,6 +2151,8 @@ struct Index {
       logRetentionDays: this.logRetentionDays,
       logMaxSizeMb: this.logMaxSizeMb,
       ruleProfiles: profiles,
+      appSplitMode: this.appSplitMode,
+      appSplitApps: this.appSplitList,
     };
     const config: ConfigExport = {
       sources: sources,
@@ -2308,6 +2316,34 @@ struct Index {
     return out;
   }
 
+  // Merge imported per-app routing: the mode overrides when present (like the
+  // other scalar settings); apps are merged by bundle name, keeping existing
+  // entries as they are. Returns how many apps were added. Mirrors the result
+  // to app_split.json so a running VPN picks it up live.
+  private mergeImportedAppSplit(app: ConfigAppSettings): number {
+    let added: number = 0;
+    let changed: boolean = false;
+    if (typeof app.appSplitMode === 'string' && normalizeAppSplitMode(app.appSplitMode) !== this.appSplitMode) {
+      this.appSplitMode = normalizeAppSplitMode(app.appSplitMode);
+      changed = true;
+    }
+    if (Array.isArray(app.appSplitApps)) {
+      const incoming: AppSplitEntry[] = normalizeAppSplitList(app.appSplitApps)
+        .filter((e: AppSplitEntry) => e.bundle !== VPN_BUNDLE_NAME &&
+          this.appSplitList.find((x: AppSplitEntry) => x.bundle === e.bundle) === undefined);
+      if (incoming.length > 0) {
+        const merged: AppSplitEntry[] = normalizeAppSplitList(this.appSplitList.concat(incoming));
+        added = merged.length - this.appSplitList.length;
+        this.appSplitList = merged;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.writeAppSplitFile();
+    }
+    return added;
+  }
+
   private applyImportedAppSettings(app: ConfigAppSettings): void {
     if (typeof app.upstreamDns === 'string') {
       this.upstreamDnsInput = app.upstreamDns.trim();
@@ -2388,7 +2424,7 @@ struct Index {
 
       this.ensureRuleProfilesInitialized();
       const result: ConfigImportResult =
-        { sources: 0, blocked: 0, allowed: 0, redirected: 0, ruleFiles: 0, skippedSources: 0 };
+        { sources: 0, blocked: 0, allowed: 0, redirected: 0, ruleFiles: 0, skippedSources: 0, appSplitApps: 0 };
       if (Array.isArray(config.sources)) {
         const sourceResult: SourceMergeResult = this.mergeImportedSources(config.sources);
         result.sources = sourceResult.added;
@@ -2410,6 +2446,7 @@ struct Index {
         if (Array.isArray(config.app.ruleProfiles)) {
           result.ruleFiles = this.mergeImportedRuleProfiles(config.app.ruleProfiles);
         }
+        result.appSplitApps = this.mergeImportedAppSplit(config.app);
       }
 
       this.syncRuleCountBadges();
@@ -2440,6 +2477,9 @@ struct Index {
       void this.downloadSubscriptions(importedUrls);
       let summary: string = this.t('configImportedSummary', result.sources, result.blocked, result.allowed,
         result.redirected, result.ruleFiles);
+      if (result.appSplitApps > 0) {
+        summary += this.t('configImportedAppSplit', result.appSplitApps);
+      }
       if (result.skippedSources > 0) {
         summary += this.t('configImportSkipped', result.skippedSources);
       }
@@ -2452,7 +2492,7 @@ struct Index {
       } catch (_) {
       }
       this.appendDebugLog(
-        `==/vpn_ui/import_config/ sources=${result.sources} blocked=${result.blocked} allowed=${result.allowed} redirected=${result.redirected} ruleFiles=${result.ruleFiles} skipped=${result.skippedSources}`
+        `==/vpn_ui/import_config/ sources=${result.sources} blocked=${result.blocked} allowed=${result.allowed} redirected=${result.redirected} ruleFiles=${result.ruleFiles} appSplit=${result.appSplitApps} skipped=${result.skippedSources}`
       );
     } catch (err) {
       this.errorText = this.errorMessage(err);

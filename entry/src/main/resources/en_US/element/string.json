@@ -316,6 +316,7 @@
     { "name": "appSplitInvalidBundle", "value": "Invalid bundle name, e.g. com.example.app" },
     { "name": "appSplitSelfBundle", "value": "This app always bypasses its own VPN; no need to add it" },
     { "name": "appSplitDuplicate", "value": "This app is already in the list" },
-    { "name": "appSplitLimitReached", "value": "You can add at most %d apps" }
+    { "name": "appSplitLimitReached", "value": "You can add at most %d apps" },
+    { "name": "configImportedAppSplit", "value": " · per-app %d" }
   ]
 }
