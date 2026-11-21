@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Convenience wrapper for building libadguardhome_ohos.so from Windows via WSL:
-#   wsl -d Ubuntu-20.04 -u tlntin -- bash native/adguardhome-ohos-lib/scripts/wsl_build.sh
+#   wsl -d Ubuntu-20.04 -u tlntin -- bash native/adguardhome-ohos-lib/scripts/wsl_build.sh --with-tun
 # Encodes this machine's toolchain locations (see TOOLCHAIN.md / memory):
 # patched Go and the Linux OHOS NDK live in tlntin's WSL home.
 set -euo pipefail
@@ -19,4 +19,4 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 go version
-"$SCRIPT_DIR/build_ohos_shared.sh" --app-root "$APP_ROOT"
+"$SCRIPT_DIR/build_ohos_shared.sh" --app-root "$APP_ROOT" "$@"

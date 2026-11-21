@@ -6,11 +6,39 @@
 // Only meaningful in VPN mode — the DNS-proxy mode never creates a tun.
 
 export type AppSplitMode = 'off' | 'bypass' | 'only';
+export const APP_TUNNEL_LOG_FILE = 'app_connections.log';
 
 export interface AppSplitEntry {
   bundle: string;
   name: string;
   enabled: boolean;
+}
+
+export interface AppSplitFile {
+  mode: string;
+  bundles: string[];
+  dnsAllowlist?: string[];
+  tunnelRules?: string;
+}
+
+export function parseAppSplitDnsAllowlist(text: string): string[] | undefined {
+  const domains: Set<string> = new Set<string>();
+  for (const item of text.split(/[\s,，]+/)) {
+    const domain: string = item.toLowerCase().replace(/\.$/, '');
+    if (item.length === 0) {
+      continue;
+    }
+    if (domain.length > 253 || !domain.includes('.') || /^(\d+\.)+\d+$/.test(domain) ||
+      !domain.split('.').every((label: string) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+      return undefined;
+    }
+    domains.add(domain);
+  }
+  return Array.from(domains);
+}
+
+export function appSplitDnsAllowlistRules(domains: string[], defaultBlockRule: string): string[] {
+  return [defaultBlockRule].concat(domains.map((domain: string) => `@@|${domain}|`));
 }
 
 export interface AppSplitPreset {

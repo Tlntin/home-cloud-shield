@@ -23,8 +23,8 @@ import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/Co
 import { aghSubscriptionId, seedAghSubscriptionCache, subscriptionCacheName } from '../data/SubscriptionCache';
 import { blurTitleBar } from '../components/BlurTitleBar';
 import {
-  APP_SPLIT_MAX_BUNDLES, APP_SPLIT_PRESETS, AppSplitEntry, AppSplitMode, AppSplitPreset, findAppSplitPreset,
-  isValidBundleName, normalizeAppSplitList, normalizeAppSplitMode
+  APP_SPLIT_MAX_BUNDLES, APP_SPLIT_PRESETS, APP_TUNNEL_LOG_FILE, AppSplitEntry, AppSplitFile, AppSplitMode, AppSplitPreset,
+  findAppSplitPreset, isValidBundleName, normalizeAppSplitList, normalizeAppSplitMode, parseAppSplitDnsAllowlist
 } from '../data/AppSplit';
 import type { PromptAction } from '@ohos.arkui.UIContext';
 import abilityAccessCtrl, { Permissions } from '@ohos.abilityAccessCtrl';
@@ -785,12 +785,6 @@ const SUBSCRIPTION_PRESETS: SubscriptionPreset[] = [
   { name: '1Hosts (Lite)', url: 'https://o0.pages.dev/Lite/adblock.txt' },
 ];
 
-// Shape of vpn/app_split.json (see MyVpnExtAbility AppSplitFile).
-interface AppSplitFile {
-  mode: string;
-  bundles: string[];
-}
-
 interface PersistState {
   configSyncEnabled?: boolean;
   configSyncDeviceId?: string;
@@ -825,6 +819,10 @@ interface PersistState {
   disclaimerAccepted?: boolean;
   appSplitMode?: string;
   appSplitList?: AppSplitEntry[];
+  appSplitDnsAllowlistEnabled?: boolean;
+  appSplitDnsAllowlist?: string;
+  appTunnelEnabled?: boolean;
+  appTunnelRules?: string;
   currentTab: number;
 }
 
@@ -1007,6 +1005,15 @@ struct Index {
   @State dataTransferKeepAliveEnabled: boolean = false;
   @State appSplitMode: AppSplitMode = 'off';
   @State appSplitList: AppSplitEntry[] = [];
+  @State appSplitDnsAllowlistEnabled: boolean = false;
+  @State appSplitDnsAllowlist: string = '';
+  @State appSplitDnsAllowlistDraft: string = '';
+  @State appSplitDnsAllowlistError: string = '';
+  @State appTunnelEnabled: boolean = true;
+  @State appTunnelRules: string = '';
+  @State appTunnelRulesDraft: string = '';
+  @State appTunnelRulesError: string = '';
+  private appTunnelAvailable: boolean = vpnclientbridge.appTunnelAvailable();
   @State showAppSplitAddSheet: boolean = false;
   @State appSplitBundleInput: string = '';
   @State appSplitNameInput: string = '';
@@ -1025,6 +1032,7 @@ struct Index {
   @State rulesFilePath: string = '';
   @State queryLogFilePath: string = '';
   @State debugLogFilePath: string = '';
+  private appTunnelLogFilePath: string = '';
   @State upstreamDnsFilePath: string = '';
   @State stateFilePath: string = '';
   @State rulesText: string = '';
@@ -4651,6 +4659,7 @@ struct Index {
     this.rulesFilePath = `${vpnDir}/${RULES_FILE_NAME}`;
     this.queryLogFilePath = `${vpnDir}/${QUERY_LOG_FILE_NAME}`;
     this.debugLogFilePath = `${vpnDir}/${DEBUG_LOG_FILE_NAME}`;
+    this.appTunnelLogFilePath = `${vpnDir}/${APP_TUNNEL_LOG_FILE}`;
     this.upstreamDnsFilePath = `${vpnDir}/${UPSTREAM_DNS_FILE_NAME}`;
     this.stateFilePath = `${vpnDir}/${STATE_FILE_NAME}`;
     this.uiWatchFilePath = `${vpnDir}/${UI_WATCH_FILE_NAME}`;
@@ -4976,6 +4985,12 @@ struct Index {
       }
       this.appSplitMode = normalizeAppSplitMode(state.appSplitMode);
       this.appSplitList = normalizeAppSplitList(state.appSplitList);
+      this.appSplitDnsAllowlistEnabled = state.appSplitDnsAllowlistEnabled === true;
+      this.appSplitDnsAllowlist = typeof state.appSplitDnsAllowlist === 'string' ? state.appSplitDnsAllowlist : '';
+      this.appSplitDnsAllowlistDraft = this.appSplitDnsAllowlist;
+      this.appTunnelEnabled = state.appTunnelEnabled !== false;
+      this.appTunnelRules = typeof state.appTunnelRules === 'string' ? state.appTunnelRules : '';
+      this.appTunnelRulesDraft = this.appTunnelRules;
       if (typeof state.autoStartFilterEnabled === 'boolean') {
         this.autoStartFilterEnabled = state.autoStartFilterEnabled;
       }
@@ -5154,24 +5169,29 @@ struct Index {
       disclaimerAccepted: this.disclaimerAccepted,
       appSplitMode: this.appSplitMode,
       appSplitList: this.appSplitList,
+      appSplitDnsAllowlistEnabled: this.appSplitDnsAllowlistEnabled,
+      appSplitDnsAllowlist: this.appSplitDnsAllowlist,
+      appTunnelEnabled: this.appTunnelEnabled,
+      appTunnelRules: this.appTunnelRules,
       currentTab: this.currentTab,
     };
     const serialized = JSON.stringify(state);
-    const saved = atomic ? this.writeSyncedState(serialized) : this.writeTextFile(this.stateFilePath, serialized);
+    const saved = atomic ? this.writeAtomicTextFile(this.stateFilePath, serialized)
+      : this.writeTextFile(this.stateFilePath, serialized);
     // Mirror the notification settings (and current localized labels) into
     // notify.json so the running VPN extension applies any change live.
     this.writeNotifyConfigFile();
     return saved;
   }
 
-  private writeSyncedState(serialized: string): boolean {
-    const pending = `${this.stateFilePath}.sync`;
+  private writeAtomicTextFile(path: string, serialized: string): boolean {
+    const pending = `${path}.pending`;
     try {
       if (!this.writeTextFile(pending, serialized) ||
         fileIo.statSync(pending).size !== new util.TextEncoder().encodeInto(serialized).byteLength) {
         return false;
       }
-      fileIo.renameSync(pending, this.stateFilePath);
+      fileIo.renameSync(pending, path);
       return true;
     } catch (_) {
       return false;
@@ -5771,13 +5791,6 @@ struct Index {
 
   private refreshDebugLog(): void {
     const raw = this.readTextFileTail(this.debugLogFilePath, DEBUG_LOG_TAIL_BYTES);
-    if (raw.trim().length === 0) {
-      if (this.debugLines.length > 0) {
-        this.debugLines = [];
-      }
-      return;
-    }
-
     const lines: string[] = raw.split('\n');
     const items: string[] = [];
     let index: number = lines.length - 1;
@@ -5787,6 +5800,22 @@ struct Index {
         items.push(line);
       }
       index -= 1;
+    }
+    const connections = this.readTextFileTail(this.appTunnelLogFilePath, DEBUG_LOG_TAIL_BYTES).split('\n');
+    let connectionCount = 0;
+    for (let i = connections.length - 1; i >= 0 && connectionCount < 50; i--) {
+      const fields = connections[i].trim().split('\t');
+      if (fields.length !== 4 || fields[2] === 'dns' || !Number.isFinite(Date.parse(fields[0]))) {
+        continue;
+      }
+      const action = fields[2] === 'blocked' ? this.t('blocked') : fields[2] === 'failed' ?
+        this.tri('Failed', '失败', '失敗') : this.t('allowed');
+      items.push(`${fields[0]} [TUN] ${fields[1].toUpperCase()} ${action} ${fields[3]}`);
+      connectionCount += 1;
+    }
+    if (connectionCount > 0) {
+      items.sort((a: string, b: string) =>
+        (Date.parse(b.split(' ', 1)[0]) || 0) - (Date.parse(a.split(' ', 1)[0]) || 0));
     }
     // Skip the @State reassignment when nothing changed — reassigning forces a
     // re-render every tick even while idle.
@@ -5863,7 +5892,9 @@ struct Index {
         throw new Error('Failed to write rules file');
       }
       this.writeUpstreamFile();
-      this.writeAppSplitFile();
+      if (!this.writeAppSplitFile()) {
+        throw new Error('Failed to write app split settings.');
+      }
       // Refresh notify.json and (if enabled) prompt for notification permission
       // before the extension comes up, so the persistent stats notification can
       // appear immediately.
@@ -9253,7 +9284,7 @@ struct Index {
               .borderRadius(14)
               .border({ width: 1, color: this.sheetBorderTone() })
               .shadow({ radius: 8, color: this.sheetShadowTone(), offsetX: 0, offsetY: 3 })
-          }, (_item: string, index: number) => `${index}`)
+          }, (item: string, index: number) => `${index}:${item}`)
         }
         .width('100%')
         .constraintSize({ minHeight: '100%' })
@@ -9457,7 +9488,9 @@ struct Index {
   private onAppSplitChanged(): void {
     this.appSplitList = normalizeAppSplitList(this.appSplitList);
     this.savePersistState();
-    if (this.writeAppSplitFile() && this.status.running && !this.proxyModeEnabled) {
+    const previous: string = this.lastAppSplitFileContent;
+    if (this.writeAppSplitFile() && previous !== this.lastAppSplitFileContent &&
+      this.status.running && !this.proxyModeEnabled) {
       // The running extension picks the file up within a second and rebuilds
       // the tun (a brief network blip), so no manual restart is needed.
       try {
@@ -9467,22 +9500,85 @@ struct Index {
     }
   }
 
-  // Mirror the effective per-app settings to vpn/app_split.json. Returns true
-  // when the content actually changed (deduped so unrelated saves don't touch
-  // the file the extension watches).
+  // Mirror the effective per-app settings without rewriting an unchanged file.
   private writeAppSplitFile(): boolean {
     if (this.appSplitFilePath.length === 0) {
       return false;
     }
-    const content: string = JSON.stringify({ mode: this.appSplitMode, bundles: this.appSplitEnabledBundles() } as AppSplitFile);
-    if (content === this.lastAppSplitFileContent) {
-      return false;
+    const cfg: AppSplitFile = { mode: this.appSplitMode, bundles: this.appSplitEnabledBundles() };
+    if (cfg.mode === 'only' && cfg.bundles.length > 0 && this.appSplitDnsAllowlistEnabled) {
+      cfg.dnsAllowlist = parseAppSplitDnsAllowlist(this.appSplitDnsAllowlist);
     }
-    if (!this.writeTextFile(this.appSplitFilePath, content)) {
+    if (cfg.mode === 'only' && cfg.bundles.length > 0 && this.appTunnelEnabled && this.appTunnelAvailable) {
+      cfg.tunnelRules = this.appTunnelRules;
+    }
+    const content: string = JSON.stringify(cfg);
+    if (content === this.lastAppSplitFileContent) {
+      return true;
+    }
+    if (!this.writeAtomicTextFile(this.appSplitFilePath, content)) {
       return false;
     }
     this.lastAppSplitFileContent = content;
     return true;
+  }
+
+  private saveAppSplitDnsAllowlist(enabled: boolean, saveDraft: boolean): void {
+    const domains: string = this.appSplitDnsAllowlist;
+    const wasEnabled: boolean = this.appSplitDnsAllowlistEnabled;
+    if (saveDraft) {
+      const parsed: string[] | undefined = parseAppSplitDnsAllowlist(this.appSplitDnsAllowlistDraft);
+      if (parsed === undefined) {
+        this.appSplitDnsAllowlistError = this.tri('Enter hostnames only, for example www.example.com.',
+          '请输入域名，例如 www.example.com。', '請輸入網域名稱，例如 www.example.com。');
+        return;
+      }
+      this.appSplitDnsAllowlist = parsed.join('\n');
+    }
+    this.appSplitDnsAllowlistEnabled = enabled;
+    if (!this.savePersistState(true) || !this.writeAppSplitFile()) {
+      this.appSplitDnsAllowlist = domains;
+      this.appSplitDnsAllowlistEnabled = wasEnabled;
+      this.savePersistState(true);
+      this.appSplitDnsAllowlistError = this.tri('Could not save the DNS allowlist.', '无法保存 DNS 白名单。',
+        '無法儲存 DNS 允許清單。');
+      return;
+    }
+    if (saveDraft) {
+      this.appSplitDnsAllowlistDraft = this.appSplitDnsAllowlist;
+    }
+    this.appSplitDnsAllowlistError = '';
+  }
+
+  private saveAppTunnel(enabled: boolean, saveDraft: boolean): void {
+    const previousRules: string = this.appTunnelRules;
+    const previousEnabled: boolean = this.appTunnelEnabled;
+    const rules: string = saveDraft ? this.appTunnelRulesDraft.trim() : previousRules;
+    if (saveDraft) {
+      const error: string | undefined = vpnclientbridge.validateAppTunnelRules(rules);
+      if (error !== undefined) {
+        const line: string | undefined = error.match(/line (\d+)$/)?.[1];
+        this.appTunnelRulesError = line === undefined ?
+          this.tri('Use at most 256 IP rules.', '最多可保存 256 条 IP 规则。', '最多可儲存 256 條 IP 規則。') :
+          this.tri(`Invalid IP or port on line ${line}.`, `第 ${line} 行的 IP 或端口无效。`, `第 ${line} 行的 IP 或連接埠無效。`);
+        return;
+      }
+    }
+    this.appTunnelRules = rules;
+    this.appTunnelEnabled = enabled;
+    if (!this.savePersistState(true) || !this.writeAppSplitFile()) {
+      this.appTunnelRules = previousRules;
+      this.appTunnelEnabled = previousEnabled;
+      this.savePersistState(true);
+      this.appTunnelRulesError = this.tri('Could not save the tunnel settings.', '无法保存全量 VPN 设置。',
+        '無法儲存全量 VPN 設定。');
+      this.ensurePromptAction()?.showToast({ message: this.appTunnelRulesError });
+      return;
+    }
+    if (saveDraft) {
+      this.appTunnelRulesDraft = rules;
+    }
+    this.appTunnelRulesError = '';
   }
 
   private setAppSplitMode(mode: AppSplitMode): void {
@@ -9617,6 +9713,97 @@ struct Index {
   }
 
   @Builder
+  private AppSplitDnsAllowlistCard() {
+    Column({ space: 10 }) {
+      Row({ space: 10 }) {
+        Text(this.tri('DNS allowlist', 'DNS 白名单', 'DNS 允許清單'))
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+          .layoutWeight(1)
+        Toggle({ type: ToggleType.Switch, isOn: this.appSplitDnsAllowlistEnabled })
+          .enabled(this.appSplitEnabledBundles().length > 0)
+          .onChange((enabled: boolean) => this.saveAppSplitDnsAllowlist(enabled, enabled))
+      }
+      .width('100%')
+      Text(this.tri(
+        'While enabled, other DNS rules are paused. Only listed hostnames can be resolved. An empty list blocks all new DNS queries from the selected apps.',
+        '开启时暂停其他 DNS 规则，只放行名单中的完整域名。留空会拦截所选应用的全部新 DNS 请求。',
+        '開啟時暫停其他 DNS 規則，只允許清單中的完整網域。留空會攔截所選應用程式的所有新 DNS 請求。'))
+        .fontSize(12)
+        .lineHeight(18)
+        .fontColor(this.secondaryTextColor())
+        .width('100%')
+      TextArea({ text: this.appSplitDnsAllowlistDraft, placeholder: this.tri('One hostname per line',
+        '每行一个域名', '每行一個網域') })
+        .width('100%')
+        .height(100)
+        .fontSize(14)
+        .borderRadius(14)
+        .backgroundColor(this.softPanelTone())
+        .onChange((value: string) => {
+          this.appSplitDnsAllowlistDraft = value;
+          this.appSplitDnsAllowlistError = '';
+        })
+      if (this.appSplitDnsAllowlistError.length > 0) {
+        Text(this.appSplitDnsAllowlistError)
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+      }
+      Button(this.tri('Save allowlist', '保存白名单', '儲存允許清單'))
+        .enabled(this.appSplitDnsAllowlistDraft !== this.appSplitDnsAllowlist)
+        .onClick(() => this.saveAppSplitDnsAllowlist(this.appSplitDnsAllowlistEnabled, true))
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding(14)
+    .borderRadius(18)
+    .backgroundColor(this.elevatedSurfaceTone())
+    .border({ width: 1, color: this.cardBorderTone() })
+  }
+
+  @Builder
+  private AppTunnelRulesCard() {
+    Column({ space: 10 }) {
+      Text(this.tri('IP blocking rules', 'IP 拦截规则', 'IP 封鎖規則'))
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.primaryTextColor())
+      TextArea({ text: this.appTunnelRulesDraft,
+        placeholder: this.tri('Block one IP or IP:port per line', '每行一个要拦截的 IP 或 IP:端口',
+          '每行一個要封鎖的 IP 或 IP:連接埠') })
+        .width('100%')
+        .height(100)
+        .fontSize(14)
+        .maxLength(16384)
+        .borderRadius(14)
+        .backgroundColor(this.softPanelTone())
+        .onChange((value: string) => {
+          this.appTunnelRulesDraft = value;
+          this.appTunnelRulesError = '';
+        })
+      Text(this.tri('For example 192.0.2.1 or [2001:db8::1]:443.',
+        '例如 192.0.2.1 或 [2001:db8::1]:443。', '例如 192.0.2.1 或 [2001:db8::1]:443。'))
+        .fontSize(12)
+        .fontColor(this.secondaryTextColor())
+      if (this.appTunnelRulesError.length > 0) {
+        Text(this.appTunnelRulesError)
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+      }
+      Button(this.tri('Save IP rules', '保存 IP 规则', '儲存 IP 規則'))
+        .enabled(this.appTunnelRulesDraft !== this.appTunnelRules)
+        .onClick(() => this.saveAppTunnel(this.appTunnelEnabled, true))
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding(14)
+    .borderRadius(18)
+    .backgroundColor(this.elevatedSurfaceTone())
+    .border({ width: 1, color: this.cardBorderTone() })
+  }
+
+  @Builder
   private AppSplitPage() {
     Scroll(this.appSplitScroller) {
       Column({ space: 14 }) {
@@ -9693,6 +9880,14 @@ struct Index {
           ForEach(this.appSplitList, (e: AppSplitEntry) => {
             this.AppSplitRow(e)
           }, (e: AppSplitEntry) => `${e.bundle}:${e.enabled}:${e.name}`)
+        }
+
+        if (!this.proxyModeEnabled && this.appSplitMode === 'only') {
+          this.SettingsGroupTitle({ text: this.tri('Advanced debugging', '高级调试', '進階除錯') })
+          this.AppSplitDnsAllowlistCard()
+          if (this.appTunnelEnabled && this.appTunnelAvailable) {
+            this.AppTunnelRulesCard()
+          }
         }
       }
       .width('100%')
@@ -11042,11 +11237,11 @@ struct Index {
           Divider().strokeWidth(1).color(this.cardBorderTone())
 
           Row() {
-            Text(this.tri('License', '许可证', '授權'))
+            Text(this.t('openSource'))
               .fontSize(14)
               .fontColor(this.secondaryTextColor())
             Blank()
-            Text('GPL-3.0  ›')
+            Text(this.tri('View ›', '查看 ›', '查看 ›'))
               .fontSize(14)
               .fontWeight(FontWeight.Bold)
               .fontColor(this.accentBlueTone())
@@ -11786,8 +11981,25 @@ struct Index {
         .alignItems(HorizontalAlign.Start)
 
         Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: 'IPv6' })
+          this.SettingsGroupTitle({ text: 'VPN' })
           Column({ space: 12 }) {
+            Row({ space: 12 }) {
+              this.SettingsIconText({
+                glyph: '⇄', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
+                title: this.tri('Full VPN (experimental)', '全量 VPN（实验）', '全量 VPN（實驗）'),
+                desc: this.appTunnelAvailable ?
+                  this.tri('Works with both DNS engines. Routes TCP and UDP in selected-app mode.',
+                    '轻量和完整模式均可使用。在「仅代理」模式下接管所选应用的 TCP 和 UDP。',
+                    '輕量與完整模式均可使用。在「僅代理」模式下接管所選應用程式的 TCP 和 UDP。') :
+                  this.tri('The tunnel core is unavailable in this build.', '当前安装包缺少全量 VPN 内核。',
+                    '目前的安裝套件缺少全量 VPN 核心。')
+              })
+              Toggle({ type: ToggleType.Switch, isOn: this.appTunnelEnabled && this.appTunnelAvailable })
+                .enabled(this.appTunnelAvailable && !this.proxyModeEnabled)
+                .onChange((enabled: boolean) => this.saveAppTunnel(enabled, false))
+            }
+            .width('100%')
+            Divider().strokeWidth(1).color(this.cardBorderTone())
             Row({ space: 12 }) {
               this.SettingsIconText({
                 glyph: '6', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
@@ -12061,6 +12273,7 @@ struct Index {
               : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
           })
           .onClick(() => {
+            this.refreshDebugLog();
             this.debugSheetFeedbackText = '';
             this.showDebugSheet = true;
           })

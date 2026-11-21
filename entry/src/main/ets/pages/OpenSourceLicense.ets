@@ -3,6 +3,8 @@ import { util } from '@kit.ArkTS';
 import { window } from '@kit.ArkUI';
 
 const LICENSE_RAWFILE = 'adguard_open_source_licenses.txt';
+const GPL_RAWFILE = 'gpl-3.0.txt';
+const TUN_LICENSE_RAWFILE = 'hevsocks5tun-licenses.txt';
 type LicenseStringKey = 'licenseTitle' | 'licenseSubtitle' | 'back' | 'loadingLicense' | 'licenseUnavailable';
 
 function resolveLicenseStringResource(key: LicenseStringKey): number {
@@ -21,10 +23,13 @@ struct OpenSourceLicensePage {
   @State loading: boolean = true;
   @State errorText: string = '';
   @State lines: string[] = [];
+  @State tunLines: string[] = [];
+  @State showingTunLicense: boolean = false;
   @State avoidPaddingTop: number = 0;
   @State avoidPaddingBottom: number = 0;
   private mainWindow?: window.Window;
   private hasBoundWindowAvoidAreaListeners: boolean = false;
+  private licenseScroller: Scroller = new Scroller();
 
   private isDarkModeActive(): boolean {
     try {
@@ -113,19 +118,49 @@ struct OpenSourceLicensePage {
     this.errorText = '';
     this.lines = [];
     try {
-      const fileData: Uint8Array = await this.getHostContext().resourceManager.getRawFileContent(LICENSE_RAWFILE);
-      const textDecoder = util.TextDecoder.create('utf-8');
-      const licenseText: string = textDecoder.decodeToString(fileData);
-      if (!licenseText || licenseText.trim().length === 0) {
+      const overview = await this.readLicenseFile(LICENSE_RAWFILE);
+      const gpl = await this.readLicenseFile(GPL_RAWFILE);
+      if (overview.length === 0 || gpl.length === 0) {
         this.errorText = this.t('licenseUnavailable');
       } else {
-        this.lines = licenseText.split('\n');
+        this.lines = `${overview}\n\n${gpl}`.split('\n');
       }
     } catch (_) {
       this.errorText = this.t('licenseUnavailable');
-    } finally {
-      this.loading = false;
     }
+    try {
+      const tunText = await this.readLicenseFile(TUN_LICENSE_RAWFILE);
+      this.tunLines = tunText.length > 0 ? tunText.split('\n') : [];
+    } catch (_) {
+      // Builds that omit the optional TUN core omit its notice resource.
+      this.tunLines = [];
+    }
+    this.loading = false;
+  }
+
+  private async readLicenseFile(path: string): Promise<string> {
+    const data = await this.getHostContext().resourceManager.getRawFileContent(path);
+    return util.TextDecoder.create('utf-8').decodeToString(data).trimEnd();
+  }
+
+  private selectLicense(tun: boolean): void {
+    if (this.showingTunLicense !== tun) {
+      this.showingTunLicense = tun;
+      this.licenseScroller.scrollEdge(Edge.Top);
+    }
+  }
+
+  @Builder
+  private LicenseTab(title: string, tun: boolean) {
+    Button(title)
+      .layoutWeight(1)
+      .height(36)
+      .fontSize(13)
+      .backgroundColor(this.showingTunLicense === tun
+        ? (this.isDarkModeActive() ? '#29405F' : '#DFEEFF')
+        : (this.isDarkModeActive() ? '#1A2940' : '#F2F7FC'))
+      .fontColor(this.isDarkModeActive() ? '#F3F6FB' : '#16304B')
+      .onClick(() => this.selectLicense(tun))
   }
 
   build() {
@@ -164,15 +199,13 @@ struct OpenSourceLicensePage {
             .fontColor(this.isDarkModeActive() ? '#AAB7CA' : '#5B6C82')
             .width('100%')
 
-          Row({ space: 10 }) {
-            Text(`RAWFILE · ${LICENSE_RAWFILE}`)
-              .fontSize(11)
-              .fontColor(this.isDarkModeActive() ? '#B8C5D9' : '#46607C')
-              .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-              .backgroundColor(this.isDarkModeActive() ? '#1A2940' : '#EDF4FF')
-              .borderRadius(999)
+          if (this.tunLines.length > 0) {
+            Row({ space: 8 }) {
+              this.LicenseTab('AdGuard Home', false)
+              this.LicenseTab('hev-socks5-tunnel', true)
+            }
+            .width('100%')
           }
-          .width('100%')
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)
@@ -204,15 +237,15 @@ struct OpenSourceLicensePage {
           .layoutWeight(1)
           .justifyContent(FlexAlign.Center)
         } else {
-          Scroll() {
+          Scroll(this.licenseScroller) {
             Column({ space: 6 }) {
-              ForEach(this.lines, (line: string, index: number) => {
+              ForEach(this.showingTunLicense ? this.tunLines : this.lines, (line: string) => {
                 Text(line.length > 0 ? line : ' ')
                   .width('100%')
                   .fontSize(13)
                   .lineHeight(21)
                   .fontColor(this.isDarkModeActive() ? '#E8EEF8' : '#24364A')
-              }, (_line: string, index: number) => `${index}`)
+              }, (line: string, index: number) => `${index}:${line}`)
             }
             .width('100%')
             .alignItems(HorizontalAlign.Start)

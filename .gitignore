@@ -13,6 +13,8 @@
 .agents
 .claude
 entry/src/main/libs/arm64-v8a/libadguardhome_ohos.so
+entry/src/main/libs/arm64-v8a/libhevsocks5tun.so
+entry/src/main/resources/rawfile/hevsocks5tun-licenses.txt
 design
 /*.txt
 /todo*.md

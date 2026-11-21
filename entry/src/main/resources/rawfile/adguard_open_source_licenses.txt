@@ -1,5 +1,6 @@
 Home Cloud Shield / 栖云盾
 Open Source Notices
+Source: https://github.com/Tlntin/home-cloud-shield
 
 This build includes or is based on the following open source software.
 The original and authoritative license texts remain with their respective upstream projects.
@@ -71,6 +72,6 @@ Additional notes
 ======================================================================
 - Domain blocking rules shown in the UI are intended to remain compatible
 	with common AdGuard Home DNS rule forms.
-- This notice page is a convenient in-app summary for the current build.
-- For complete legal text, consult the root LICENSE file, THIRD_PARTY_NOTICES.md,
-	and the original upstream license files referenced above.
+- The complete GNU General Public License version 3 follows below.
+- See THIRD_PARTY_NOTICES.md and the referenced upstream license files
+  for additional notices.

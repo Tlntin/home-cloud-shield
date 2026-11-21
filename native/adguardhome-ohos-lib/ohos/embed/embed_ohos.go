@@ -98,6 +98,9 @@ func StartEmbedded(confPath, workDir, logPath string, clientBuildFS fs.FS, start
 	}
 
 	initConfigFilename(opts)
+	// readConfigFile caches the YAML for a standalone run. The host can rewrite
+	// it between embedded starts in this same process.
+	config.fileData = nil
 
 	ls := getLogSettings(opts)
 

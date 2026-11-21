@@ -19,6 +19,7 @@ typedef struct { const char *p; ptrdiff_t n; } _GoString_;
 /* Start of preamble from import "C" comments.  */
 
 
+
 #line 24 "main_ohos_c_shared.go"
 
 #include <stdlib.h>
@@ -79,6 +80,13 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
+extern char* ShieldTunnelValidateRules(char* rules);
+
+// ShieldTunnelStart returns the listener port and password, separated by a
+// newline. A failed start returns an error message with no newline.
+//
+extern char* ShieldTunnelStart(char* rules, char* logPath, int dnsPort, int blockIPv6);
+extern void ShieldTunnelStop();
 
 // AdGuardHomeVersion returns the AdGuard Home version string.
 //

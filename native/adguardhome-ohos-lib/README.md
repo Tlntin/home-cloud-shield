@@ -45,8 +45,10 @@ git submodule update --init --recursive
 本机(Windows + WSL Ubuntu-20.04)可直接用封装脚本,内置工具链环境变量(GOROOT / OHOS_NDK / GOPROXY,见 TOOLCHAIN.md)并自动 `--app-root` 到本仓库:
 
 ```powershell
-wsl -d Ubuntu-20.04 -u tlntin -- bash native/adguardhome-ohos-lib/scripts/wsl_build.sh
+wsl -d Ubuntu-20.04 -u tlntin -- bash native/adguardhome-ohos-lib/scripts/wsl_build.sh --with-tun
 ```
+
+`--with-tun` 会用 `OHOS_NDK` 构建固定版本的 [hev-socks5-tunnel 2.9.0](https://github.com/heiher/hev-socks5-tunnel/tree/99cd2d5d5dfc9b21038e977808e59a0b90b38fa0)，并将内核和许可证放入应用工程。其他 Linux 环境可给 `build_ohos_shared.sh --app-root` 加上相同参数。打包时检查 HAP 中的 `libs/arm64-v8a/libhevsocks5tun.so`。
 
 ## 许可证说明
 

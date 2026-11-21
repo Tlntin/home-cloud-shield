@@ -6,14 +6,16 @@ AGH_DIR="$ROOT_DIR/third_party/AdGuardHome"
 EMBED_DIR="$ROOT_DIR/ohos/embed"
 OUT_DIR="$ROOT_DIR/ohos/prebuilt/openharmony-arm64"
 APP_ROOT=""
+WITH_TUN=false
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./native/adguardhome-ohos-lib/scripts/build_ohos_shared.sh [--app-root <path>]
+  ./native/adguardhome-ohos-lib/scripts/build_ohos_shared.sh [--app-root <path> [--with-tun]]
 
 Builds libadguardhome_ohos.so (OpenHarmony arm64, c-shared) from the pinned
 AdGuardHome submodule plus the OHOS embedding/export sources in ohos/embed/.
+Use --with-tun to also build and package the experimental app tunnel core.
 
 Required toolchain (see TOOLCHAIN.md):
   - PATH must point at the OpenHarmony patched Go (>= go1.24.5, supports
@@ -33,6 +35,10 @@ while [[ $# -gt 0 ]]; do
       APP_ROOT="$2"
       shift 2
       ;;
+    --with-tun)
+      WITH_TUN=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -45,6 +51,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if $WITH_TUN && [[ -z "$APP_ROOT" ]]; then
+  echo "[build] --with-tun requires --app-root" >&2
+  exit 1
+fi
+
 # The AdGuardHome submodule must be checked out.
 if [[ ! -f "$AGH_DIR/go.mod" ]]; then
   echo "[build] AdGuardHome submodule not found at $AGH_DIR" >&2
@@ -54,19 +65,21 @@ fi
 
 # The OHOS embedding/export sources live in this repo (outside the submodule)
 # so the corresponding source is tracked and the build is reproducible.
-for f in main_ohos_c_shared.go embed_ohos.go reset_dnsforward_ohos.go; do
+for f in main_ohos_c_shared.go full_tunnel_ohos.go embed_ohos.go reset_dnsforward_ohos.go; do
   [[ -f "$EMBED_DIR/$f" ]] || { echo "[build] missing custom source: $EMBED_DIR/$f" >&2; exit 1; }
 done
 
 # Inject the custom sources into the otherwise-pristine submodule, and remove
 # them again on exit so the submodule working tree stays clean.
 INJECTED_EXPORT="$AGH_DIR/main_ohos_c_shared.go"
+INJECTED_TUNNEL="$AGH_DIR/full_tunnel_ohos.go"
 INJECTED_EMBED="$AGH_DIR/internal/home/embed_ohos.go"
 INJECTED_RESET="$AGH_DIR/internal/dnsforward/reset_ohos.go"
-cleanup_injected() { rm -f "$INJECTED_EXPORT" "$INJECTED_EMBED" "$INJECTED_RESET"; }
+cleanup_injected() { rm -f "$INJECTED_EXPORT" "$INJECTED_TUNNEL" "$INJECTED_EMBED" "$INJECTED_RESET"; }
 trap cleanup_injected EXIT
 
 cp "$EMBED_DIR/main_ohos_c_shared.go" "$INJECTED_EXPORT"
+cp "$EMBED_DIR/full_tunnel_ohos.go" "$INJECTED_TUNNEL"
 cp "$EMBED_DIR/embed_ohos.go" "$INJECTED_EMBED"
 cp "$EMBED_DIR/reset_dnsforward_ohos.go" "$INJECTED_RESET"
 
@@ -116,4 +129,8 @@ if [[ -n "$APP_ROOT" ]]; then
   echo "[ok] copied:"
   echo "  - $APP_ROOT/entry/src/main/libs/arm64-v8a/libadguardhome_ohos.so"
   echo "  - $APP_ROOT/entry/src/main/cpp/include/libadguardhome_ohos.h"
+fi
+
+if $WITH_TUN; then
+  bash "$ROOT_DIR/scripts/build_tun_ohos.sh" "$APP_ROOT"
 fi

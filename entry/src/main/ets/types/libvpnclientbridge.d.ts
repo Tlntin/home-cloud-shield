@@ -7,7 +7,8 @@ declare module 'libvpnclientbridge.so' {
     queryLogPath: string,
     dnsCacheTtlSeconds: number,
     blockAaaa?: boolean,
-    blockIpv6Connections?: boolean
+    blockIpv6Connections?: boolean,
+    dnsAllowlist?: boolean
   ): string | undefined;
   // Full mode: boot the embedded AdGuardHome engine on 127.0.0.1:aghDnsPort and
   // relay every TUN DNS query to it (AGH does all filtering/upstream/caching).
@@ -48,8 +49,16 @@ declare module 'libvpnclientbridge.so' {
     rulesPath: string,
     queryLogPath: string,
     dnsCacheTtlSeconds: number,
-    blockAaaa?: boolean
+    blockAaaa?: boolean,
+    dnsAllowlist?: boolean,
+    requireUdp?: boolean
   ): string | undefined;
+  export function startAppTunnel(
+    fd: number, ipv4: string, ipv6: string, dnsPort: number, blockIpv6: boolean, rules: string, logPath: string
+  ): string | undefined;
+  export function validateAppTunnelRules(rules: string): string | undefined;
+  export function appTunnelAvailable(): boolean;
+  export function appTunnelRunning(): boolean;
   export function stopDnsFilter(): string | undefined;
   export function reloadDnsRules(rulesPath: string): string | undefined;
   export function setUpstreamDns(upstreamDnsIp: string): string | undefined;

@@ -30,6 +30,7 @@
 // Prebuilt AdGuardHome c-shared engine (full mode).  Declares the extern "C"
 // entry points AdGuardHomeVersion/Start/Stop/FreeCString.
 #include "libadguardhome_ohos.h"
+#include "full_tunnel.h"
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -532,7 +533,7 @@ void ApplyDnsTypeModifier(RuleEntry &rule, const std::string &modifierValue)
     }
 }
 
-RuleEntry ParseRuleLine(const std::string &line)
+RuleEntry ParseRuleLine(const std::string &line, bool dnsAllowlist)
 {
     RuleEntry rule;
     std::string value = Trim(line);
@@ -620,7 +621,8 @@ RuleEntry ParseRuleLine(const std::string &line)
     }
 
     value = Trim(value);
-    if (!LooksLikeRulePattern(value)) {
+    // The generated split-app allowlist uses a catch-all after its exact exceptions.
+    if (!LooksLikeRulePattern(value) && !(dnsAllowlist && value == "*")) {
         return rule;
     }
 
@@ -629,13 +631,13 @@ RuleEntry ParseRuleLine(const std::string &line)
     return rule;
 }
 
-std::vector<RuleEntry> LoadRulesSnapshot(const std::string &rulesPath)
+std::vector<RuleEntry> LoadRulesSnapshot(const std::string &rulesPath, bool dnsAllowlist = false)
 {
     std::vector<RuleEntry> rules;
     std::vector<RuleEntry> badfilters;
     const std::vector<std::string> lines = SplitLines(ReadWholeFile(rulesPath));
     for (const std::string &line : lines) {
-        RuleEntry rule = ParseRuleLine(line);
+        RuleEntry rule = ParseRuleLine(line, dnsAllowlist);
         if (!rule.pattern.empty()) {
             if (rule.badfilter) {
                 badfilters.push_back(rule);
@@ -2414,7 +2416,8 @@ void ReaderLoop(int tunFd, bool blockIpv6Connections)
 }
 
 void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp, const std::string &upstreamDnsIp,
-    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds, bool blockAaaa = false)
+    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds, bool blockAaaa = false,
+    bool dnsAllowlist = false)
 {
     state.running = true;
     state.stopRequested = false;
@@ -2439,7 +2442,7 @@ void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp,
     state.upstreamDnsIps = ParseUpstreamList(upstreamDnsIp);
     state.rulesPath = rulesPath;
     state.queryLogPath = queryLogPath;
-    state.activeRules = std::make_shared<const std::vector<RuleEntry>>(LoadRulesSnapshot(rulesPath));
+    state.activeRules = std::make_shared<const std::vector<RuleEntry>>(LoadRulesSnapshot(rulesPath, dnsAllowlist));
     state.dnsCacheTtlSeconds = dnsCacheTtlSeconds;
     state.blockAaaa = blockAaaa;
     state.dnsResponseCache.clear();
@@ -2448,6 +2451,7 @@ void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp,
 
 std::string StopDnsFilter()
 {
+    StopFullTunnel();
     std::thread reader;
     std::thread dnsServer;
     std::thread dnsUdp;
@@ -2531,7 +2535,7 @@ std::string StopDnsFilter()
 
 std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::string &upstreamDnsIp,
     const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds, bool blockAaaa,
-    bool blockIpv6Connections)
+    bool blockIpv6Connections, bool dnsAllowlist)
 {
     if (fd < 0) {
         return "invalid tun fd";
@@ -2565,7 +2569,8 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
     StartForwardPool();
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
-        ResetStatsLocked(g_state, dupFd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds, blockAaaa);
+        ResetStatsLocked(g_state, dupFd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds,
+            blockAaaa, dnsAllowlist);
         g_state.stopEventFd = eventfd(0, EFD_NONBLOCK);
         g_state.worker = std::thread(ReaderLoop, dupFd, blockIpv6Connections);
     }
@@ -2923,7 +2928,8 @@ void LwDnsServerUdpLoop(int udpFd)
 // best effort (a UDP bind failure leaves the TCP server fully functional).
 // Teardown goes through StopDnsFilter().
 std::string StartLwDnsServer(const std::string &bindIp, uint16_t port, const std::string &upstreamDnsIp,
-    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds, bool blockAaaa)
+    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds, bool blockAaaa,
+    bool dnsAllowlist, bool requireUdp)
 {
     if (bindIp.empty()) {
         return "bind ip is required";
@@ -2992,12 +2998,17 @@ std::string StartLwDnsServer(const std::string &bindIp, uint16_t port, const std
     } else {
         LogError("==/vpn_native/lw_dns_udp_socket_error/ %{public}s", std::strerror(errno));
     }
+    if (requireUdp && udpFd < 0) {
+        close(listenFd);
+        return "Could not start the local UDP DNS listener.";
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         // -1 fd: no TUN. Seed the resolver state (rules/upstream/query log) the
         // same way the lightweight TUN path does; fullMode stays false.
-        ResetStatsLocked(g_state, -1, bindIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds, blockAaaa);
+        ResetStatsLocked(g_state, -1, bindIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds,
+            blockAaaa, dnsAllowlist);
         g_state.fullMode = false;
         g_state.dnsServerListenFd = listenFd;
         g_state.dnsServerThread = std::thread(LwDnsServerAcceptLoop, listenFd);
@@ -3078,8 +3089,8 @@ std::string GetStatsJson()
 
 napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
 {
-    size_t argc = 8;
-    napi_value argv[8] {};
+    size_t argc = 9;
+    napi_value argv[9] {};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 6) {
         return MakeUtf8(env, "tun fd, dns server ip, upstream dns ip, rules path, query log path, and cache ttl are required");
@@ -3116,9 +3127,13 @@ napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
         (argc >= 8 && !ReadArgBool(env, argv[7], blockIpv6Connections))) {
         return MakeUtf8(env, "invalid IPv6 policy");
     }
+    bool dnsAllowlist = false;
+    if (argc >= 9 && !ReadArgBool(env, argv[8], dnsAllowlist)) {
+        return MakeUtf8(env, "invalid DNS allowlist flag");
+    }
     return ReturnErrOrUndefined(env,
         StartDnsFilter(fd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath,
-            static_cast<uint32_t>(dnsCacheTtlSeconds), blockAaaa, blockIpv6Connections));
+            static_cast<uint32_t>(dnsCacheTtlSeconds), blockAaaa, blockIpv6Connections, dnsAllowlist));
 }
 
 napi_value JsStartFullDnsFilter(napi_env env, napi_callback_info info)
@@ -3211,8 +3226,8 @@ napi_value JsStartAghServerOnly(napi_env env, napi_callback_info info)
 
 napi_value JsStartLwDnsServer(napi_env env, napi_callback_info info)
 {
-    size_t argc = 7;
-    napi_value argv[7] {};
+    size_t argc = 9;
+    napi_value argv[9] {};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 6) {
         return MakeUtf8(env,
@@ -3248,9 +3263,61 @@ napi_value JsStartLwDnsServer(napi_env env, napi_callback_info info)
     if (argc >= 7 && !ReadArgBool(env, argv[6], blockAaaa)) {
         return MakeUtf8(env, "invalid AAAA policy");
     }
+    bool dnsAllowlist = false;
+    bool requireUdp = false;
+    if ((argc >= 8 && !ReadArgBool(env, argv[7], dnsAllowlist)) ||
+        (argc >= 9 && !ReadArgBool(env, argv[8], requireUdp))) {
+        return MakeUtf8(env, "invalid local DNS policy");
+    }
     return ReturnErrOrUndefined(env,
         StartLwDnsServer(bindIp, static_cast<uint16_t>(port), upstreamDnsIp, rulesPath, queryLogPath,
-            static_cast<uint32_t>(cacheTtl), blockAaaa));
+            static_cast<uint32_t>(cacheTtl), blockAaaa, dnsAllowlist, requireUdp));
+}
+
+napi_value JsStartAppTunnel(napi_env env, napi_callback_info info)
+{
+    size_t argc = 7;
+    napi_value argv[7] {};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    int32_t fd = -1;
+    int32_t dnsPort = 0;
+    bool blockIPv6 = false;
+    std::string ipv4, ipv6, rules, logPath;
+    if (argc != 7 || !ReadArgInt32(env, argv[0], fd) || fd < 0 ||
+        !ReadArgString(env, argv[1], ipv4) || !ReadArgString(env, argv[2], ipv6) ||
+        !ReadArgInt32(env, argv[3], dnsPort) || dnsPort < 1 || dnsPort > 65535 ||
+        !ReadArgBool(env, argv[4], blockIPv6) || !ReadArgString(env, argv[5], rules) ||
+        !ReadArgString(env, argv[6], logPath) || logPath.empty()) {
+        return MakeUtf8(env, "invalid app tunnel configuration");
+    }
+    return ReturnErrOrUndefined(env, StartFullTunnel(fd, ipv4, ipv6, static_cast<uint16_t>(dnsPort),
+        blockIPv6, rules, logPath));
+}
+
+napi_value JsValidateAppTunnelRules(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] {};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    std::string rules;
+    if (argc != 1 || !ReadArgString(env, argv[0], rules)) {
+        return MakeUtf8(env, "invalid IP rule list");
+    }
+    return ReturnErrOrUndefined(env, ValidateFullTunnelRules(rules));
+}
+
+napi_value JsAppTunnelAvailable(napi_env env, napi_callback_info)
+{
+    napi_value value;
+    napi_get_boolean(env, FullTunnelAvailable(), &value);
+    return value;
+}
+
+napi_value JsAppTunnelRunning(napi_env env, napi_callback_info)
+{
+    napi_value value;
+    napi_get_boolean(env, FullTunnelRunning(), &value);
+    return value;
 }
 
 napi_value JsStopDnsFilter(napi_env env, napi_callback_info info)
@@ -3330,6 +3397,10 @@ napi_value Init(napi_env env, napi_value exports)
         {"startFullDnsFilter", nullptr, JsStartFullDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startAghServerOnly", nullptr, JsStartAghServerOnly, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startLwDnsServer", nullptr, JsStartLwDnsServer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startAppTunnel", nullptr, JsStartAppTunnel, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"validateAppTunnelRules", nullptr, JsValidateAppTunnelRules, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"appTunnelAvailable", nullptr, JsAppTunnelAvailable, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"appTunnelRunning", nullptr, JsAppTunnelRunning, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopDnsFilter", nullptr, JsStopDnsFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reloadDnsRules", nullptr, JsReloadDnsRules, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setUpstreamDns", nullptr, JsSetUpstreamDns, nullptr, nullptr, nullptr, napi_default, nullptr},

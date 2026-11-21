@@ -4,6 +4,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { connection, vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { notificationManager } from '@kit.NotificationKit';
+import { APP_TUNNEL_LOG_FILE, appSplitDnsAllowlistRules, AppSplitFile, parseAppSplitDnsAllowlist } from '../data/AppSplit';
 import { aghSubscriptionId, seedAghSubscriptionCache } from '../data/SubscriptionCache';
 import vpnclientbridge from 'libvpnclientbridge.so';
 
@@ -13,6 +14,7 @@ const APP_BUNDLE_NAME = 'com.tlntin.home_cloud_shield';
 const VPN_DIR_NAME = 'vpn';
 const STATUS_FILE_NAME = 'status.json';
 const RULES_FILE_NAME = 'filters.txt';
+const DNS_ALLOWLIST_RULES_FILE_NAME = 'app_split_dns_allowlist.txt';
 const QUERY_LOG_FILE_NAME = 'dns_queries.jsonl';
 const DEBUG_LOG_FILE_NAME = 'debug.log';
 const UPSTREAM_DNS_FILE_NAME = 'upstream.txt';
@@ -183,12 +185,6 @@ interface StatusSnapshot {
 // Persistent-notification config written by the UI (vpn/notify.json). Labels are
 // resolved against the in-app language override on the UI side and passed through
 // verbatim, so this process never needs to localize.
-// vpn/app_split.json, written by the UI (see APP_SPLIT_FILE_NAME).
-interface AppSplitFile {
-  mode?: string;
-  bundles?: Object[];
-}
-
 interface NotifyConfig {
   enabled: boolean;
   refreshSeconds: number;
@@ -256,6 +252,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private aghWebEnabled: boolean = false;
   private appSplitMode: string = 'off';
   private appSplitBundles: string[] = [];
+  private appSplitDnsAllowlist: string[] | undefined = undefined;
+  private appTunnelRules: string | undefined = undefined;
   private appSplitFilePath: string = '';
   private lastAppSplitSignature: string = '';
   // Set when app_split.json changed the effective lists; onNetworkChanged then
@@ -400,6 +398,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.upstreamDnsIp = this.upstreamManual;
     this.prepareLogFile(this.queryLogFilePath, this.clearDnsLogOnStart, this.logRetentionDays, this.logMaxSizeMb, true);
     this.prepareLogFile(this.debugLogFilePath, this.clearDebugLogOnStart, this.logRetentionDays, this.logMaxSizeMb, false);
+    this.prepareLogFile(`${vpnDir}/${APP_TUNNEL_LOG_FILE}`,
+      this.clearDebugLogOnStart, this.logRetentionDays, this.logMaxSizeMb, false);
     hilog.info(
       DOMAIN,
       TAG,
@@ -504,7 +504,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   }
 
   private parseDebugLogTimestamp(line: string): number {
-    const firstSpace: number = line.indexOf(' ');
+    const firstSpace: number = line.search(/\s/);
     if (firstSpace <= 0) {
       return NaN;
     }
@@ -553,35 +553,20 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   }
 
   private buildVpnConfig(dnsCaptureIps: string[]): vpnExtension.VpnConfig {
-    const routes: vpnExtension.RouteInfo[] = [{
-      interface: 'vpn-tun',
-      destination: {
-        address: {
-          address: IPV4_ROUTE,
-          family: 1,
-          port: 0,
-        },
-        prefixLength: IPV4_PREFIX_LENGTH,
-      },
-      gateway: {
-        address: '0.0.0.0',
-        family: 1,
-        port: 0,
-      },
-      hasGateway: false,
-      isDefaultRoute: false,
-    }];
-    if (this.blockIpv6Connections) {
-      // Cover all IPv6 without declaring an IPv4 default route or changing split routing.
-      routes.push(this.buildIpv6Route('::', 1), this.buildIpv6Route('8000::', 1));
+    const routes: vpnExtension.RouteInfo[] = [];
+    if (this.appTunnelRules !== undefined) {
+      routes.push(this.buildRoute('0.0.0.0', 0), this.buildRoute('::', 0));
     } else {
-      routes.push(this.buildIpv6Route(IPV6_ROUTE, IPV6_PREFIX_LENGTH));
+      routes.push(this.buildRoute(IPV4_ROUTE, IPV4_PREFIX_LENGTH));
+      if (this.blockIpv6Connections) {
+        routes.push(this.buildRoute('::', 1), this.buildRoute('8000::', 1));
+      } else {
+        routes.push(this.buildRoute(IPV6_ROUTE, IPV6_PREFIX_LENGTH));
+      }
+      dnsCaptureIps.forEach((ip: string) => {
+        routes.push(this.buildRoute(ip, ip.includes(':') ? IPV6_HOST_PREFIX_LENGTH : IPV4_HOST_PREFIX_LENGTH));
+      });
     }
-    // Pull each well-known/underlying DNS resolver IP into the tun via a host
-    // route so DNS sent to them (instead of our advertised 10.8.0.1) is captured.
-    dnsCaptureIps.forEach((ip: string) => {
-      routes.push(this.buildHostRoute(ip));
-    });
 
     const config: vpnExtension.VpnConfig = {
       addresses: [{
@@ -616,16 +601,6 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     return config;
   }
 
-  private buildIpv6Route(address: string, prefixLength: number): vpnExtension.RouteInfo {
-    return {
-      interface: 'vpn-tun',
-      destination: { address: { address: address, family: 2, port: 0 }, prefixLength: prefixLength },
-      gateway: { address: '::', family: 2, port: 0 },
-      hasGateway: false,
-      isDefaultRoute: false,
-    };
-  }
-
   // Initial per-app config: the UI's app_split.json when present (always
   // written before a start), else the Want params.
   private parseAppSplit(want: Want): void {
@@ -642,13 +617,19 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private loadAppSplitContent(content: string): void {
     let mode: string = 'off';
     let bundles: string[] = [];
+    let allowlist: string[] | undefined;
+    let tunnelRules: string | undefined;
     try {
       const cfg = JSON.parse(content) as AppSplitFile;
       mode = typeof cfg?.mode === 'string' ? cfg.mode : 'off';
       bundles = this.sanitizeBundles(Array.isArray(cfg?.bundles) ? cfg.bundles as Object[] : []);
+      if (Array.isArray(cfg?.dnsAllowlist) && cfg.dnsAllowlist.every((host: string) => typeof host === 'string')) {
+        allowlist = parseAppSplitDnsAllowlist(cfg.dnsAllowlist.join('\n'));
+      }
+      tunnelRules = typeof cfg?.tunnelRules === 'string' ? cfg.tunnelRules : undefined;
     } catch (_) {
     }
-    this.applyAppSplit(mode, bundles);
+    this.applyAppSplit(mode, bundles, allowlist, tunnelRules);
   }
 
   private parseBundleList(raw: string): string[] {
@@ -670,23 +651,25 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     return bundles.slice(0, APP_SPLIT_MAX_BUNDLES);
   }
 
-  private applyAppSplit(mode: string, bundles: string[]): void {
+  private applyAppSplit(mode: string, bundles: string[], allowlist?: string[], tunnelRules?: string): void {
     this.appSplitBundles = bundles;
     // An empty list can't express either mode — 'only' with nothing trusted would
     // be meaningless — so fall back to whole-device filtering.
     this.appSplitMode = (mode === 'bypass' || mode === 'only') && bundles.length > 0 ? mode : 'off';
+    this.appSplitDnsAllowlist = this.appSplitMode === 'only' ? allowlist : undefined;
+    this.appTunnelRules = this.appSplitMode === 'only' ? tunnelRules : undefined;
     hilog.info(DOMAIN, TAG, '==/vpn_ext/app_split/ mode=%{public}s count=%{public}d',
       this.appSplitMode, this.appSplitBundles.length);
   }
 
   private appSplitKey(): string {
-    return `${this.appSplitMode}|${this.appSplitBundles.join(',')}`;
+    return `${this.appSplitMode}|${this.appSplitBundles.join(',')}|${JSON.stringify(this.appSplitDnsAllowlist ?? null)}|${this.appTunnelRules ?? '<off>'}`;
   }
 
   private appSplitFileSignature(): string {
     try {
       const stat = fileIo.statSync(this.appSplitFilePath);
-      return `${stat.mtime}:${stat.size}`;
+      return `${stat.ino}:${stat.mtime}:${stat.size}`;
     } catch (_) {
       return '';
     }
@@ -703,10 +686,10 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.lastAppSplitSignature = signature;
     const previous: string = this.appSplitKey();
     this.loadAppSplitContent(this.readTextFile(this.appSplitFilePath));
-    if (this.appSplitKey() === previous || this.tunFd < 0) {
+    if (this.appSplitKey() === previous || (this.tunFd < 0 && !this.reconfiguring)) {
       return;
     }
-    this.appendDebugLog(`==/vpn_ext/app_split_changed/ mode=${this.appSplitMode} count=${this.appSplitBundles.length}`);
+    this.appendDebugLog(`==/vpn_ext/app_split_changed/ mode=${this.appSplitMode} count=${this.appSplitBundles.length} allowlist=${this.appSplitDnsAllowlist?.length ?? 'off'}`);
     this.appSplitDirty = true;
     this.onNetworkChanged('appSplit').catch((err: BusinessError) => {
       this.appendDebugLog(`==/vpn_ext/app_split_reapply_error/ ${this.errorMessage(err)}`);
@@ -714,8 +697,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     });
   }
 
-  // Build a single-host (/32 or /128) tun route for one resolver IP.
-  private buildHostRoute(ip: string): vpnExtension.RouteInfo {
+  private buildRoute(ip: string, prefixLength: number): vpnExtension.RouteInfo {
     const isV6: boolean = ip.includes(':');
     return {
       interface: 'vpn-tun',
@@ -725,15 +707,13 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
           family: isV6 ? 2 : 1,
           port: 0,
         },
-        prefixLength: isV6 ? IPV6_HOST_PREFIX_LENGTH : IPV4_HOST_PREFIX_LENGTH,
+        prefixLength: prefixLength,
       },
-      gateway: {
-        address: isV6 ? '::' : '0.0.0.0',
-        family: isV6 ? 2 : 1,
-        port: 0,
-      },
+      // HarmonyOS leaves IPv6 on the physical interface if the on-link
+      // route specifies "::" as its gateway.
+      gateway: isV6 ? { address: '' } : { address: '0.0.0.0', family: 1, port: 0 },
       hasGateway: false,
-      isDefaultRoute: false,
+      isDefaultRoute: !isV6 && prefixLength === 0,
     };
   }
 
@@ -826,7 +806,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.writeStatus(
       'running',
       true,
-      'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.'
+      this.runningVpnNote()
     );
     // Show the persistent stats notification right away (if enabled) instead of
     // waiting for the first pump tick.
@@ -845,7 +825,11 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
 
     try {
       this.logVpnConfig();
-      this.writeStatus('creating', false, 'Creating DNS-only VPN and preparing the local filter engine.');
+      const tunnelRules: string | undefined = this.appTunnelRules;
+      if (tunnelRules !== undefined && !vpnclientbridge.appTunnelAvailable()) {
+        throw new Error('The app tunnel core is unavailable in this build.');
+      }
+      this.writeStatus('creating', false, 'Creating VPN and preparing the local filter engine.');
       // Capture DNS sent to the underlying network's resolvers and common public
       // resolvers (not just our advertised 10.8.0.1) so filtering survives Wi-Fi.
       const underlyingDns: string[] = await this.queryUnderlyingDnsServers();
@@ -877,7 +861,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
           fileIo.mkdirSync(this.aghWorkDirPath, true);
         } catch (_) {
         }
-        nativeError = vpnclientbridge.startFullDnsFilter(
+        nativeError = tunnelRules !== undefined ?
+          vpnclientbridge.startAghServerOnly(this.aghConfigFilePath, this.aghWorkDirPath, this.aghLogFilePath,
+            AGH_DNS_PORT, this.aghWebEnabled) : vpnclientbridge.startFullDnsFilter(
           this.tunFd,
           DNS_SERVER_IP,
           this.aghConfigFilePath,
@@ -901,15 +887,27 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
         );
         this.appendDebugLog(`==/vpn_ext/native_start_full/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} agh_cfg=${this.aghConfigFilePath} agh_dir=${this.aghWorkDirPath} agh_port=${AGH_DNS_PORT} query=${this.queryLogFilePath}`);
       } else {
-        nativeError = vpnclientbridge.startDnsFilter(
+        const allowlist: string[] | undefined = this.appSplitDnsAllowlist;
+        let activeRulesPath: string = this.rulesFilePath;
+        if (allowlist !== undefined) {
+          activeRulesPath = `${this.context.filesDir}/${VPN_DIR_NAME}/${DNS_ALLOWLIST_RULES_FILE_NAME}`;
+          if (!this.writeTextFile(activeRulesPath, appSplitDnsAllowlistRules(allowlist, '*').join('\n'))) {
+            throw new Error('Failed to write the DNS allowlist rules.');
+          }
+        }
+        nativeError = tunnelRules !== undefined ?
+          vpnclientbridge.startLwDnsServer('127.0.0.1', AGH_DNS_PORT, this.upstreamDnsIp, activeRulesPath,
+            this.queryLogFilePath, this.dnsCacheTtlSeconds, this.blockAaaa, allowlist !== undefined, true) :
+          vpnclientbridge.startDnsFilter(
           this.tunFd,
           DNS_SERVER_IP,
           this.upstreamDnsIp,
-          this.rulesFilePath,
+          activeRulesPath,
           this.queryLogFilePath,
           this.dnsCacheTtlSeconds,
           this.blockAaaa,
-          this.blockIpv6Connections
+          this.blockIpv6Connections,
+          allowlist !== undefined
         );
         hilog.info(
           DOMAIN,
@@ -918,18 +916,32 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
           this.tunFd,
           DNS_SERVER_IP,
           this.upstreamDnsIp,
-          this.rulesFilePath,
+          activeRulesPath,
           this.queryLogFilePath,
           this.dnsCacheTtlSeconds
         );
-        this.appendDebugLog(`==/vpn_ext/native_start/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} upstream=${this.upstreamDnsIp} rules=${this.rulesFilePath} query=${this.queryLogFilePath} cache_ttl=${this.dnsCacheTtlSeconds}`);
+        this.appendDebugLog(`==/vpn_ext/native_start/ fd=${this.tunFd} dns4=${DNS_SERVER_IP} upstream=${this.upstreamDnsIp} rules=${activeRulesPath} query=${this.queryLogFilePath} cache_ttl=${this.dnsCacheTtlSeconds}`);
       }
       if (nativeError !== undefined) {
         throw new Error(nativeError);
       }
+      if (tunnelRules !== undefined) {
+        const logPath = `${this.context.filesDir}/${VPN_DIR_NAME}/${APP_TUNNEL_LOG_FILE}`;
+        nativeError = vpnclientbridge.startAppTunnel(this.tunFd, TUN_ADDRESS_IP, TUN_ADDRESS_IPV6,
+          AGH_DNS_PORT, this.blockIpv6Connections, tunnelRules, logPath);
+        if (nativeError !== undefined) {
+          throw new Error(nativeError);
+        }
+        this.appendDebugLog('==/vpn_ext/app_tunnel_started/');
+      }
     } catch (err) {
       throw new Error(this.errorMessage(err));
     }
+  }
+
+  private runningVpnNote(): string {
+    return this.appTunnelRules !== undefined ? 'App tunnel is active. TCP, UDP and DNS are handled locally.' :
+      'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.';
   }
 
   // Tear down the running native filter and tun, then rebuild both with routes
@@ -955,7 +967,13 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     // handle. createVpnConnection only allocates a lightweight JS handle; the
     // system VPN authorization for this extension persists across it.
     this.vpnConnection = vpnExtension.createVpnConnection(this.context);
-    await this.createTunAndStartFilter();
+    try {
+      await this.createTunAndStartFilter();
+    } catch (err) {
+      this.writeStatus('error', false, this.errorMessage(err));
+      await this.destroyVpn();
+      throw new Error(this.errorMessage(err));
+    }
     // The native filter just reloaded rules/upstream from disk, so reseed the
     // watch baselines to avoid a redundant reload on the next tick.
     this.lastRulesSignature = this.rulesFileSignature();
@@ -963,7 +981,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     this.writeStatus(
       'running',
       true,
-      'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.'
+      this.runningVpnNote()
     );
     this.appendDebugLog(`==/vpn_ext/reapply_done/ tun_fd=${this.tunFd}`);
   }
@@ -1084,6 +1102,14 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     }
 
     this.statusTimer = setInterval(() => {
+      if (this.reconfiguring || this.tunFd < 0) {
+        return;
+      }
+      if (this.appTunnelRules !== undefined && !vpnclientbridge.appTunnelRunning()) {
+        this.writeStatus('error', false, 'The app tunnel stopped unexpectedly.');
+        void this.destroyVpn();
+        return;
+      }
       this.checkRulesReload();
       this.checkUpstreamReload();
       this.checkAppSplitReload();
@@ -1104,7 +1130,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       this.writeStatus(
         'running',
         true,
-        'DNS-only VPN is active. DNS requests are visible, rule-matched, and forwarded or blocked locally.'
+        this.runningVpnNote()
       );
     }, 1000);
   }
@@ -1452,15 +1478,13 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       upstreams.push(UPSTREAM_DNS_IP);
     }
 
-    const rules: string[] = [];
-    for (const rawLine of this.readTextFile(this.rulesFilePath).split('\n')) {
-      const line: string = rawLine.trim();
-      if (line.length > 0) {
-        rules.push(line);
-      }
-    }
+    const allowlist: string[] | undefined = this.appSplitDnsAllowlist;
+    const rules: string[] = allowlist === undefined
+      ? this.readTextFile(this.rulesFilePath).split('\n').map((line: string) => line.trim())
+        .filter((line: string) => line.length > 0)
+      : appSplitDnsAllowlistRules(allowlist, '/^.*$/');
 
-    const filters = this.parseAghFilters();
+    const filters: AghFilterEntry[] = allowlist === undefined ? this.parseAghFilters() : [];
     const vpnDir = `${this.context.filesDir}/${VPN_DIR_NAME}`;
     filters.forEach((filter: AghFilterEntry) => {
       if (filter.enabled) {
@@ -1468,9 +1492,11 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       }
     });
     const yaml: string = this.buildAghConfigYaml(upstreams, rules, filters);
-    this.writeTextFile(this.aghConfigFilePath, yaml);
+    if (!this.writeTextFile(this.aghConfigFilePath, yaml)) {
+      throw new Error('Failed to write the full DNS engine configuration.');
+    }
     const filterCount: number = filters.length;
-    const rewriteCount: number = this.parseAghRewrites().length;
+    const rewriteCount: number = allowlist === undefined ? this.parseAghRewrites().length : 0;
     const adv: AghAdvancedConfig = this.parseAghAdvanced();
     hilog.info(DOMAIN, TAG,
       '==/vpn_ext/agh_config_written/ upstreams=%{public}d rules=%{public}d filters=%{public}d rewrites=%{public}d blocking=%{public}s upstream_mode=%{public}s',
@@ -1497,7 +1523,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       ? `user_rules:\n${rules.map((r: string) => `  - ${this.yamlQuote(r)}`).join('\n')}`
       : 'user_rules: []';
 
-    const rewrites: AghRewriteEntry[] = this.parseAghRewrites();
+    const rewrites: AghRewriteEntry[] = this.appSplitDnsAllowlist === undefined ? this.parseAghRewrites() : [];
     const adv: AghAdvancedConfig = this.parseAghAdvanced();
 
     // Advanced DNS settings (inline into the dns: block). Ratelimit defaults to
@@ -1528,7 +1554,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
 
     // filtering: block carries the blocking mode and the DNS rewrites. Only the
     // keys we emit override AdGuardHome's defaults; the rest stay default.
-    const blockingMode: string = this.normalizeBlockingMode(adv.blockingMode);
+    const blockingMode: string = this.appSplitDnsAllowlist === undefined
+      ? this.normalizeBlockingMode(adv.blockingMode) : 'nxdomain';
     let rewritesBlock: string;
     if (rewrites.length === 0) {
       rewritesBlock = '  rewrites: []';
@@ -1741,7 +1768,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private checkRulesReload(): void {
     // In full mode rules are baked into AdGuardHome.yaml at start; AdGuardHome
     // is not hot-reloaded here. Rule changes take effect on the next restart.
-    if (this.filterMode === FILTER_MODE_FULL) {
+    if (this.filterMode === FILTER_MODE_FULL || this.appSplitDnsAllowlist !== undefined) {
       return;
     }
     const signature: string = this.rulesFileSignature();
@@ -1795,7 +1822,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     if (preserveFailure) {
       this.writeStatus('error', false, this.lastNote);
     } else {
-      this.writeStatus('stopped', false, 'DNS-only VPN has been stopped.');
+      this.writeStatus('stopped', false, 'VPN has been stopped.');
     }
   }
 
@@ -1856,15 +1883,17 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     }
   }
 
-  private writeTextFile(path: string, content: string): void {
+  private writeTextFile(path: string, content: string): boolean {
     let f: fileIo.File | undefined = undefined;
     try {
       f = fileIo.openSync(path, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       fileIo.writeSync(f.fd, content);
+      return true;
     } catch (err) {
       hilog.error(DOMAIN, TAG, '==/vpn_ext/write_file_error/ path=%{public}s err=%{public}s', path,
         this.errorMessage(err));
       this.appendDebugLog(`==/vpn_ext/write_file_error/ path=${path} err=${this.errorMessage(err)}`);
+      return false;
     } finally {
       if (f !== undefined) {
         try {
