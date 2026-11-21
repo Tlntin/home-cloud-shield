@@ -265,6 +265,8 @@
     { "name": "customBlockRulePlaceholder", "value": "輸入網域或完整規則，網域會自動轉成 ||domain^" },
     { "name": "customAllowRulePlaceholder", "value": "輸入網域或完整規則，網域會自動轉成 @@||domain^" },
     { "name": "confirmDeleteRuleLine", "value": "確定清理這條規則嗎？" },
+    { "name": "removeAllRuleLines", "value": "全部移除" },
+    { "name": "confirmRemoveAllBlockRules", "value": "確定移除「自訂攔截」中的所有規則嗎？確認後將清空這個群組。" },
     { "name": "noCustomRulesHint", "value": "暫無規則，輸入網域後點擊添加。右側按鈕可刪除單條規則。" },
     { "name": "swipeAgainToExit", "value": "再按一次退出應用" },
     { "name": "notificationGroup", "value": "🔔 通知欄" },

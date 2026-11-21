@@ -158,6 +158,7 @@ struct StatsState {
     // 127.0.0.1:aghDnsPort (which performs all filtering/upstream/caching)
     // instead of matching rules locally. aghDnsPort == 0 means lightweight mode.
     bool fullMode = false;
+    bool blockAaaa = false;
     uint16_t aghDnsPort = 0;
     std::shared_ptr<const std::vector<RuleEntry>> activeRules;
     uint32_t dnsCacheTtlSeconds = 3600;
@@ -925,7 +926,20 @@ const char *QuestionTypeName(uint16_t qtype)
     }
 }
 
-std::vector<uint8_t> BuildBlockedDnsResponse(const uint8_t *query, size_t len, const DnsQuestion &question)
+MatchResult MatchDnsQuestion(const DnsQuestion &question, const std::vector<RuleEntry> *rules, bool blockAaaa)
+{
+    if (blockAaaa) {
+        MatchResult match;
+        match.matched = true;
+        match.blocked = true;
+        match.matchedRule = "Block IPv6 (AAAA)";
+        return match;
+    }
+    return rules ? MatchDomain(question.name, question.qtype, *rules) : MatchResult {};
+}
+
+std::vector<uint8_t> BuildBlockedDnsResponse(const uint8_t *query, size_t len, const DnsQuestion &question,
+    bool emptyAnswer)
 {
     if (len < question.questionEndOffset) {
         return {};
@@ -939,7 +953,7 @@ std::vector<uint8_t> BuildBlockedDnsResponse(const uint8_t *query, size_t len, c
     out.push_back(0x00);
     out.push_back(0x01);
 
-    const bool synthesizeAddress = question.qtype == 1 || question.qtype == 28;
+    const bool synthesizeAddress = !emptyAnswer && (question.qtype == 1 || question.qtype == 28);
     out.push_back(0x00);
     out.push_back(synthesizeAddress ? 0x01 : 0x00);
     out.push_back(0x00);
@@ -2029,6 +2043,7 @@ void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &messag
     std::shared_ptr<const std::vector<RuleEntry>> rules;
     std::string queryLogPath;
     std::vector<std::string> upstreams;
+    bool blockAaaa = false;
     bool fullMode = false;
     uint16_t aghDnsPort = 0;
     {
@@ -2037,14 +2052,13 @@ void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &messag
         queryLogPath = g_state.queryLogPath;
         upstreams = g_state.upstreamDnsIps;
         fullMode = g_state.fullMode;
+        blockAaaa = !fullMode && g_state.blockAaaa && question.qtype == 28;
         aghDnsPort = g_state.aghDnsPort;
     }
 
     // Full mode forwards everything to the embedded AdGuardHome engine (which
     // performs all matching); lightweight mode matches locally and may block.
-    const MatchResult match = (!fullMode && rules)
-        ? MatchDomain(question.name, question.qtype, *rules)
-        : MatchResult {};
+    const MatchResult match = MatchDnsQuestion(question, fullMode ? nullptr : rules.get(), blockAaaa);
     const std::vector<std::string> tcpUpstreams = fullMode ? std::vector<std::string>{"127.0.0.1"} : upstreams;
     const uint16_t tcpPort = fullMode ? aghDnsPort : static_cast<uint16_t>(53);
     const bool useCache = !fullMode;
@@ -2054,7 +2068,7 @@ void HandleTcpDnsQuery(int tunFd, TcpConn &c, const std::vector<uint8_t> &messag
     std::string responseError;
     if (match.blocked) {
         source = "blocked";
-        dnsResponse = BuildBlockedDnsResponse(message.data(), message.size(), question);
+        dnsResponse = BuildBlockedDnsResponse(message.data(), message.size(), question, blockAaaa);
     } else {
         const bool cacheHit = useCache &&
             TryGetCachedDnsResponse(question, message.data(), message.size(), dnsResponse);
@@ -2228,6 +2242,7 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
     std::shared_ptr<const std::vector<RuleEntry>> rules;
     std::string queryLogPath;
     std::vector<std::string> upstreams;
+    bool blockAaaa = false;
     bool fullMode = false;
     uint16_t aghDnsPort = 0;
     {
@@ -2236,19 +2251,18 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
         queryLogPath = g_state.queryLogPath;
         upstreams = g_state.upstreamDnsIps;
         fullMode = g_state.fullMode;
+        blockAaaa = !fullMode && g_state.blockAaaa && question.qtype == 28;
         aghDnsPort = g_state.aghDnsPort;
     }
 
     // Full mode forwards every query to the embedded AdGuardHome engine, which
     // performs all matching; lightweight mode matches locally and may block.
-    const MatchResult match = (!fullMode && rules)
-        ? MatchDomain(question.name, question.qtype, *rules)
-        : MatchResult {};
+    const MatchResult match = MatchDnsQuestion(question, fullMode ? nullptr : rules.get(), blockAaaa);
 
     if (match.blocked) {
         // Blocked responses are synthesized locally (no network), so answer them
         // inline on the reader thread instead of paying a queue hop.
-        const std::vector<uint8_t> dnsResponse = BuildBlockedDnsResponse(dnsPayload, dnsLen, question);
+        const std::vector<uint8_t> dnsResponse = BuildBlockedDnsResponse(dnsPayload, dnsLen, question, blockAaaa);
         if (dnsResponse.empty()) {
             std::lock_guard<std::mutex> lock(g_state.mu);
             g_state.lastError = "failed to synthesize blocked DNS response";
@@ -2303,7 +2317,7 @@ void HandleDnsPacket(int tunFd, const uint8_t *packet, size_t len)
     EnqueueForwardTask(std::move(task));
 }
 
-void ReaderLoop(int tunFd)
+void ReaderLoop(int tunFd, bool blockIpv6Connections)
 {
     uint8_t buffer[65536];
     int stopFd = -1;
@@ -2370,7 +2384,9 @@ void ReaderLoop(int tunFd)
                         static_cast<unsigned long long>(g_state.ipv6Packets));
                 }
             }
-            HandleDnsPacket(tunFd, buffer, static_cast<size_t>(readBytes));
+            if (!blockIpv6Connections || (buffer[0] >> 4) != 6) {
+                HandleDnsPacket(tunFd, buffer, static_cast<size_t>(readBytes));
+            }
             continue;
         }
 
@@ -2398,7 +2414,7 @@ void ReaderLoop(int tunFd)
 }
 
 void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp, const std::string &upstreamDnsIp,
-    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds)
+    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds, bool blockAaaa = false)
 {
     state.running = true;
     state.stopRequested = false;
@@ -2425,6 +2441,7 @@ void ResetStatsLocked(StatsState &state, int fd, const std::string &dnsServerIp,
     state.queryLogPath = queryLogPath;
     state.activeRules = std::make_shared<const std::vector<RuleEntry>>(LoadRulesSnapshot(rulesPath));
     state.dnsCacheTtlSeconds = dnsCacheTtlSeconds;
+    state.blockAaaa = blockAaaa;
     state.dnsResponseCache.clear();
     g_tcpConns.clear();
 }
@@ -2513,7 +2530,8 @@ std::string StopDnsFilter()
 }
 
 std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::string &upstreamDnsIp,
-    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds)
+    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds, bool blockAaaa,
+    bool blockIpv6Connections)
 {
     if (fd < 0) {
         return "invalid tun fd";
@@ -2547,9 +2565,9 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
     StartForwardPool();
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
-        ResetStatsLocked(g_state, dupFd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds);
+        ResetStatsLocked(g_state, dupFd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds, blockAaaa);
         g_state.stopEventFd = eventfd(0, EFD_NONBLOCK);
-        g_state.worker = std::thread(ReaderLoop, dupFd);
+        g_state.worker = std::thread(ReaderLoop, dupFd, blockIpv6Connections);
     }
 
     LogInfo("==/vpn_native/reader_started/ dup_fd=%{public}d", dupFd);
@@ -2561,7 +2579,7 @@ std::string StartDnsFilter(int fd, const std::string &dnsServerIp, const std::st
 // run the TUN reader as a thin relay that forwards every DNS query to it.
 std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std::string &aghConfigPath,
     const std::string &aghWorkDir, const std::string &aghLogPath, uint16_t aghDnsPort,
-    const std::string &queryLogPath, bool aghWebEnabled)
+    const std::string &queryLogPath, bool aghWebEnabled, bool blockIpv6Connections)
 {
     if (fd < 0) {
         return "invalid tun fd";
@@ -2618,7 +2636,7 @@ std::string StartFullDnsFilter(int fd, const std::string &dnsServerIp, const std
         g_state.fullMode = true;
         g_state.aghDnsPort = aghDnsPort;
         g_state.stopEventFd = eventfd(0, EFD_NONBLOCK);
-        g_state.worker = std::thread(ReaderLoop, dupFd);
+        g_state.worker = std::thread(ReaderLoop, dupFd, blockIpv6Connections);
     }
 
     LogInfo("==/vpn_native/reader_started_full/ dup_fd=%{public}d", dupFd);
@@ -2709,23 +2727,23 @@ std::vector<uint8_t> ResolveDnsMessage(const std::vector<uint8_t> &message)
     std::shared_ptr<const std::vector<RuleEntry>> rules;
     std::string queryLogPath;
     std::vector<std::string> upstreams;
+    bool blockAaaa = false;
     {
         std::lock_guard<std::mutex> lock(g_state.mu);
         rules = g_state.activeRules;
         queryLogPath = g_state.queryLogPath;
         upstreams = g_state.upstreamDnsIps;
+        blockAaaa = g_state.blockAaaa && question.qtype == 28;
     }
 
-    const MatchResult match = rules
-        ? MatchDomain(question.name, question.qtype, *rules)
-        : MatchResult {};
+    const MatchResult match = MatchDnsQuestion(question, rules.get(), blockAaaa);
 
     std::vector<uint8_t> dnsResponse;
     std::string source = "upstream";
     std::string responseError;
     if (match.blocked) {
         source = "blocked";
-        dnsResponse = BuildBlockedDnsResponse(message.data(), message.size(), question);
+        dnsResponse = BuildBlockedDnsResponse(message.data(), message.size(), question, blockAaaa);
     } else {
         const bool cacheHit =
             TryGetCachedDnsResponse(question, message.data(), message.size(), dnsResponse);
@@ -2905,7 +2923,7 @@ void LwDnsServerUdpLoop(int udpFd)
 // best effort (a UDP bind failure leaves the TCP server fully functional).
 // Teardown goes through StopDnsFilter().
 std::string StartLwDnsServer(const std::string &bindIp, uint16_t port, const std::string &upstreamDnsIp,
-    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds)
+    const std::string &rulesPath, const std::string &queryLogPath, uint32_t dnsCacheTtlSeconds, bool blockAaaa)
 {
     if (bindIp.empty()) {
         return "bind ip is required";
@@ -2979,7 +2997,7 @@ std::string StartLwDnsServer(const std::string &bindIp, uint16_t port, const std
         std::lock_guard<std::mutex> lock(g_state.mu);
         // -1 fd: no TUN. Seed the resolver state (rules/upstream/query log) the
         // same way the lightweight TUN path does; fullMode stays false.
-        ResetStatsLocked(g_state, -1, bindIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds);
+        ResetStatsLocked(g_state, -1, bindIp, upstreamDnsIp, rulesPath, queryLogPath, dnsCacheTtlSeconds, blockAaaa);
         g_state.fullMode = false;
         g_state.dnsServerListenFd = listenFd;
         g_state.dnsServerThread = std::thread(LwDnsServerAcceptLoop, listenFd);
@@ -3060,8 +3078,8 @@ std::string GetStatsJson()
 
 napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
 {
-    size_t argc = 6;
-    napi_value argv[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    size_t argc = 8;
+    napi_value argv[8] {};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 6) {
         return MakeUtf8(env, "tun fd, dns server ip, upstream dns ip, rules path, query log path, and cache ttl are required");
@@ -3092,15 +3110,21 @@ napi_value JsStartDnsFilter(napi_env env, napi_callback_info info)
         return MakeUtf8(env, "invalid dns cache ttl");
     }
 
+    bool blockAaaa = false;
+    bool blockIpv6Connections = false;
+    if ((argc >= 7 && !ReadArgBool(env, argv[6], blockAaaa)) ||
+        (argc >= 8 && !ReadArgBool(env, argv[7], blockIpv6Connections))) {
+        return MakeUtf8(env, "invalid IPv6 policy");
+    }
     return ReturnErrOrUndefined(env,
         StartDnsFilter(fd, dnsServerIp, upstreamDnsIp, rulesPath, queryLogPath,
-            static_cast<uint32_t>(dnsCacheTtlSeconds)));
+            static_cast<uint32_t>(dnsCacheTtlSeconds), blockAaaa, blockIpv6Connections));
 }
 
 napi_value JsStartFullDnsFilter(napi_env env, napi_callback_info info)
 {
-    size_t argc = 8;
-    napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    size_t argc = 9;
+    napi_value argv[9] {};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 7) {
         return MakeUtf8(env,
@@ -3141,9 +3165,13 @@ napi_value JsStartFullDnsFilter(napi_env env, napi_callback_info info)
         (void)ReadArgBool(env, argv[7], aghWebEnabled);
     }
 
+    bool blockIpv6Connections = false;
+    if (argc >= 9 && !ReadArgBool(env, argv[8], blockIpv6Connections)) {
+        return MakeUtf8(env, "invalid IPv6 connection policy");
+    }
     return ReturnErrOrUndefined(env,
         StartFullDnsFilter(fd, dnsServerIp, aghConfigPath, aghWorkDir, aghLogPath,
-            static_cast<uint16_t>(aghDnsPort), queryLogPath, aghWebEnabled));
+            static_cast<uint16_t>(aghDnsPort), queryLogPath, aghWebEnabled, blockIpv6Connections));
 }
 
 napi_value JsStartAghServerOnly(napi_env env, napi_callback_info info)
@@ -3183,8 +3211,8 @@ napi_value JsStartAghServerOnly(napi_env env, napi_callback_info info)
 
 napi_value JsStartLwDnsServer(napi_env env, napi_callback_info info)
 {
-    size_t argc = 6;
-    napi_value argv[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    size_t argc = 7;
+    napi_value argv[7] {};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 6) {
         return MakeUtf8(env,
@@ -3216,9 +3244,13 @@ napi_value JsStartLwDnsServer(napi_env env, napi_callback_info info)
         return MakeUtf8(env, "invalid cache ttl");
     }
 
+    bool blockAaaa = false;
+    if (argc >= 7 && !ReadArgBool(env, argv[6], blockAaaa)) {
+        return MakeUtf8(env, "invalid AAAA policy");
+    }
     return ReturnErrOrUndefined(env,
         StartLwDnsServer(bindIp, static_cast<uint16_t>(port), upstreamDnsIp, rulesPath, queryLogPath,
-            static_cast<uint32_t>(cacheTtl)));
+            static_cast<uint32_t>(cacheTtl), blockAaaa));
 }
 
 napi_value JsStopDnsFilter(napi_env env, napi_callback_info info)

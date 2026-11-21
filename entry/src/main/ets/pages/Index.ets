@@ -20,6 +20,7 @@ import { BLOCKED_SERVICES, BlockedServiceDef } from '../data/BlockedServices';
 import { dnsLogDb, DnsLogRow, DnsLogSummary } from '../data/DnsLogDb';
 import { dnsStats } from '../data/DnsStats';
 import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/ConfigSync';
+import { aghSubscriptionId, seedAghSubscriptionCache, subscriptionCacheName } from '../data/SubscriptionCache';
 import { blurTitleBar } from '../components/BlurTitleBar';
 import {
   APP_SPLIT_MAX_BUNDLES, APP_SPLIT_PRESETS, AppSplitEntry, AppSplitMode, AppSplitPreset, findAppSplitPreset,
@@ -199,7 +200,8 @@ type LanguageKey =
   | 'customBlockRules' | 'customAllowRules' | 'builtInRuleProfileLocked' | 'addRuleActionTitle'
   | 'addAllowRuleAction' | 'addBlockRuleAction' | 'ruleAddedNeedsRestart' | 'ruleAlreadyExists'
   | 'tapDomainToCreateRule' | 'addRuleLine' | 'customBlockRulePlaceholder' | 'customAllowRulePlaceholder'
-  | 'confirmDeleteRuleLine' | 'noCustomRulesHint' | 'swipeAgainToExit'
+  | 'confirmDeleteRuleLine' | 'removeAllRuleLines' | 'confirmRemoveAllBlockRules'
+  | 'noCustomRulesHint' | 'swipeAgainToExit'
   | 'continueLabel' | 'keepAliveWarnTitle' | 'keepAliveWarnMessage'
   | 'dnsProxyTitle' | 'dnsProxyDesc' | 'dnsProxyCopied' | 'dnsProxyStart' | 'dnsProxyStop'
   | 'dnsProxyDashboard' | 'dnsProxyDashboardDesc' | 'dnsProxyRunningStatus' | 'dnsProxyStoppedStatus'
@@ -449,6 +451,8 @@ function resolveStringResource(key: LanguageKey): number {
     case 'customBlockRulePlaceholder': return $r('app.string.customBlockRulePlaceholder').id;
     case 'customAllowRulePlaceholder': return $r('app.string.customAllowRulePlaceholder').id;
     case 'confirmDeleteRuleLine': return $r('app.string.confirmDeleteRuleLine').id;
+    case 'removeAllRuleLines': return $r('app.string.removeAllRuleLines').id;
+    case 'confirmRemoveAllBlockRules': return $r('app.string.confirmRemoveAllBlockRules').id;
     case 'noCustomRulesHint': return $r('app.string.noCustomRulesHint').id;
     case 'swipeAgainToExit': return $r('app.string.swipeAgainToExit').id;
     case 'continueLabel': return $r('app.string.continueLabel').id;
@@ -801,6 +805,8 @@ interface PersistState {
   themeMode?: number;
   ruleProfiles?: RuleProfile[];
   dnsCacheTtlSeconds?: number;
+  blockAaaa?: boolean;
+  blockIpv6Connections?: boolean;
   upstreamDnsIp?: string;
   upstreamAutoEnabled?: boolean;
   logRetentionDays?: number;
@@ -1051,6 +1057,8 @@ struct Index {
   @State debugSheetFeedbackText: string = '';
   @State dnsCacheTtlInput: string = `${DEFAULT_DNS_CACHE_TTL_SECONDS}`;
   @State dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
+  @State private blockAaaa: boolean = false;
+  @State private blockIpv6Connections: boolean = false;
   @State upstreamDnsInput: string = '';
   // Auto upstream: follow the system/router-provided DNS (default off). The
   // manual list above stays editable and serves as the fallback.
@@ -1162,6 +1170,7 @@ struct Index {
   // When the last start request was issued (manual, auto-start, or watchdog);
   // drives the START_SETTLE_GRACE_MS hold-off.
   private lastStartRequestAt: number = 0;
+  private fullEngineRestartPending: boolean = false;
   // True while the auto-start permission probe briefly starts/stops the VPN, so
   // the watchdog does not adopt that transient run and restart it afterwards.
   private probingVpnPermission: boolean = false;
@@ -1468,16 +1477,10 @@ struct Index {
   }
 
   private restartFullEngineForConfig(): void {
-    if (!this.fullModeEnabled || this.busy) {
-      return;
-    }
-    // Restart whichever full-engine mode is running so the change applies now.
-    if (this.proxyModeEnabled) {
-      if (this.dnsProxyRunning) {
-        this.startDnsProxy();
-      }
-    } else if (this.status.running) {
-      this.startVpn();
+    this.fullEngineRestartPending = this.fullModeEnabled &&
+      (!this.canChangeFilterSettings() || this.showRuleEditorSheet);
+    if (this.fullModeEnabled && !this.fullEngineRestartPending) {
+      this.restartActiveFilter();
     }
   }
 
@@ -1663,11 +1666,7 @@ struct Index {
   // A stable per-URL cache filename (djb2 hash → hex) so the same list always maps
   // to the same local file regardless of display-name changes.
   private subCacheFilePath(url: string): string {
-    let h: number = 5381;
-    for (let i = 0; i < url.length; i++) {
-      h = ((h * 33) + url.charCodeAt(i)) | 0;
-    }
-    return `${this.subsCacheDir()}/${(h >>> 0).toString(16)}.txt`;
+    return `${this.subsCacheDir()}/${subscriptionCacheName(url)}`;
   }
 
   private writeSubCache(url: string, content: string): void {
@@ -2535,6 +2534,7 @@ struct Index {
 
   private syncedAppSettings(app: ConfigAppSettings): ConfigAppSettings {
     return {
+      fullMode: app.fullMode,
       upstreamDns: app.upstreamDns,
       upstreamAuto: app.upstreamAuto,
       blockedServiceIds: app.blockedServiceIds,
@@ -2604,6 +2604,7 @@ struct Index {
     const advancedDns = this.advancedDns;
     const upstreamDns = this.upstreamDnsInput;
     const upstreamAuto = this.upstreamAutoEnabled;
+    const fullMode = this.fullModeEnabled;
     const cacheTtl = this.dnsCacheTtlSeconds;
     const cacheTtlInput = this.dnsCacheTtlInput;
     const appSplitMode = this.appSplitMode;
@@ -2640,6 +2641,7 @@ struct Index {
       this.advancedDns = advancedDns;
       this.upstreamDnsInput = upstreamDns;
       this.upstreamAutoEnabled = upstreamAuto;
+      this.fullModeEnabled = fullMode;
       this.dnsCacheTtlSeconds = cacheTtl;
       this.dnsCacheTtlInput = cacheTtlInput;
       this.appSplitMode = appSplitMode;
@@ -2653,7 +2655,11 @@ struct Index {
     if (this.activeRunning()) {
       this.writeTextFile(this.rulesFilePath, this.rulesText);
       this.writeUpstreamFile();
-      this.restartFullEngineForConfig();
+      if (fullMode !== this.fullModeEnabled) {
+        this.restartActiveFilter();
+      } else {
+        this.restartFullEngineForConfig();
+      }
     }
     const previousUrls = new Set<string>(subscriptions.map((source: FilterSubscription) => source.url));
     const newUrls = this.filterSubscriptions.filter((source: FilterSubscription) => source.enabled &&
@@ -2777,7 +2783,7 @@ struct Index {
   }
 
   private canReceiveConfigSync(): boolean {
-    return this.pageVisible && !this.showRuleEditorSheet && !this.busy &&
+    return this.pageVisible && !this.showRuleEditorSheet && this.canChangeFilterSettings() &&
       configSync.isEnabled(this.onConfigSyncAvailable);
   }
 
@@ -3219,6 +3225,31 @@ struct Index {
     });
   }
 
+  private confirmRemoveAllCustomBlockRules(): void {
+    if (this.editingRuleProfileId !== CUSTOM_BLOCK_RULE_PROFILE_ID || !this.rulesText.trim()) {
+      return;
+    }
+    this.getUIContext().showAlertDialog({
+      title: this.t('removeAllRuleLines'),
+      message: this.t('confirmRemoveAllBlockRules'),
+      buttons: [
+        { value: this.t('cancel'), action: () => {} },
+        {
+          value: this.t('removeAllRuleLines'),
+          action: () => {
+            if (this.showRuleEditorSheet && this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID) {
+              this.rulesText = '';
+              this.ruleLineInputText = '';
+              this.applyRuleEditorChanges();
+              this.saveRules();
+              this.restartFullEngineForConfig();
+            }
+          }
+        }
+      ]
+    });
+  }
+
   private parseDnsCacheTtlInput(value: string): number {
     const trimmed: string = value.trim();
     if (trimmed.length === 0) {
@@ -3496,32 +3527,50 @@ struct Index {
     this.savePersistState();
   }
 
-  // Toggle between the lightweight C++ engine and the full embedded AdGuardHome
-  // engine. The mode is read by the VPN extension at start. If the filter is
-  // already running, restart it so the new mode applies immediately.
-  private updateFullModeEnabled(value: boolean): void {
-    this.fullModeEnabled = value;
-    this.savePersistState();
-    if (this.busy) {
+  private updateIpv6Blocking(blockAaaa: boolean, blockConnections: boolean): void {
+    if (!this.canChangeFilterSettings() ||
+      (this.blockAaaa === blockAaaa && this.blockIpv6Connections === blockConnections)) {
       return;
     }
-    // Restart the active mode so the new engine applies immediately.
-    if (this.proxyModeEnabled) {
-      if (this.dnsProxyRunning) {
-        this.startDnsProxy();
-      }
-    } else if (this.status.running) {
-      this.startVpn();
+    const previousAaaa = this.blockAaaa;
+    const previousConnections = this.blockIpv6Connections;
+    this.blockAaaa = blockAaaa;
+    this.blockIpv6Connections = blockConnections;
+    if (!this.savePersistState(true)) {
+      this.blockAaaa = previousAaaa;
+      this.blockIpv6Connections = previousConnections;
+      this.errorText = this.tri('Could not save IPv6 settings.', '无法保存 IPv6 设置。', '無法儲存 IPv6 設定。');
+      return;
+    }
+    this.restartActiveFilter();
+  }
+
+  private canChangeFilterSettings(): boolean {
+    return !this.busy && !this.stopping && !this.homeStarting() &&
+      (this.proxyModeEnabled || (this.status.phase !== 'starting' && this.status.phase !== 'creating' &&
+        this.status.phase !== 'stopping'));
+  }
+
+  private restartActiveFilter(): void {
+    if (this.proxyModeEnabled && this.dnsProxyRunning) {
+      void this.startDnsProxy(true);
+    } else if (!this.proxyModeEnabled && this.status.running) {
+      void this.startVpn(true, true);
     }
   }
 
-  // Quick engine switch surfaced on the home Hero dropdown. Sets the lightweight
-  // or full (AdGuardHome) engine and shows a short confirmation toast.
   private setEngineFullMode(full: boolean): void {
-    if (this.fullModeEnabled === full) {
+    if (!this.canChangeFilterSettings() || this.fullModeEnabled === full) {
       return;
     }
-    this.updateFullModeEnabled(full);
+    const previousMode: boolean = this.fullModeEnabled;
+    this.fullModeEnabled = full;
+    if (!this.savePersistState(true)) {
+      this.fullModeEnabled = previousMode;
+      this.errorText = this.tri('Could not save engine settings.', '无法保存引擎设置。', '無法儲存引擎設定。');
+      return;
+    }
+    this.restartActiveFilter();
     const message: string = full
       ? this.tri('Switched to full engine · powerful & fully compatible',
           '已切换为完整模式内核 · 功能强大，完全兼容',
@@ -4644,6 +4693,8 @@ struct Index {
         queryLogFilePath: this.queryLogFilePath,
         debugLogFilePath: this.debugLogFilePath,
         upstreamDnsFilePath: this.upstreamDnsFilePath,
+        blockAaaa: this.blockAaaa,
+        blockIpv6Connections: this.blockIpv6Connections,
         dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
         logRetentionDays: this.logRetentionDays,
         logMaxSizeMb: this.logMaxSizeMb,
@@ -4898,6 +4949,8 @@ struct Index {
         return;
       }
       const state: PersistState = JSON.parse(raw) as PersistState;
+      this.blockAaaa = state.blockAaaa === true;
+      this.blockIpv6Connections = state.blockIpv6Connections === true;
       this.configSyncEnabled = state.configSyncEnabled === true;
       if (typeof state.configSyncDeviceId === 'string' && /^[0-9a-f-]{36}$/.test(state.configSyncDeviceId)) {
         this.configSyncDeviceId = state.configSyncDeviceId;
@@ -5081,6 +5134,8 @@ struct Index {
       themeMode: this.themeMode,
       ruleProfiles: this.ruleProfiles,
       dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
+      blockAaaa: this.blockAaaa,
+      blockIpv6Connections: this.blockIpv6Connections,
       upstreamDnsIp: this.upstreamDnsInput,
       upstreamAutoEnabled: this.upstreamAutoEnabled,
       logRetentionDays: this.logRetentionDays,
@@ -5257,6 +5312,9 @@ struct Index {
     // resolved (guarded internally: runs at most once per launch).
     void this.tryAutoStartFilterOnLaunch();
     this.checkAutoRestart();
+    if (this.fullEngineRestartPending && this.canChangeFilterSettings() && !this.showRuleEditorSheet) {
+      this.restartFullEngineForConfig();
+    }
     if (this.configSyncInboxPending) {
       void this.receiveConfigSync();
     }
@@ -5455,13 +5513,11 @@ struct Index {
     }
     this.dnsRefreshing = true;
     try {
-      // Pick the log source by engine, not by network mode. In full mode (VPN or
-      // proxy) AdGuardHome does the filtering and records the accurate result
-      // (incl. blocked) in its own querylog; the C++ relay's app jsonl would mark
-      // every full-mode query "allowed". In lightweight mode the C++ engine writes
-      // the accurate app jsonl itself. The AGH querylog path is shared by both the
-      // VPN extension and the main process (same app filesDir).
-      const ingested: number = this.fullModeEnabled ? await this.ingestAghLog() : await this.ingestAppLog();
+      // Each engine writes its own log. Read both tails so requests remain visible
+      // while the VPN is switching engines or the running engine differs from the setting.
+      const appIngested: number = await this.ingestAppLog();
+      const aghIngested: number = await this.ingestAghLog();
+      const ingested: number = appIngested + aghIngested;
 
       // Totals come from the incrementally maintained persistent counters
       // (DnsStats) — no COUNT/SUM aggregation over the table on the refresh tick
@@ -5774,7 +5830,7 @@ struct Index {
     }
   }
 
-  private async startVpn(auto: boolean = false): Promise<void> {
+  private async startVpn(auto: boolean = false, restart: boolean = false): Promise<void> {
     if (this.busy) {
       return;
     }
@@ -5800,6 +5856,9 @@ struct Index {
     this.errorText = '';
     const wasRunning: boolean = this.status.running;
     try {
+      if (restart && wasRunning) {
+        await vpnExtension.stopVpnExtensionAbility(this.buildVpnWant());
+      }
       if (!this.writeTextFile(this.rulesFilePath, this.rulesText)) {
         throw new Error('Failed to write rules file');
       }
@@ -6015,22 +6074,47 @@ struct Index {
         return;
       }
 
-      this.ensureRuleProfilesInitialized();
-        const importedOnlyProfiles: RuleProfile[] = this.ruleProfiles.filter((profile: RuleProfile) => !profile.builtIn);
-        const builtInProfiles: RuleProfile[] = this.ruleProfiles.filter((profile: RuleProfile) => profile.builtIn);
-        this.ruleProfiles = importedOnlyProfiles.concat(importedProfiles).concat(builtInProfiles);
-        this.syncRuleCountBadges();
-      this.rulesText = this.buildMergedRulesText();
-      this.rulesDirty = true;
-      this.currentTab = 1;
-      this.savePersistState();
-      this.errorText = '';
-      this.setConfigFeedback(this.rulesImportedMessage(importedProfiles.length));
-      this.appendDebugLog(`==/vpn_ui/import_rules/ count=${importedProfiles.length}`);
+      this.addImportedRuleProfiles(importedProfiles);
     } catch (err) {
       this.errorText = this.errorMessage(err);
       this.appendDebugLog(`==/vpn_ui/import_rules_error/ ${this.errorText}`);
     }
+  }
+
+  private async importRulesFromClipboard(): Promise<void> {
+    try {
+      const data = await pasteboard.getSystemPasteboard().getData();
+      const content = data.getPrimaryText() ?? '';
+      if (!content.trim()) {
+        this.setConfigFeedback(this.tri('The clipboard has no text.', '剪贴板中没有文本。', '剪貼簿中沒有文字。'));
+        return;
+      }
+      if (!this.looksLikeRuleList(content)) {
+        this.setConfigFeedback(this.tri('Clipboard text is not a rule list.',
+          '剪贴板中的文本不是规则列表。', '剪貼簿中的文字不是規則清單。'));
+        return;
+      }
+      const name = this.tri('Clipboard rules', '剪贴板规则', '剪貼簿規則');
+      this.addImportedRuleProfiles([this.createRuleProfile(name, content)]);
+      this.showImportMenu = false;
+    } catch (_) {
+      this.setConfigFeedback(this.tri('Could not read the clipboard.', '无法读取剪贴板。', '無法讀取剪貼簿。'));
+    }
+  }
+
+  private addImportedRuleProfiles(importedProfiles: RuleProfile[]): void {
+    this.ensureRuleProfilesInitialized();
+    const importedOnly = this.ruleProfiles.filter((profile: RuleProfile) => !profile.builtIn);
+    const builtIns = this.ruleProfiles.filter((profile: RuleProfile) => profile.builtIn);
+    this.ruleProfiles = importedOnly.concat(importedProfiles).concat(builtIns);
+    this.syncRuleCountBadges();
+    this.rulesText = this.buildMergedRulesText();
+    this.rulesDirty = true;
+    this.currentTab = 1;
+    this.savePersistState();
+    this.errorText = '';
+    this.setConfigFeedback(this.rulesImportedMessage(importedProfiles.length));
+    this.appendDebugLog(`==/vpn_ui/import_rules/ count=${importedProfiles.length}`);
   }
 
   private saveRules(): void {
@@ -6501,11 +6585,12 @@ struct Index {
   // unmarshals this onto its built-in defaults, so we only emit the loopback
   // binds, our upstreams, enabled online subscriptions, and the user rules.
   // (Thin validation slice: DNS rewrites / advanced DNS are not wired here yet.)
-  private buildAghProxyYaml(dnsPort: number, httpPort: number, upstreamSource?: string): string {
+  private buildAghProxyYaml(dnsPort: number, httpPort: number, upstreamSource: string,
+    vpnDir: string, workDir: string): string {
     const yamlQuote = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
     const upstreams: string[] = [];
-    for (const raw of (upstreamSource ?? this.upstreamDnsInput).split(/[\s,;\n]+/)) {
+    for (const raw of upstreamSource.split(/[\s,;\n]+/)) {
       const ip: string = raw.trim();
       if (ip.length > 0 && !upstreams.includes(ip)) {
         upstreams.push(ip);
@@ -6543,12 +6628,14 @@ struct Index {
       filtersBlock = 'filters: []';
     } else {
       const entries: string[] = [];
-      enabledSubs.forEach((s: FilterSubscription, i: number) => {
+      enabledSubs.forEach((s: FilterSubscription) => {
         const url: string = s.url.trim();
+        const id = aghSubscriptionId(url);
+        seedAghSubscriptionCache(vpnDir, workDir, url, id);
         entries.push('  - enabled: true');
         entries.push(`    url: ${yamlQuote(url)}`);
         entries.push(`    name: ${yamlQuote(s.name.length > 0 ? s.name : url)}`);
-        entries.push(`    id: ${i + 1}`);
+        entries.push(`    id: ${id}`);
       });
       filtersBlock = `filters:\n${entries.join('\n')}`;
     }
@@ -6561,6 +6648,7 @@ struct Index {
       '  bind_hosts:',
       '    - 127.0.0.1',
       `  port: ${dnsPort}`,
+      `  aaaa_disabled: ${this.blockAaaa}`,
       '  upstream_dns:',
       upstreamLines,
       '  bootstrap_dns:',
@@ -6693,7 +6781,7 @@ struct Index {
         const cfgPath: string = `${vpnDir}/${AGH_CONFIG_FILE_NAME}`;
         const workDir: string = `${vpnDir}/${AGH_WORK_DIR_NAME}`;
         const logPath: string = `${vpnDir}/${AGH_LOG_FILE_NAME}`;
-        this.writeTextFile(cfgPath, this.buildAghProxyYaml(port, httpPort, upstreamSource));
+        this.writeTextFile(cfgPath, this.buildAghProxyYaml(port, httpPort, upstreamSource, vpnDir, workDir));
         try {
           fileIo.mkdirSync(workDir, true);
         } catch (_) {
@@ -6704,7 +6792,7 @@ struct Index {
         // Lightweight engine: a DNS server (TCP + UDP) backed by the local matcher.
         this.appendDebugLog(`==/vpn_ui/dns_proxy_start_request/ engine=lite port=${port} upstream=${upstream}`);
         err = vpnclientbridge.startLwDnsServer('127.0.0.1', port, upstream,
-          this.rulesFilePath, this.queryLogFilePath, this.dnsCacheTtlSeconds);
+          this.rulesFilePath, this.queryLogFilePath, this.dnsCacheTtlSeconds, this.blockAaaa);
       }
       if (err !== undefined) {
         throw new Error(err);
@@ -9242,7 +9330,7 @@ struct Index {
   }
 
   // Each tab is its own HdsNavigation so the immersive title bar tracks that
-  // tab's scroller. The "Me" tab also hosts sub pages on meStack.
+  // tab's scroller.
   @Builder
   private TabRoot(index: number) {
     if (index === 0) {
@@ -9272,12 +9360,11 @@ struct Index {
       .width('100%')
       .height('100%')
     } else {
-      HdsNavigation(this.meStack) {
+      HdsNavigation() {
         this.MeTab()
       }
       .titleBar(this.pageTitleBar(this.t('tabMe')))
       .bindToScrollable([this.meScroller])
-      .navDestination(this.MePageMap)
       .titleMode(HdsNavigationTitleMode.MINI)
       .mode(NavigationMode.Stack)
       .hideBackButton(true)
@@ -9611,7 +9698,7 @@ struct Index {
       .width('100%')
       .constraintSize({ minHeight: '100%' })
       .alignItems(HorizontalAlign.Start)
-      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
+      .padding({ left: 16, right: 16, top: 8, bottom: Math.max(12, this.avoidPaddingBottom) })
     }
     .width('100%')
     .height('100%')
@@ -9990,17 +10077,7 @@ struct Index {
               .fontColor(this.accentGreenTone())
               .borderRadius(14)
               .border({ width: 1, color: this.cardBorderTone() })
-              .onClick(() => {
-                if (this.proxyModeEnabled) {
-                  this.startDnsProxy().catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                } else {
-                  this.startVpn().catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                }
-              })
+              .onClick(() => this.restartActiveFilter())
           }
 
           // DNS-proxy mode: show the local DNS address (TCP + UDP) + active engine
@@ -10268,21 +10345,50 @@ struct Index {
             .width('100%')
             .alignItems(VerticalAlign.Center)
 
-            Button(this.tri('📁 Import from file', '📁 从文件导入', '📁 從檔案匯入'))
-              .type(ButtonType.Normal)
-              .width('100%')
-              .height(42)
-              .fontSize(14)
-              .fontWeight(FontWeight.Medium)
-              .backgroundColor(this.softGreenTone())
-              .fontColor(this.accentGreenTone())
-              .borderRadius(12)
-              .onClick(() => {
-                this.showImportMenu = false;
-                this.importRulesFile().catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
-              })
+            Row({ space: 8 }) {
+              Text(this.tri('Import from file', '从文件导入', '從檔案匯入'))
+                .fontSize(14)
+                .fontColor(this.primaryTextColor())
+                .layoutWeight(1)
+              Button(this.tri('Choose', '选择', '選擇'), { type: ButtonType.Normal })
+                .width(84)
+                .height(42)
+                .fontSize(14)
+                .fontWeight(FontWeight.Medium)
+                .backgroundColor(this.softBlueTone())
+                .fontColor(this.primaryTextColor())
+                .borderRadius(12)
+                .onClick(() => {
+                  this.showImportMenu = false;
+                  this.importRulesFile().catch((err: BusinessError) => {
+                    this.errorText = this.errorMessage(err);
+                  });
+                })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
+
+            Row({ space: 8 }) {
+              Text(this.tri('Import from clipboard', '从剪贴板导入', '從剪貼簿匯入'))
+                .fontSize(14)
+                .fontColor(this.primaryTextColor())
+                .layoutWeight(1)
+              PasteButton({ text: PasteDescription.PASTE, buttonType: ButtonType.Normal })
+                .width(84)
+                .height(42)
+                .fontSize(14)
+                .fontWeight(FontWeight.Medium)
+                .backgroundColor(this.softBlueTone())
+                .fontColor(this.primaryTextColor())
+                .borderRadius(12)
+                .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
+                  if (result === PasteButtonOnClickResult.SUCCESS) {
+                    void this.importRulesFromClipboard();
+                  }
+                })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
 
             Row({ space: 8 }) {
               TextInput({ text: this.subAddUrlInput, placeholder: 'https://example.com/list.txt' })
@@ -10924,7 +11030,7 @@ struct Index {
               .fontSize(14)
               .fontColor(this.secondaryTextColor())
             Blank()
-            Text(this.t('enabled'))
+            Text(this.blockAaaa ? this.tri('Blocked', '已屏蔽', '已封鎖') : this.t('enabled'))
               .fontSize(14)
               .fontWeight(FontWeight.Bold)
               .fontColor(this.primaryTextColor())
@@ -11679,6 +11785,47 @@ struct Index {
         .width('100%')
         .alignItems(HorizontalAlign.Start)
 
+        Column({ space: 8 }) {
+          this.SettingsGroupTitle({ text: 'IPv6' })
+          Column({ space: 12 }) {
+            Row({ space: 12 }) {
+              this.SettingsIconText({
+                glyph: '6', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
+                title: this.tri('Block IPv6 DNS lookups', '屏蔽 IPv6 解析', '封鎖 IPv6 解析'),
+                desc: this.tri('Return an empty answer for AAAA queries and keep IPv4 DNS working.',
+                  '对 AAAA 查询返回空结果，IPv4 解析照常。', '對 AAAA 查詢傳回空結果，IPv4 解析照常。')
+              })
+              Toggle({ type: ToggleType.Switch, isOn: this.blockAaaa })
+                .enabled(this.canChangeFilterSettings())
+                .onChange((value: boolean) => this.updateIpv6Blocking(value, this.blockIpv6Connections))
+            }
+            .width('100%')
+            Divider().strokeWidth(1).color(this.cardBorderTone())
+            Row({ space: 12 }) {
+              this.SettingsIconText({
+                glyph: '⊘', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
+                title: this.tri('Block IPv6 connections', '阻断 IPv6 连接', '阻擋 IPv6 連線'),
+                desc: this.tri('VPN only. Blocks IPv6 traffic from apps routed through this VPN.',
+                  '仅在 VPN 模式生效，阻断经过本 VPN 的应用发出的 IPv6 流量。',
+                  '僅在 VPN 模式生效，阻擋經過本 VPN 的應用程式送出的 IPv6 流量。')
+              })
+              Toggle({ type: ToggleType.Switch, isOn: this.blockIpv6Connections })
+                .enabled(this.canChangeFilterSettings() && !this.proxyModeEnabled)
+                .onChange((value: boolean) => this.updateIpv6Blocking(this.blockAaaa, value))
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(16)
+          .backgroundColor(this.elevatedSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+          .borderRadius(22)
+          .border({ width: 1, color: this.cardBorderTone() })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+
         // ===== 💾 缓存 =====
         Column({ space: 8 }) {
           this.SettingsGroupTitle({ text: this.tri('💾 Cache', '💾 缓存', '💾 快取') })
@@ -11933,7 +12080,7 @@ struct Index {
       .constraintSize({ minHeight: '100%' })
       .justifyContent(FlexAlign.Start)
       .alignItems(HorizontalAlign.Start)
-      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
+      .padding({ left: 16, right: 16, top: 8, bottom: Math.max(12, this.avoidPaddingBottom) })
     }
     .width('100%')
     .height('100%')
@@ -11958,13 +12105,25 @@ struct Index {
       }
       .width('100%')
 
-      Row() {
+      Row({ space: 8 }) {
         Text(this.editingRuleProfile()?.name ?? this.editingRuleNameText)
+          .layoutWeight(1)
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.primaryTextColor())
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID) {
+          Button(this.t('removeAllRuleLines'), { type: ButtonType.Normal })
+            .height(32)
+            .padding({ left: 12, right: 12 })
+            .fontSize(13)
+            .fontColor(this.isDarkModeActive() ? '#FF8A8A' : '#B42318')
+            .backgroundColor(this.softRedTone())
+            .borderRadius(10)
+            .enabled(this.rulesText.trim().length > 0)
+            .onClick(() => this.confirmRemoveAllCustomBlockRules())
+        }
       }
         .width('100%')
         .height(44)
@@ -12157,7 +12316,8 @@ struct Index {
     .shadow({ radius: 18, color: this.sheetShadowTone(), offsetX: 0, offsetY: -4 })
   }
 
-  build() {
+  @Builder
+  private TabHost() {
     Stack({ alignContent: Alignment.Bottom }) {
       this.PageBackdrop()
 
@@ -12277,5 +12437,18 @@ struct Index {
     .width('100%')
     .height('100%')
     .backgroundColor(this.canvasTone())
+  }
+
+  build() {
+    HdsNavigation(this.meStack) {
+      this.TabHost()
+    }
+    .navDestination(this.MePageMap)
+    .mode(NavigationMode.Stack)
+    .hideTitleBar(true)
+    .hideToolBar(true)
+    .backgroundColor(Color.Transparent)
+    .width('100%')
+    .height('100%')
   }
 }

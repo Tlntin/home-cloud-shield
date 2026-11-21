@@ -4,6 +4,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { connection, vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { notificationManager } from '@kit.NotificationKit';
+import { aghSubscriptionId, seedAghSubscriptionCache } from '../data/SubscriptionCache';
 import vpnclientbridge from 'libvpnclientbridge.so';
 
 const DOMAIN = 0x0000;
@@ -243,6 +244,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private upstreamAuto: boolean = false;
   private upstreamManual: string = UPSTREAM_DNS_IP;
   private filterMode: string = FILTER_MODE_LIGHTWEIGHT;
+  private blockAaaa: boolean = false;
+  private blockIpv6Connections: boolean = false;
   private aghConfigFilePath: string = '';
   private aghWorkDirPath: string = '';
   private aghLogFilePath: string = '';
@@ -361,6 +364,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     const httpPort: number = this.wantNumberParam(want, WANT_AGH_HTTP_PORT, AGH_HTTP_PORT_DEFAULT);
     this.aghHttpPort = (httpPort >= 1024 && httpPort <= 65535) ? httpPort : AGH_HTTP_PORT_DEFAULT;
     this.aghWebEnabled = this.wantBooleanParam(want, WANT_AGH_WEB_ENABLED, false);
+    this.blockAaaa = this.wantBooleanParam(want, 'blockAaaa', false);
+    this.blockIpv6Connections = this.wantBooleanParam(want, 'blockIpv6Connections', false);
     this.appSplitFilePath = `${vpnDir}/${APP_SPLIT_FILE_NAME}`;
     this.parseAppSplit(want);
     this.dnsCacheTtlSeconds = this.wantNumberParam(want, WANT_DNS_CACHE_TTL_SECONDS, DEFAULT_DNS_CACHE_TTL_SECONDS);
@@ -565,24 +570,13 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       },
       hasGateway: false,
       isDefaultRoute: false,
-    }, {
-      interface: 'vpn-tun',
-      destination: {
-        address: {
-          address: IPV6_ROUTE,
-          family: 2,
-          port: 0,
-        },
-        prefixLength: IPV6_PREFIX_LENGTH,
-      },
-      gateway: {
-        address: '::',
-        family: 2,
-        port: 0,
-      },
-      hasGateway: false,
-      isDefaultRoute: false,
     }];
+    if (this.blockIpv6Connections) {
+      // Cover all IPv6 without declaring an IPv4 default route or changing split routing.
+      routes.push(this.buildIpv6Route('::', 1), this.buildIpv6Route('8000::', 1));
+    } else {
+      routes.push(this.buildIpv6Route(IPV6_ROUTE, IPV6_PREFIX_LENGTH));
+    }
     // Pull each well-known/underlying DNS resolver IP into the tun via a host
     // route so DNS sent to them (instead of our advertised 10.8.0.1) is captured.
     dnsCaptureIps.forEach((ip: string) => {
@@ -605,7 +599,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       }],
       routes: routes,
       mtu: 1400,
-      dnsAddresses: [DNS_SERVER_IP, DNS_SERVER_IPV6],
+      dnsAddresses: this.blockIpv6Connections ? [DNS_SERVER_IP] : [DNS_SERVER_IP, DNS_SERVER_IPV6],
       isIPv4Accepted: true,
       isIPv6Accepted: true,
     };
@@ -620,6 +614,16 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       config.blockedApplications = [APP_BUNDLE_NAME];
     }
     return config;
+  }
+
+  private buildIpv6Route(address: string, prefixLength: number): vpnExtension.RouteInfo {
+    return {
+      interface: 'vpn-tun',
+      destination: { address: { address: address, family: 2, port: 0 }, prefixLength: prefixLength },
+      gateway: { address: '::', family: 2, port: 0 },
+      hasGateway: false,
+      isDefaultRoute: false,
+    };
   }
 
   // Initial per-app config: the UI's app_split.json when present (always
@@ -750,6 +754,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       if (!this.isLikelyIpAddress(ip)) {
         return;
       }
+      if (this.blockIpv6Connections && ip.includes(':')) {
+        return;
+      }
       out.push(ip);
     };
     PUBLIC_DNS_RESOLVERS.forEach(consider);
@@ -849,6 +856,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       const dnsCaptureIps: string[] = this.dnsCaptureRouteIps(underlyingDns);
       this.lastDnsCaptureSignature = dnsCaptureIps.join(',');
       this.appendDebugLog(`==/vpn_ext/dns_capture_routes/ underlying=[${underlyingDns.join(',')}] captured=${dnsCaptureIps.length}`);
+      this.appendDebugLog(`==/vpn_ext/ipv6_policy/ block_aaaa=${this.blockAaaa} block_connections=${this.blockIpv6Connections}`);
+      hilog.info(DOMAIN, TAG, '==/vpn_ext/ipv6_policy/ block_aaaa=%{public}d block_connections=%{public}d',
+        this.blockAaaa ? 1 : 0, this.blockIpv6Connections ? 1 : 0);
       hilog.info(DOMAIN, TAG, '==/vpn_ext/dns_capture_routes/ underlying=%{public}s captured=%{public}d',
         underlyingDns.join(','), dnsCaptureIps.length);
       this.tunFd = await this.vpnConnection.create(this.buildVpnConfig(dnsCaptureIps));
@@ -875,7 +885,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
           this.aghLogFilePath,
           AGH_DNS_PORT,
           this.queryLogFilePath,
-          this.aghWebEnabled
+          this.aghWebEnabled,
+          this.blockIpv6Connections
         );
         hilog.info(
           DOMAIN,
@@ -896,7 +907,9 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
           this.upstreamDnsIp,
           this.rulesFilePath,
           this.queryLogFilePath,
-          this.dnsCacheTtlSeconds
+          this.dnsCacheTtlSeconds,
+          this.blockAaaa,
+          this.blockIpv6Connections
         );
         hilog.info(
           DOMAIN,
@@ -1447,9 +1460,16 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       }
     }
 
-    const yaml: string = this.buildAghConfigYaml(upstreams, rules);
+    const filters = this.parseAghFilters();
+    const vpnDir = `${this.context.filesDir}/${VPN_DIR_NAME}`;
+    filters.forEach((filter: AghFilterEntry) => {
+      if (filter.enabled) {
+        seedAghSubscriptionCache(vpnDir, this.aghWorkDirPath, filter.url, filter.id);
+      }
+    });
+    const yaml: string = this.buildAghConfigYaml(upstreams, rules, filters);
     this.writeTextFile(this.aghConfigFilePath, yaml);
-    const filterCount: number = this.parseAghFilters().length;
+    const filterCount: number = filters.length;
     const rewriteCount: number = this.parseAghRewrites().length;
     const adv: AghAdvancedConfig = this.parseAghAdvanced();
     hilog.info(DOMAIN, TAG,
@@ -1463,7 +1483,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
   }
 
-  private buildAghConfigYaml(upstreams: string[], rules: string[]): string {
+  private buildAghConfigYaml(upstreams: string[], rules: string[], filters: AghFilterEntry[]): string {
     const upstreamLines: string = upstreams.map((u: string) => `    - ${this.yamlQuote(u)}`).join('\n');
     // bootstrap_dns must be plain IPs — it is what resolves DoH/DoT hostnames, so
     // feeding it a DoH URL would deadlock the bootstrap. Keep only IP upstreams and
@@ -1477,7 +1497,6 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       ? `user_rules:\n${rules.map((r: string) => `  - ${this.yamlQuote(r)}`).join('\n')}`
       : 'user_rules: []';
 
-    const filters: AghFilterEntry[] = this.parseAghFilters();
     const rewrites: AghRewriteEntry[] = this.parseAghRewrites();
     const adv: AghAdvancedConfig = this.parseAghAdvanced();
 
@@ -1502,7 +1521,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
         entries.push(`  - enabled: ${f.enabled ? 'true' : 'false'}`);
         entries.push(`    url: ${this.yamlQuote(f.url)}`);
         entries.push(`    name: ${this.yamlQuote(f.name)}`);
-        entries.push(`    id: ${Math.max(1, Math.floor(f.id))}`);
+        entries.push(`    id: ${f.id}`);
       });
       filtersBlock = `filters:\n${entries.join('\n')}`;
     }
@@ -1531,6 +1550,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       '  bind_hosts:',
       '    - 127.0.0.1',
       `  port: ${AGH_DNS_PORT}`,
+      `  aaaa_disabled: ${this.blockAaaa}`,
       '  upstream_dns:',
       upstreamLines,
       '  bootstrap_dns:',
@@ -1591,7 +1611,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
             return;
           }
           out.push({
-            id: typeof f?.id === 'number' && f.id > 0 ? Math.floor(f.id) : out.length + 1,
+            id: aghSubscriptionId(url),
             name: typeof f?.name === 'string' && f.name.length > 0 ? f.name : url,
             url: url,
             enabled: f?.enabled !== false,
