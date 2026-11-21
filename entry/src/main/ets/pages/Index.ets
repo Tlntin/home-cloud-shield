@@ -23,7 +23,8 @@ import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/Co
 import { aghSubscriptionId, seedAghSubscriptionCache, subscriptionCacheName } from '../data/SubscriptionCache';
 import { blurTitleBar } from '../components/BlurTitleBar';
 import {
-  APP_SPLIT_MAX_BUNDLES, APP_SPLIT_PRESETS, APP_TUNNEL_LOG_FILE, AppSplitEntry, AppSplitFile, AppSplitMode, AppSplitPreset,
+  APP_SPLIT_MAX_BUNDLES, APP_SPLIT_PRESETS, APP_TUNNEL_LOG_FILE, APP_TUNNEL_RULES_MAX_LENGTH,
+  AppSplitEntry, AppSplitFile, AppSplitMode, AppSplitPreset,
   findAppSplitPreset, isValidBundleName, normalizeAppSplitList, normalizeAppSplitMode, parseAppSplitDnsAllowlist
 } from '../data/AppSplit';
 import type { PromptAction } from '@ohos.arkui.UIContext';
@@ -884,6 +885,8 @@ interface ConfigAppSettings {
   upstreamDns?: string;
   upstreamAuto?: boolean;
   fullMode?: boolean;
+  blockAaaa?: boolean;
+  blockIpv6Connections?: boolean;
   proxyModeEnabled?: boolean;
   dnsProxyPort?: string;
   aghHttpPort?: string;
@@ -897,6 +900,10 @@ interface ConfigAppSettings {
   // Per-app routing (data/AppSplit.ets): 'off' | 'bypass' | 'only', plus the list.
   appSplitMode?: string;
   appSplitApps?: AppSplitEntry[];
+  appSplitDnsAllowlistEnabled?: boolean;
+  appSplitDnsAllowlist?: string;
+  appTunnelEnabled?: boolean;
+  appTunnelRules?: string;
 }
 
 interface ConfigExport {
@@ -2180,6 +2187,8 @@ struct Index {
       upstreamDns: this.upstreamDnsInput,
       upstreamAuto: this.upstreamAutoEnabled,
       fullMode: this.fullModeEnabled,
+      blockAaaa: this.blockAaaa,
+      blockIpv6Connections: this.blockIpv6Connections,
       proxyModeEnabled: this.proxyModeEnabled,
       dnsProxyPort: this.dnsProxyPort,
       aghHttpPort: this.aghHttpPort,
@@ -2192,6 +2201,10 @@ struct Index {
       ruleProfiles: profiles,
       appSplitMode: this.appSplitMode,
       appSplitApps: this.appSplitList,
+      appSplitDnsAllowlistEnabled: this.appSplitDnsAllowlistEnabled,
+      appSplitDnsAllowlist: this.appSplitDnsAllowlist,
+      appTunnelEnabled: this.appTunnelEnabled,
+      appTunnelRules: this.appTunnelRules,
     };
     return {
       sources: sources,
@@ -2361,7 +2374,7 @@ struct Index {
   // to app_split.json so a running VPN picks it up live.
   private mergeImportedAppSplit(app: ConfigAppSettings, mirror: boolean = true): number {
     let added: number = 0;
-    let changed: boolean = false;
+    let changed: boolean = this.applyImportedAppSplitPolicies(app);
     if (typeof app.appSplitMode === 'string' && normalizeAppSplitMode(app.appSplitMode) !== this.appSplitMode) {
       this.appSplitMode = normalizeAppSplitMode(app.appSplitMode);
       changed = true;
@@ -2383,6 +2396,41 @@ struct Index {
     return added;
   }
 
+  private applyImportedAppSplitPolicies(app: ConfigAppSettings): boolean {
+    let changed = false;
+    const domains = typeof app.appSplitDnsAllowlist === 'string' ?
+      parseAppSplitDnsAllowlist(app.appSplitDnsAllowlist)?.join('\n') : undefined;
+    if (app.appSplitDnsAllowlist === undefined || domains !== undefined) {
+      if (domains !== undefined && domains !== this.appSplitDnsAllowlist) {
+        this.appSplitDnsAllowlist = domains;
+        this.appSplitDnsAllowlistDraft = domains;
+        this.appSplitDnsAllowlistError = '';
+        changed = true;
+      }
+      if (typeof app.appSplitDnsAllowlistEnabled === 'boolean' &&
+        app.appSplitDnsAllowlistEnabled !== this.appSplitDnsAllowlistEnabled) {
+        this.appSplitDnsAllowlistEnabled = app.appSplitDnsAllowlistEnabled;
+        changed = true;
+      }
+    }
+    const rules = typeof app.appTunnelRules === 'string' ? app.appTunnelRules.trim() : undefined;
+    const validRules = rules !== undefined && rules.length <= APP_TUNNEL_RULES_MAX_LENGTH &&
+      !rules.includes('\u0000') && (rules.length === 0 || vpnclientbridge.validateAppTunnelRules(rules) === undefined);
+    if (app.appTunnelRules === undefined || validRules) {
+      if (rules !== undefined && rules !== this.appTunnelRules) {
+        this.appTunnelRules = rules;
+        this.appTunnelRulesDraft = rules;
+        this.appTunnelRulesError = '';
+        changed = true;
+      }
+      if (typeof app.appTunnelEnabled === 'boolean' && app.appTunnelEnabled !== this.appTunnelEnabled) {
+        this.appTunnelEnabled = app.appTunnelEnabled;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   private applyImportedAppSettings(app: ConfigAppSettings): void {
     if (typeof app.upstreamDns === 'string') {
       this.upstreamDnsInput = app.upstreamDns.trim();
@@ -2392,6 +2440,12 @@ struct Index {
     }
     if (typeof app.fullMode === 'boolean') {
       this.fullModeEnabled = app.fullMode;
+    }
+    if (typeof app.blockAaaa === 'boolean') {
+      this.blockAaaa = app.blockAaaa;
+    }
+    if (typeof app.blockIpv6Connections === 'boolean') {
+      this.blockIpv6Connections = app.blockIpv6Connections;
     }
     if (typeof app.proxyModeEnabled === 'boolean') {
       this.proxyModeEnabled = app.proxyModeEnabled;
@@ -2462,6 +2516,9 @@ struct Index {
       }
 
       this.ensureRuleProfilesInitialized();
+      const fullMode = this.fullModeEnabled;
+      const blockAaaa = this.blockAaaa;
+      const blockIpv6Connections = this.blockIpv6Connections;
       const result: ConfigImportResult =
         { sources: 0, blocked: 0, allowed: 0, redirected: 0, ruleFiles: 0, skippedSources: 0, appSplitApps: 0 };
       if (Array.isArray(config.sources)) {
@@ -2499,14 +2556,7 @@ struct Index {
       this.filterSubscriptions = this.filterSubscriptions.slice();
       this.dnsRewrites = this.dnsRewrites.slice();
       this.ruleProfiles = this.ruleProfiles.slice();
-      // Apply now so the import actually takes effect without a manual restart:
-      // lite VPN hot-reloads the rewritten rules file; full mode restarts to bake
-      // in the new subscriptions / rewrites / rules.
-      if (this.activeRunning()) {
-        this.writeTextFile(this.rulesFilePath, this.rulesText);
-        this.writeUpstreamFile();
-        this.applyFullModeConfigChange();
-      }
+      this.applyImportedFilterChanges(fullMode, blockAaaa, blockIpv6Connections);
       // Download + validate the imported subscriptions in the background. Lists that
       // can't be fetched or aren't rule lists are marked failed and force-disabled,
       // so "enabled" reflects "downloaded + valid".
@@ -2543,6 +2593,8 @@ struct Index {
   private syncedAppSettings(app: ConfigAppSettings): ConfigAppSettings {
     return {
       fullMode: app.fullMode,
+      blockAaaa: app.blockAaaa,
+      blockIpv6Connections: app.blockIpv6Connections,
       upstreamDns: app.upstreamDns,
       upstreamAuto: app.upstreamAuto,
       blockedServiceIds: app.blockedServiceIds,
@@ -2551,6 +2603,10 @@ struct Index {
       ruleProfiles: app.ruleProfiles,
       appSplitMode: app.appSplitMode,
       appSplitApps: app.appSplitApps,
+      appSplitDnsAllowlistEnabled: app.appSplitDnsAllowlistEnabled,
+      appSplitDnsAllowlist: app.appSplitDnsAllowlist,
+      appTunnelEnabled: app.appTunnelEnabled,
+      appTunnelRules: app.appTunnelRules,
     };
   }
 
@@ -2613,10 +2669,21 @@ struct Index {
     const upstreamDns = this.upstreamDnsInput;
     const upstreamAuto = this.upstreamAutoEnabled;
     const fullMode = this.fullModeEnabled;
+    const blockAaaa = this.blockAaaa;
+    const blockIpv6Connections = this.blockIpv6Connections;
     const cacheTtl = this.dnsCacheTtlSeconds;
     const cacheTtlInput = this.dnsCacheTtlInput;
     const appSplitMode = this.appSplitMode;
     const appSplitList = this.appSplitList;
+    const dnsAllowlist = this.appSplitDnsAllowlist;
+    const dnsAllowlistEnabled = this.appSplitDnsAllowlistEnabled;
+    const dnsAllowlistDraft = this.appSplitDnsAllowlistDraft;
+    const dnsAllowlistError = this.appSplitDnsAllowlistError;
+    const tunnelRules = this.appTunnelRules;
+    const tunnelEnabled = this.appTunnelEnabled;
+    const tunnelRulesDraft = this.appTunnelRulesDraft;
+    const tunnelRulesError = this.appTunnelRulesError;
+    let persisted = false;
     try {
       this.mergeImportedSources(config.sources);
       this.mergeImportedRedirects(config.redirected);
@@ -2638,7 +2705,8 @@ struct Index {
       if (before === JSON.stringify(this.buildSyncedConfig())) {
         return false;
       }
-      if (!this.savePersistState(true)) {
+      persisted = this.savePersistState(true);
+      if (!persisted || !this.writeAppSplitFile()) {
         throw new Error('Could not save synced settings');
       }
     } catch (err) {
@@ -2650,30 +2718,49 @@ struct Index {
       this.upstreamDnsInput = upstreamDns;
       this.upstreamAutoEnabled = upstreamAuto;
       this.fullModeEnabled = fullMode;
+      this.blockAaaa = blockAaaa;
+      this.blockIpv6Connections = blockIpv6Connections;
       this.dnsCacheTtlSeconds = cacheTtl;
       this.dnsCacheTtlInput = cacheTtlInput;
       this.appSplitMode = appSplitMode;
       this.appSplitList = appSplitList;
+      this.appSplitDnsAllowlist = dnsAllowlist;
+      this.appSplitDnsAllowlistEnabled = dnsAllowlistEnabled;
+      this.appSplitDnsAllowlistDraft = dnsAllowlistDraft;
+      this.appSplitDnsAllowlistError = dnsAllowlistError;
+      this.appTunnelRules = tunnelRules;
+      this.appTunnelEnabled = tunnelEnabled;
+      this.appTunnelRulesDraft = tunnelRulesDraft;
+      this.appTunnelRulesError = tunnelRulesError;
+      if (persisted) {
+        this.savePersistState(true);
+      }
       throw err as Error;
     }
     this.syncRuleCountBadges();
     this.rulesText = this.buildMergedRulesText();
     this.rulesDirty = true;
-    this.writeAppSplitFile();
-    if (this.activeRunning()) {
-      this.writeTextFile(this.rulesFilePath, this.rulesText);
-      this.writeUpstreamFile();
-      if (fullMode !== this.fullModeEnabled) {
-        this.restartActiveFilter();
-      } else {
-        this.restartFullEngineForConfig();
-      }
-    }
+    this.applyImportedFilterChanges(fullMode, blockAaaa, blockIpv6Connections);
     const previousUrls = new Set<string>(subscriptions.map((source: FilterSubscription) => source.url));
     const newUrls = this.filterSubscriptions.filter((source: FilterSubscription) => source.enabled &&
       !previousUrls.has(source.url)).map((source: FilterSubscription) => source.url);
     void this.downloadSubscriptions(newUrls);
     return true;
+  }
+
+  private applyImportedFilterChanges(fullMode: boolean, blockAaaa: boolean, blockIpv6Connections: boolean): void {
+    if (!this.activeRunning()) {
+      return;
+    }
+    this.writeTextFile(this.rulesFilePath, this.rulesText);
+    this.writeUpstreamFile();
+    // Both DNS engines receive their IPv6 policy when the filter starts.
+    if (fullMode !== this.fullModeEnabled || blockAaaa !== this.blockAaaa ||
+      blockIpv6Connections !== this.blockIpv6Connections) {
+      this.restartActiveFilter();
+    } else {
+      this.restartFullEngineForConfig();
+    }
   }
 
   private setConfigSyncStatus(message: string): void {
@@ -9775,7 +9862,7 @@ struct Index {
         .width('100%')
         .height(100)
         .fontSize(14)
-        .maxLength(16384)
+        .maxLength(APP_TUNNEL_RULES_MAX_LENGTH)
         .borderRadius(14)
         .backgroundColor(this.softPanelTone())
         .onChange((value: string) => {

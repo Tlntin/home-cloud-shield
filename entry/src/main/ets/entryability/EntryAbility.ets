@@ -45,8 +45,6 @@ export default class EntryAbility extends UIAbility {
       if (source) {
         parameters[CONFIG_CONTINUE_SOURCE] = source;
       }
-      // Keep the source ability alive so its DNS proxy can continue filtering.
-      parameters[wantConstant.Params.SUPPORT_CONTINUE_SOURCE_EXIT_KEY] = false;
       parameters[wantConstant.Params.SUPPORT_CONTINUE_PAGE_STACK_KEY] = false;
       return AbilityConstant.OnContinueResult.AGREE;
     } catch (_) {

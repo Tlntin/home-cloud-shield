@@ -7,6 +7,7 @@
 
 export type AppSplitMode = 'off' | 'bypass' | 'only';
 export const APP_TUNNEL_LOG_FILE = 'app_connections.log';
+export const APP_TUNNEL_RULES_MAX_LENGTH = 16384;
 
 export interface AppSplitEntry {
   bundle: string;
