@@ -117,9 +117,9 @@ export class DnsLogDb {
 
   // Batch-insert rows (one transaction). origin tags the source file ('app' or
   // 'agh') so per-origin watermarks can be recomputed after a restart.
-  async insertRows(rows: DnsLogRow[], origin: string): Promise<void> {
+  async insertRows(rows: DnsLogRow[], origin: string): Promise<boolean> {
     if (this.store === undefined || rows.length === 0) {
-      return;
+      return false;
     }
     const buckets: relationalStore.ValuesBucket[] = [];
     for (const r of rows) {
@@ -137,8 +137,9 @@ export class DnsLogDb {
       buckets.push(bucket);
     }
     try {
-      await this.store.batchInsert(TABLE, buckets);
+      return await this.store.batchInsert(TABLE, buckets) === buckets.length;
     } catch (err) {
+      return false;
     }
   }
 
@@ -314,14 +315,35 @@ export class DnsLogDb {
     }
   }
 
-  async pruneOlderThan(cutoffMs: number): Promise<void> {
-    if (this.store === undefined || cutoffMs <= 0) {
-      return;
+  async prune(cutoffMs: number, maxMb: number): Promise<boolean> {
+    const store = this.store;
+    if (store === undefined) {
+      return false;
     }
+    let changed = false;
     try {
-      await this.store.execute(`DELETE FROM ${TABLE} WHERE ts < ?`, [cutoffMs]);
+      if (cutoffMs > 0) {
+        const expired = new relationalStore.RdbPredicates(TABLE).lessThan('ts', cutoffMs);
+        changed = (await store.delete(expired)) > 0;
+      }
+      if (maxMb > 0) {
+        const pages = await store.querySql('SELECT (page_count - freelist_count) * page_size AS used_bytes'
+          + ' FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()');
+        const used = pages.goToNextRow() ? pages.getLong(0) : 0;
+        pages.close();
+        const maxBytes = maxMb * 1024 * 1024;
+        if (used > maxBytes) {
+          // Free some headroom for SQLite's indexes and reuse its free pages.
+          // No table scan is needed for the size check in the common case.
+          const fraction = 1 - maxBytes * 0.85 / used;
+          await store.execute(`DELETE FROM ${TABLE} WHERE id IN (SELECT id FROM ${TABLE}`
+            + ` ORDER BY ts, id LIMIT (SELECT CAST(COUNT(*) * ? AS INTEGER) + 1 FROM ${TABLE}))`, [fraction]);
+          changed = true;
+        }
+      }
     } catch (err) {
     }
+    return changed;
   }
 }
 

@@ -11,6 +11,7 @@
 - **应用接续、手动同步与配置备份**。同步和导入导出覆盖 DNS 白名单、IP 拦截规则、全量 VPN 与两个 IPv6 开关。系统接续成功后会退出源端页面。
 - **便捷导入**。快速导入可读取文件或剪贴板。
 - **开源授权**。「关于」中可离线查看许可证全文和全量 VPN 内核的版权说明。
+- **日志保留**。DNS 请求记录和调试日志默认保留 7 天，每类上限 20 MB，达到上限时会自动清理最旧的记录。应用分批读取日志，降低启动时的内存占用。
 
 GitHub 附件为未签名 HAP，可自行签名后安装。
 
@@ -23,6 +24,7 @@ GitHub 附件为未签名 HAP，可自行签名后安装。
 - **App continuation, manual sync, and configuration backup** carry the DNS allowlist, IP blocking rules, full VPN setting, and both IPv6 switches. The source screen exits after system app continuation succeeds.
 - **Quick import** accepts files and clipboard contents.
 - **Open source notices** in About include offline license texts and copyright notices for the full VPN core.
+- **Log retention** defaults to 7 days and 20 MB per category for DNS history and debug logs. The oldest records are cleared when either limit is reached. The app reads logs in batches to reduce memory use at startup.
 
 The GitHub asset is an unsigned HAP that you can sign before installing.
 

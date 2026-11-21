@@ -19,6 +19,10 @@ import { util } from '@kit.ArkTS';
 import { BLOCKED_SERVICES, BlockedServiceDef } from '../data/BlockedServices';
 import { dnsLogDb, DnsLogRow, DnsLogSummary } from '../data/DnsLogDb';
 import { dnsStats } from '../data/DnsStats';
+import {
+  archivedLogPaths, clearLogFile, DEFAULT_LOG_MAX_SIZE_MB, DEFAULT_LOG_RETENTION_DAYS, logCutoff,
+  LOG_MAINTENANCE_INTERVAL_MS, LogReader, maintainLogFiles
+} from '../data/LogRetention';
 import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/ConfigSync';
 import { aghSubscriptionId, seedAghSubscriptionCache, subscriptionCacheName } from '../data/SubscriptionCache';
 import { blurTitleBar } from '../components/BlurTitleBar';
@@ -151,8 +155,6 @@ const WANT_LOG_MAX_SIZE_MB = 'logMaxSizeMb';
 const WANT_CLEAR_DNS_LOG_ON_START = 'clearDnsLogOnStart';
 const WANT_CLEAR_DEBUG_LOG_ON_START = 'clearDebugLogOnStart';
 const DEFAULT_DNS_CACHE_TTL_SECONDS = 3600;
-const DEFAULT_LOG_RETENTION_DAYS = 0;
-const DEFAULT_LOG_MAX_SIZE_MB = 0;
 const CUSTOM_BLOCK_RULE_PROFILE_ID = 'custom_block_rules';
 const CUSTOM_ALLOW_RULE_PROFILE_ID = 'custom_allow_rules';
 type LangCode = 'zhHans' | 'en' | 'zhHant';
@@ -806,6 +808,7 @@ interface PersistState {
   upstreamAutoEnabled?: boolean;
   logRetentionDays?: number;
   logMaxSizeMb?: number;
+  logRetentionDefaultsApplied?: boolean;
   clearDnsLogOnStart?: boolean;
   clearDebugLogOnStart?: boolean;
   fullModeEnabled?: boolean;
@@ -991,12 +994,6 @@ function defaultQuerySummary(): QuerySummary {
   };
 }
 
-// Newly appended complete lines of a log file (see readLogTail).
-interface LogTail {
-  chunk: string;
-  nextOffset: number;
-}
-
 @Entry
 @Component
 struct Index {
@@ -1162,9 +1159,13 @@ struct Index {
   private dnsDbReady: boolean = false;
   private dnsDbInitStarted: boolean = false;
   private dnsRefreshing: boolean = false;
-  private appLogOffset: number = 0;
+  private appLogReader: LogReader = new LogReader();
   private appLogLastTs: number = 0;
-  private aghLogOffset: number = 0;
+  private aghLogReader: LogReader = new LogReader();
+  private lastDnsLogPruneAt: number = 0;
+  private logMaintenanceTimer: number = -1;
+  private logMaintenanceRunning: boolean = false;
+  private lastLogMaintenanceAt: number = 0;
   private aghLogLastTs: number = 0;
   // Query-result caches for the refresh tick: the page/count SQL only reruns when
   // the sheet is open and either new rows arrived or the filter/search/page
@@ -3576,40 +3577,30 @@ struct Index {
     return eff.length > 0 ? eff.replace(/\n/g, ', ') : '';
   }
 
-  private parseLogRetentionDaysInput(value: string): number {
+  private parseLogLimitInput(value: string, current: number): number {
     const trimmed: string = value.trim();
-    if (trimmed.length === 0) {
-      return DEFAULT_LOG_RETENTION_DAYS;
-    }
-    const parsed = parseInt(trimmed, 10);
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      return DEFAULT_LOG_RETENTION_DAYS;
-    }
-    return parsed;
+    const parsed = Number(trimmed);
+    return /^\d+$/.test(trimmed) && Number.isSafeInteger(parsed) ? parsed : current;
   }
 
   private updateLogRetentionDays(value: string): void {
-    this.logRetentionDaysInput = value;
-    this.logRetentionDays = this.parseLogRetentionDaysInput(value);
-    this.savePersistState();
-  }
-
-  private parseLogMaxSizeMbInput(value: string): number {
-    const trimmed: string = value.trim();
-    if (trimmed.length === 0) {
-      return DEFAULT_LOG_MAX_SIZE_MB;
+    const days = this.parseLogLimitInput(value, this.logRetentionDays);
+    this.logRetentionDaysInput = `${days}`;
+    if (days !== this.logRetentionDays) {
+      this.logRetentionDays = days;
+      this.lastDnsLogPruneAt = 0;
+      this.savePersistState(true);
     }
-    const parsed = parseInt(trimmed, 10);
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      return DEFAULT_LOG_MAX_SIZE_MB;
-    }
-    return parsed;
   }
 
   private updateLogMaxSizeMb(value: string): void {
-    this.logMaxSizeMbInput = value;
-    this.logMaxSizeMb = this.parseLogMaxSizeMbInput(value);
-    this.savePersistState();
+    const size = this.parseLogLimitInput(value, this.logMaxSizeMb);
+    this.logMaxSizeMbInput = `${size}`;
+    if (size !== this.logMaxSizeMb) {
+      this.logMaxSizeMb = size;
+      this.lastDnsLogPruneAt = 0;
+      this.savePersistState(true);
+    }
   }
 
   private updateClearDnsLogOnStart(value: boolean): void {
@@ -4408,19 +4399,18 @@ struct Index {
   }
 
   private clearDnsRequestData(): void {
-    if (!this.writeTextFile(this.queryLogFilePath, '')) {
+    const appCleared = clearLogFile(this.queryLogFilePath);
+    const aghCleared = clearLogFile(this.aghQueryLogPath());
+    if (!appCleared || !aghCleared) {
       throw new Error(this.t('clearDnsRequestsFailed'));
     }
-    // Wipe the DB too. The app jsonl is now empty; for AGH (full-proxy) skip its
-    // pre-existing history by parking the watermark/offset at the current file end
-    // so only post-clear entries get re-ingested.
     dnsLogDb.clear().catch(() => {
     });
     dnsStats.reset();
-    this.appLogOffset = 0;
-    this.appLogLastTs = 0;
-    this.aghLogLastTs = Date.now();
-    this.aghLogOffset = this.fileByteSize(this.aghQueryLogPath());
+    this.appLogReader.reset();
+    this.aghLogReader.reset();
+    this.appLogLastTs = Date.now();
+    this.aghLogLastTs = this.appLogLastTs;
     this.queryEvents = [];
     this.recentRows = [];
     this.querySummary = defaultQuerySummary();
@@ -4684,6 +4674,7 @@ struct Index {
   aboutToDisappear(): void {
     configSync.detach(this.onConfigSyncAvailable);
     this.stopRefreshTimer();
+    this.stopLogMaintenanceTimer();
     // Avoid an orphaned timer firing on a torn-down component. Leave the last
     // published notification in place (don't cancel) — the proxy keeps filtering.
     if (this.proxyNotifyTimer >= 0) {
@@ -5121,6 +5112,14 @@ struct Index {
         this.logMaxSizeMb = DEFAULT_LOG_MAX_SIZE_MB;
         this.logMaxSizeMbInput = `${DEFAULT_LOG_MAX_SIZE_MB}`;
       }
+      const migrateLogDefaults = state.logRetentionDefaultsApplied !== true &&
+        this.logRetentionDays === 0 && this.logMaxSizeMb === 0;
+      if (migrateLogDefaults) {
+        this.logRetentionDays = DEFAULT_LOG_RETENTION_DAYS;
+        this.logRetentionDaysInput = `${DEFAULT_LOG_RETENTION_DAYS}`;
+        this.logMaxSizeMb = DEFAULT_LOG_MAX_SIZE_MB;
+        this.logMaxSizeMbInput = `${DEFAULT_LOG_MAX_SIZE_MB}`;
+      }
       if (typeof state.clearDnsLogOnStart === 'boolean') {
         this.clearDnsLogOnStart = state.clearDnsLogOnStart;
       }
@@ -5216,6 +5215,9 @@ struct Index {
       if (this.keepAliveEnabled) {
         this.keepAliveStatusText = this.keepAliveModeSummary(false);
       }
+      if (migrateLogDefaults) {
+        this.savePersistState(true);
+      }
     } catch (_) {
     }
   }
@@ -5242,6 +5244,7 @@ struct Index {
       upstreamAutoEnabled: this.upstreamAutoEnabled,
       logRetentionDays: this.logRetentionDays,
       logMaxSizeMb: this.logMaxSizeMb,
+      logRetentionDefaultsApplied: true,
       clearDnsLogOnStart: this.clearDnsLogOnStart,
       clearDebugLogOnStart: this.clearDebugLogOnStart,
       fullModeEnabled: this.fullModeEnabled,
@@ -5316,54 +5319,6 @@ struct Index {
     }
   }
 
-  // Read only the newly appended bytes of a log file (from `offset` to EOF) and
-  // return the complete lines (up to the last '\n') plus the next byte offset;
-  // undefined when there is nothing new. On shrink (clear / rotation) reading
-  // restarts from 0 and the ts watermark dedupes. Reading just the tail keeps the
-  // per-tick cost independent of the file size — the old whole-file
-  // readTextSync froze the UI once the jsonl grew to many MB.
-  private readLogTail(path: string, offset: number): LogTail | undefined {
-    const size: number = this.fileByteSize(path);
-    const from: number = size < offset ? 0 : offset;
-    if (size <= from) {
-      return undefined;
-    }
-    const buf: ArrayBuffer = new ArrayBuffer(size - from);
-    let got: number = 0;
-    let f: fileIo.File | undefined = undefined;
-    try {
-      f = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
-      got = fileIo.readSync(f.fd, buf, { offset: from });
-    } catch (_) {
-      return undefined;
-    } finally {
-      if (f !== undefined) {
-        try {
-          fileIo.closeSync(f);
-        } catch (_) {
-        }
-      }
-    }
-    if (got <= 0) {
-      return undefined;
-    }
-    // Consume up to the last newline only, leaving a partially written line for
-    // the next tick (0x0A never occurs inside a multi-byte UTF-8 sequence).
-    const bytes: Uint8Array = new Uint8Array(buf, 0, got);
-    let lastNl: number = -1;
-    for (let i: number = bytes.length - 1; i >= 0; i--) {
-      if (bytes[i] === 0x0A) {
-        lastNl = i;
-        break;
-      }
-    }
-    if (lastNl < 0) {
-      return undefined;
-    }
-    const chunk: string = this.logTailDecoder.decodeToString(new Uint8Array(buf, 0, lastNl));
-    return { chunk: chunk, nextOffset: from + lastNl + 1 };
-  }
-
   private writeTextFile(path: string, content: string): boolean {
     let f: fileIo.File | undefined = undefined;
     try {
@@ -5406,6 +5361,7 @@ struct Index {
     this.refreshStatus();
     this.refreshQueryLog();
     this.refreshDebugLog();
+    this.checkLogMaintenance();
     // Capture the cumulative baseline for the VPN extension's notification (it
     // adds its live native delta on top). Deduped internally.
     this.writeNotifyCountsFile();
@@ -5424,6 +5380,30 @@ struct Index {
     }
     if (this.configSyncInboxPending) {
       void this.receiveConfigSync();
+    }
+  }
+
+  private checkLogMaintenance(): void {
+    const now = Date.now();
+    // The VPN extension owns rotation while its engine is running.
+    if (this.busy || this.status.running || this.status.phase === 'starting' || this.logMaintenanceRunning ||
+      now - this.lastLogMaintenanceAt < LOG_MAINTENANCE_INTERVAL_MS) {
+      return;
+    }
+    this.lastLogMaintenanceAt = now;
+    this.logMaintenanceRunning = true;
+    const days = this.logRetentionDays;
+    const size = this.logMaxSizeMb;
+    maintainLogFiles([this.queryLogFilePath, this.aghQueryLogPath()], days, size).then(() =>
+      maintainLogFiles([this.debugLogFilePath], days, size, this.appTunnelLogFilePath)).finally(() => {
+      this.logMaintenanceRunning = false;
+    }).catch(() => {});
+  }
+
+  private stopLogMaintenanceTimer(): void {
+    if (this.logMaintenanceTimer >= 0) {
+      clearInterval(this.logMaintenanceTimer);
+      this.logMaintenanceTimer = -1;
     }
   }
 
@@ -5582,13 +5562,6 @@ struct Index {
     }
     this.appLogLastTs = await dnsLogDb.maxTs('app');
     this.aghLogLastTs = await dnsLogDb.maxTs('agh');
-    this.appLogOffset = 0;
-    this.aghLogOffset = 0;
-    // Apply the configured retention to the DB once at startup (the jsonl has its
-    // own rotation; the DB keeps its own history bounded the same way).
-    if (this.logRetentionDays > 0) {
-      await dnsLogDb.pruneOlderThan(Date.now() - this.logRetentionDays * 24 * 60 * 60 * 1000);
-    }
     // Persistent stat counters: load them, and on the first run after upgrading
     // to incremental stats seed them from the existing table contents (the only
     // remaining full-table aggregation, off the refresh loop, once ever).
@@ -5622,9 +5595,13 @@ struct Index {
     try {
       // Each engine writes its own log. Read both tails so requests remain visible
       // while the VPN is switching engines or the running engine differs from the setting.
-      const appIngested: number = await this.ingestAppLog();
-      const aghIngested: number = await this.ingestAghLog();
-      const ingested: number = appIngested + aghIngested;
+      const ingested: number = await this.ingestDnsLog(false) + await this.ingestDnsLog(true);
+      const now: number = Date.now();
+      let pruned: boolean = false;
+      if (now - this.lastDnsLogPruneAt >= LOG_MAINTENANCE_INTERVAL_MS) {
+        this.lastDnsLogPruneAt = now;
+        pruned = await dnsLogDb.prune(logCutoff(this.logRetentionDays), this.logMaxSizeMb);
+      }
 
       // Totals come from the incrementally maintained persistent counters
       // (DnsStats) — no COUNT/SUM aggregation over the table on the refresh tick
@@ -5644,7 +5621,7 @@ struct Index {
         const filter: string = this.dnsActionFilter;
         const search: string = this.dnsSearchText;
         const queryKey: string = `${filter}|${search}|${this.dnsPage}`;
-        if (ingested > 0 || queryKey !== this.dnsLoadedQueryKey) {
+        if (ingested > 0 || pruned || queryKey !== this.dnsLoadedQueryKey) {
           const count: number = await dnsLogDb.countFor(filter, search);
           const totalPages: number = Math.max(1, Math.ceil(count / DNS_PAGE_SIZE));
           const page: number = Math.min(Math.max(0, this.dnsPage), totalPages - 1);
@@ -5659,8 +5636,7 @@ struct Index {
       // then re-queried only when new rows arrived, rate-limited — pulling 2000
       // rows plus a 2000-element @State reassignment every tick was the other
       // big-table freeze.
-      const now: number = Date.now();
-      if (!this.recentRowsLoaded || (ingested > 0 && now - this.lastRecentRefreshMs >= RECENT_REFRESH_MIN_MS)) {
+      if (!this.recentRowsLoaded || pruned || (ingested > 0 && now - this.lastRecentRefreshMs >= RECENT_REFRESH_MIN_MS)) {
         const recent: DnsLogRow[] = await dnsLogDb.recentRows(MAX_QUERY_EVENTS);
         this.recentRows = recent.map((r: DnsLogRow) => this.rowToEntry(r));
         this.recentRowsLoaded = true;
@@ -5704,66 +5680,41 @@ struct Index {
     return `${vpnDir}/${AGH_WORK_DIR_NAME}/data/querylog.json`;
   }
 
-  // Read the appended tail of the app jsonl and insert new rows. On shrink (clear
-  // / rotation) the whole file is re-scanned but the ts watermark skips rows
-  // already stored, so no duplicates. Returns how many rows were inserted.
-  private async ingestAppLog(): Promise<number> {
-    const tail: LogTail | undefined = this.readLogTail(this.queryLogFilePath, this.appLogOffset);
-    if (tail === undefined) {
+  private async ingestDnsLog(isAgh: boolean): Promise<number> {
+    const reader: LogReader = isAgh ? this.aghLogReader : this.appLogReader;
+    const watermark: number = isAgh ? this.aghLogLastTs : this.appLogLastTs;
+    const path: string = isAgh ? this.aghQueryLogPath() : this.queryLogFilePath;
+    const batch = reader.read(path, watermark);
+    if (batch === undefined) {
       return 0;
     }
+    const cutoff: number = Math.max(logCutoff(this.logRetentionDays), batch.next.watermark + 1);
     const rows: DnsLogRow[] = [];
-    let maxTs: number = this.appLogLastTs;
-    for (const line of tail.chunk.split('\n')) {
-      const t: string = line.trim();
-      if (t.length === 0) {
+    let maxTs: number = watermark;
+    for (const line of batch.chunk.split('\n')) {
+      if (line.length === 0) {
         continue;
       }
-      const row: DnsLogRow | undefined = this.parseAppLogLine(t);
-      if (row === undefined || row.ts <= this.appLogLastTs) {
-        continue;
-      }
-      rows.push(row);
-      if (row.ts > maxTs) {
-        maxTs = row.ts;
+      const row: DnsLogRow | undefined = isAgh ? this.parseAghLogLine(line) : this.parseAppLogLine(line);
+      if (row !== undefined && Number.isFinite(row.ts) && row.ts >= cutoff) {
+        rows.push(row);
+        maxTs = Math.max(maxTs, row.ts);
       }
     }
-    this.appLogOffset = tail.nextOffset;
-    if (rows.length > 0) {
-      await dnsLogDb.insertRows(rows, 'app');
-      this.appLogLastTs = maxTs;
-      dnsStats.addRows(rows);
-    }
-    return rows.length;
-  }
-
-  private async ingestAghLog(): Promise<number> {
-    const tail: LogTail | undefined = this.readLogTail(this.aghQueryLogPath(), this.aghLogOffset);
-    if (tail === undefined) {
+    if (rows.length > 0 && !(await dnsLogDb.insertRows(rows, isAgh ? 'agh' : 'app'))) {
       return 0;
     }
-    const rows: DnsLogRow[] = [];
-    let maxTs: number = this.aghLogLastTs;
-    for (const line of tail.chunk.split('\n')) {
-      const t: string = line.trim();
-      if (t.length === 0) {
-        continue;
-      }
-      const row: DnsLogRow | undefined = this.parseAghLogLine(t);
-      if (row === undefined || row.ts <= this.aghLogLastTs) {
-        continue;
-      }
-      rows.push(row);
-      if (row.ts > maxTs) {
-        maxTs = row.ts;
-      }
+    if ((isAgh ? this.aghLogLastTs : this.appLogLastTs) !== watermark) {
+      // The user cleared the history while this insert was in flight.
+      return 0;
     }
-    this.aghLogOffset = tail.nextOffset;
-    if (rows.length > 0) {
-      await dnsLogDb.insertRows(rows, 'agh');
+    reader.advance(batch);
+    if (isAgh) {
       this.aghLogLastTs = maxTs;
-      dnsStats.addRows(rows);
+    } else {
+      this.appLogLastTs = maxTs;
     }
+    dnsStats.addRows(rows);
     return rows.length;
   }
 
@@ -5877,13 +5828,21 @@ struct Index {
   }
 
   private refreshDebugLog(): void {
-    const raw = this.readTextFileTail(this.debugLogFilePath, DEBUG_LOG_TAIL_BYTES);
+    let remaining = DEBUG_LOG_TAIL_BYTES;
+    const files = archivedLogPaths(this.debugLogFilePath).concat([this.debugLogFilePath]);
+    const chunks: string[] = [];
+    for (let i = files.length - 1; i >= 0 && remaining > 0; i--) {
+      chunks.unshift(this.readTextFileTail(files[i], remaining));
+      remaining -= this.fileByteSize(files[i]);
+    }
+    const raw = chunks.join('\n');
     const lines: string[] = raw.split('\n');
     const items: string[] = [];
+    const cutoff = logCutoff(this.logRetentionDays);
     let index: number = lines.length - 1;
     while (index >= 0 && items.length < 20) {
       const line: string = lines[index].trim();
-      if (line.length > 0) {
+      if (line.length > 0 && !(Date.parse(line.split(' ', 1)[0]) < cutoff)) {
         items.push(line);
       }
       index -= 1;
@@ -5892,7 +5851,8 @@ struct Index {
     let connectionCount = 0;
     for (let i = connections.length - 1; i >= 0 && connectionCount < 50; i--) {
       const fields = connections[i].trim().split('\t');
-      if (fields.length !== 4 || fields[2] === 'dns' || !Number.isFinite(Date.parse(fields[0]))) {
+      const timestamp = Date.parse(fields[0]);
+      if (fields.length !== 4 || fields[2] === 'dns' || !Number.isFinite(timestamp) || timestamp < cutoff) {
         continue;
       }
       const action = fields[2] === 'blocked' ? this.t('blocked') : fields[2] === 'failed' ?
@@ -6923,6 +6883,7 @@ struct Index {
       this.dnsProxyActivePort = port;
       this.aghActiveHttpPort = this.fullModeEnabled ? httpPort : 0;
       this.dnsProxyRunning = true;
+      this.syncDnsProxyRunning();
       this.dnsProxyDesiredRunning = true;
       this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${port}`);
       this.startProxyNotify();
@@ -6955,6 +6916,16 @@ struct Index {
       const stats = JSON.parse(vpnclientbridge.getStats()) as AghProxyStats;
       const running: boolean = stats.running === true;
       this.dnsProxyRunning = running;
+      if (running && this.logMaintenanceTimer < 0) {
+        this.logMaintenanceTimer = setInterval(() => {
+          this.checkLogMaintenance();
+          if (!this.pageVisible) {
+            this.refreshQueryLog();
+          }
+        }, LOG_MAINTENANCE_INTERVAL_MS);
+      } else if (!running) {
+        this.stopLogMaintenanceTimer();
+      }
       if (running && this.dnsProxyStatusText.length === 0) {
         this.dnsProxyStatusText = this.t('dnsProxyRunningStatus', `tcp://127.0.0.1:${this.displayedDnsPort()}`);
       }
@@ -6983,6 +6954,7 @@ struct Index {
       }
       await this.stopLongTaskKeepAlive(true);
       this.dnsProxyRunning = false;
+      this.stopLogMaintenanceTimer();
       this.dnsProxyActivePort = 0;
       this.aghActiveHttpPort = 0;
       this.stopProxyNotify();
@@ -12201,6 +12173,7 @@ struct Index {
 
               Row({ space: 6 }) {
                 TextInput({ text: this.logRetentionDaysInput, placeholder: `${DEFAULT_LOG_RETENTION_DAYS}` })
+                  .type(InputType.Number)
                   .width(72)
                   .height(40)
                   .fontSize(15)
@@ -12211,8 +12184,10 @@ struct Index {
                   .border({ width: 1, color: this.sheetBorderTone() })
                   .padding({ left: 8, right: 8 })
                   .onChange((value: string) => {
-                    this.updateLogRetentionDays(value);
+                    this.logRetentionDaysInput = value;
                   })
+                  .onBlur(() => this.updateLogRetentionDays(this.logRetentionDaysInput))
+                  .onSubmit(() => this.updateLogRetentionDays(this.logRetentionDaysInput))
                 Text(this.language === 'en' ? 'd' : '天')
                   .fontSize(12)
                   .fontColor(this.secondaryTextColor())
@@ -12241,6 +12216,7 @@ struct Index {
 
               Row({ space: 6 }) {
                 TextInput({ text: this.logMaxSizeMbInput, placeholder: `${DEFAULT_LOG_MAX_SIZE_MB}` })
+                  .type(InputType.Number)
                   .width(72)
                   .height(40)
                   .fontSize(15)
@@ -12251,8 +12227,10 @@ struct Index {
                   .border({ width: 1, color: this.sheetBorderTone() })
                   .padding({ left: 8, right: 8 })
                   .onChange((value: string) => {
-                    this.updateLogMaxSizeMb(value);
+                    this.logMaxSizeMbInput = value;
                   })
+                  .onBlur(() => this.updateLogMaxSizeMb(this.logMaxSizeMbInput))
+                  .onSubmit(() => this.updateLogMaxSizeMb(this.logMaxSizeMbInput))
                 Text('MB')
                   .fontSize(12)
                   .fontColor(this.secondaryTextColor())

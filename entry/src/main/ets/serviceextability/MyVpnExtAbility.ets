@@ -6,6 +6,8 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { APP_TUNNEL_LOG_FILE, appSplitDnsAllowlistRules, AppSplitFile, parseAppSplitDnsAllowlist } from '../data/AppSplit';
 import { aghSubscriptionId, seedAghSubscriptionCache } from '../data/SubscriptionCache';
+import { clearLogFile, DEFAULT_LOG_MAX_SIZE_MB, DEFAULT_LOG_RETENTION_DAYS, LOG_MAINTENANCE_INTERVAL_MS,
+  maintainLogFiles } from '../data/LogRetention';
 import vpnclientbridge from 'libvpnclientbridge.so';
 
 const DOMAIN = 0x0000;
@@ -57,8 +59,6 @@ const MAX_NOTIFICATION_REFRESH_SECONDS = 60;
 // fails to resolve when the notification is tapped, so the app wouldn't open.
 const ENTRY_ABILITY_NAME = 'EntryAbility';
 const DEFAULT_DNS_CACHE_TTL_SECONDS = 3600;
-const DEFAULT_LOG_RETENTION_DAYS = 0;
-const DEFAULT_LOG_MAX_SIZE_MB = 0;
 const TUN_ADDRESS_IP = '10.8.0.2';
 const DNS_SERVER_IP = '10.8.0.1';
 const IPV4_ROUTE = '10.8.0.0';
@@ -68,6 +68,10 @@ const DNS_SERVER_IPV6 = 'fd00:ad00::1';
 const IPV6_ROUTE = 'fd00:ad00::';
 const IPV6_PREFIX_LENGTH = 64;
 const UPSTREAM_DNS_IP = '119.29.29.29';
+interface LogLimits {
+  logRetentionDays?: number;
+  logMaxSizeMb?: number;
+}
 // First line of upstream.txt when the UI has enabled "auto upstream": follow the
 // system/router-provided resolvers (read from the underlying network), falling
 // back to the manual list on the remaining lines when none are usable. Must
@@ -262,6 +266,8 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
   private dnsCacheTtlSeconds: number = DEFAULT_DNS_CACHE_TTL_SECONDS;
   private logRetentionDays: number = DEFAULT_LOG_RETENTION_DAYS;
   private logMaxSizeMb: number = DEFAULT_LOG_MAX_SIZE_MB;
+  private lastLogMaintenanceAt: number = 0;
+  private logMaintenanceRunning: boolean = false;
   private clearDnsLogOnStart: boolean = false;
   private clearDebugLogOnStart: boolean = false;
   private uiWatchFilePath: string = '';
@@ -396,10 +402,15 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     // Provisional until createTunAndStartFilter resolves it against the live
     // network (auto mode). In manual mode this is already the final value.
     this.upstreamDnsIp = this.upstreamManual;
-    this.prepareLogFile(this.queryLogFilePath, this.clearDnsLogOnStart, this.logRetentionDays, this.logMaxSizeMb, true);
-    this.prepareLogFile(this.debugLogFilePath, this.clearDebugLogOnStart, this.logRetentionDays, this.logMaxSizeMb, false);
-    this.prepareLogFile(`${vpnDir}/${APP_TUNNEL_LOG_FILE}`,
-      this.clearDebugLogOnStart, this.logRetentionDays, this.logMaxSizeMb, false);
+    if (this.clearDnsLogOnStart) {
+      clearLogFile(this.queryLogFilePath);
+      clearLogFile(`${this.aghWorkDirPath}/data/querylog.json`);
+    }
+    if (this.clearDebugLogOnStart) {
+      clearLogFile(this.debugLogFilePath);
+      clearLogFile(`${vpnDir}/${APP_TUNNEL_LOG_FILE}`);
+    }
+    this.checkLogMaintenance();
     hilog.info(
       DOMAIN,
       TAG,
@@ -446,110 +457,32 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
     }
   }
 
-  private prepareLogFile(path: string, clearOnStart: boolean, retentionDays: number, maxSizeMb: number,
-    isDnsQueryLog: boolean): void {
-    if (clearOnStart) {
-      this.writeTextFile(path, '');
+  private checkLogMaintenance(): void {
+    const now = Date.now();
+    if (this.logMaintenanceRunning || now - this.lastLogMaintenanceAt < LOG_MAINTENANCE_INTERVAL_MS) {
       return;
     }
-    this.ensureTextFileExists(path);
-    this.pruneLogFileByDays(path, retentionDays, isDnsQueryLog);
-    this.truncateLogFileIfNeeded(path, maxSizeMb);
-  }
-
-  private pruneLogFileByDays(path: string, retentionDays: number, isDnsQueryLog: boolean): void {
-    if (retentionDays <= 0) {
-      return;
-    }
-    const content: string = this.readTextFile(path);
-    if (content.trim().length === 0) {
-      return;
-    }
-    const cutoffMs: number = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-    const originalLines: string[] = content.split('\n');
-    const keptLines: string[] = [];
-    originalLines.forEach((rawLine: string) => {
-      const line: string = rawLine.trim();
-      if (line.length === 0) {
-        return;
-      }
-      if (this.shouldKeepLogLine(line, cutoffMs, isDnsQueryLog)) {
-        keptLines.push(line);
-      }
-    });
-    if (keptLines.length === originalLines.filter((line: string) => line.trim().length > 0).length) {
-      return;
-    }
-    this.writeTextFile(path, this.normalizeLogFileContent(keptLines));
-    hilog.info(DOMAIN, TAG, '==/vpn_ext/log_pruned_days/ path=%{public}s days=%{public}d', path, retentionDays);
-    this.appendDebugLog(`==/vpn_ext/log_pruned_days/ path=${path} days=${retentionDays}`);
-  }
-
-  private shouldKeepLogLine(line: string, cutoffMs: number, isDnsQueryLog: boolean): boolean {
-    const timestampMs: number = isDnsQueryLog ? this.parseDnsLogTimestamp(line) : this.parseDebugLogTimestamp(line);
-    if (!Number.isFinite(timestampMs)) {
-      return true;
-    }
-    return timestampMs >= cutoffMs;
-  }
-
-  private parseDnsLogTimestamp(line: string): number {
+    this.lastLogMaintenanceAt = now;
+    this.logMaintenanceRunning = true;
+    const vpnDir = `${this.context.filesDir}/${VPN_DIR_NAME}`;
     try {
-      const entry = JSON.parse(line) as Record<string, number>;
-      const ts = entry.ts;
-      return typeof ts === 'number' && Number.isFinite(ts) ? ts : NaN;
-    } catch (_) {
-      return NaN;
-    }
-  }
-
-  private parseDebugLogTimestamp(line: string): number {
-    const firstSpace: number = line.search(/\s/);
-    if (firstSpace <= 0) {
-      return NaN;
-    }
-    return Date.parse(line.slice(0, firstSpace));
-  }
-
-  private normalizeLogFileContent(lines: string[]): string {
-    if (lines.length === 0) {
-      return '';
-    }
-    return `${lines.join('\n')}\n`;
-  }
-
-  private truncateLogFileIfNeeded(path: string, maxSizeMb: number): void {
-    if (maxSizeMb <= 0) {
-      return;
-    }
-    const content: string = this.readTextFile(path);
-    const maxChars: number = maxSizeMb * 1024 * 1024;
-    if (content.length <= maxChars) {
-      return;
-    }
-    let truncated: string = content.slice(content.length - maxChars);
-    const firstNewlineIndex: number = truncated.indexOf('\n');
-    if (firstNewlineIndex >= 0 && firstNewlineIndex < truncated.length - 1) {
-      truncated = truncated.slice(firstNewlineIndex + 1);
-    }
-    this.writeTextFile(path, this.normalizeLogFileContent(truncated.split('\n').filter((line: string) => line.trim().length > 0)));
-    hilog.info(DOMAIN, TAG, '==/vpn_ext/log_truncated/ path=%{public}s max_mb=%{public}d', path, maxSizeMb);
-    this.appendDebugLog(`==/vpn_ext/log_truncated/ path=${path} max_mb=${maxSizeMb}`);
-  }
-
-  private ensureTextFileExists(path: string): void {
-    let f: fileIo.File | undefined = undefined;
-    try {
-      f = fileIo.openSync(path, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
-    } catch (_) {
-    } finally {
-      if (f !== undefined) {
-        try {
-          fileIo.closeSync(f);
-        } catch (_) {
-        }
+      const settings = JSON.parse(this.readTextFile(`${vpnDir}/ui_state.json`)) as LogLimits;
+      const days = settings.logRetentionDays;
+      const size = settings.logMaxSizeMb;
+      if (typeof days === 'number' && Number.isFinite(days) && days >= 0) {
+        this.logRetentionDays = Math.floor(days);
       }
+      if (typeof size === 'number' && Number.isFinite(size) && size >= 0) {
+        this.logMaxSizeMb = Math.floor(size);
+      }
+    } catch (_) {
     }
+    const days = this.logRetentionDays;
+    const size = this.logMaxSizeMb;
+    maintainLogFiles([this.queryLogFilePath, `${this.aghWorkDirPath}/data/querylog.json`], days, size).then(() =>
+      maintainLogFiles([this.debugLogFilePath], days, size, `${vpnDir}/${APP_TUNNEL_LOG_FILE}`)).finally(() => {
+      this.logMaintenanceRunning = false;
+    }).catch(() => {});
   }
 
   private buildVpnConfig(dnsCaptureIps: string[]): vpnExtension.VpnConfig {
@@ -1113,6 +1046,7 @@ export default class MyVpnExtAbility extends VpnExtensionAbility {
       this.checkRulesReload();
       this.checkUpstreamReload();
       this.checkAppSplitReload();
+      this.checkLogMaintenance();
       // Pick up live notify.json edits (toggle / interval / language) and refresh
       // the persistent stats notification. Runs before the idle early-return
       // below so the notification stays live even while the UI isn't watching.
