@@ -6,7 +6,7 @@
 
 #### 新增与优化
 
-- **全量 VPN（实验，默认开启）**。在「仅代理」中勾选应用后，可以在「调试日志」查看这些应用连到了哪些服务器。部分广告请求会跳过域名查询、直接连接服务器，知道服务器 IP 后，也可以把这类连接拦下来。轻量和完整模式都支持。
+- **全量 VPN（实验，默认开启）**。部分广告请求会跳过域名查询、直接连接服务器，知道服务器 IP 后，也可以把这类连接拦下来。轻量和完整模式都支持。在「仅代理」中勾选应用后，可以在「调试日志」查看这些应用连到了哪些服务器。
 - **DNS 白名单与 IPv6 屏蔽**。所选应用可只解析指定域名。设置中可以分别屏蔽 IPv6 解析和阻断 IPv6 连接。
 - **应用接续、手动同步与配置备份**。同步和导入导出覆盖 DNS 白名单、IP 拦截规则、全量 VPN 与两个 IPv6 开关。系统接续成功后会退出源端页面。
 - **便捷导入**。快速导入可读取文件或剪贴板。
@@ -18,7 +18,7 @@ GitHub 附件为未签名 HAP，可自行签名后安装。
 
 #### Added and improved
 
-- **Full VPN (experimental, on by default)** shows which servers your selected apps connect to in the debug log. Some ads connect directly without looking up a domain. If you know the server's IP address, you can block those connections too. This works in selected-app mode with either DNS engine.
+- **Full VPN (experimental, on by default)** lets you block direct connections to ad servers if you know their IP addresses. Both DNS engines support it. In selected-app mode, select your apps and open the debug log to see which servers they connect to.
 - **DNS allowlist and IPv6 blocking** let selected apps resolve listed domains and let you control IPv6 DNS lookups and IPv6 connections independently.
 - **App continuation, manual sync, and configuration backup** carry the DNS allowlist, IP blocking rules, full VPN setting, and both IPv6 switches. The source screen exits after system app continuation succeeds.
 - **Quick import** accepts files and clipboard contents.
