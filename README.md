@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.1.1-orange)
+![Version](https://img.shields.io/badge/Version-v0.1.2-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `栖云盾` 是一个面向 **HarmonyOS 6.0+** 的本地 DNS 过滤应用：通过**本地 VPN** 或**纯 DNS 代理**接管 DNS 流量，按 **AdGuard 风格规则**拦截广告与跟踪域名，内置**轻量级 / 完整（AdGuardHome）双过滤引擎**。
 
-项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.1.1**（[更新日志](#更新日志)）
+项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.1.2**（[更新日志](#更新日志)）
 
 ## 目录
 
@@ -76,12 +76,12 @@
 
 ## 更新日志
 
-当前版本 **v0.1.1**（2026-11-21）新增**应用接续与跨设备配置同步**。
+当前版本 **v0.1.2**（2026-11-22）新增**分应用全量 VPN 和 DNS 白名单**，扩展了跨设备同步与配置备份。
 
-- 在 **我的 → 设置 → 跨设备同步** 开启功能。同一华为帐号下的两台设备都开启后，可通过系统接续在另一台设备打开应用，也可在应用内选择设备并手动同步。
-- 可同步过滤规则、订阅、DNS 设置和分应用配置。手动同步会显示目标设备的接收结果。
+- 在 **我的 → 设置 → VPN** 管理全量 VPN 和 IPv6 屏蔽。在「仅代理」模式下，可以为勾选的应用配置 DNS 白名单和 IP 拦截规则，并在调试日志中查看连接记录。
+- 应用接续、手动同步和配置导入导出均可传递分应用规则、全量 VPN 与 IPv6 设置。
 
-完整变更（中英双语）：[v0.1.1](./docs/CHANGELOG-0.1.1.md) ｜ [v0.1.0](./docs/CHANGELOG-0.1.0.md) ｜ [v0.0.9](./docs/CHANGELOG-0.0.9.md) ｜ [v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
+完整变更（中英双语）：[v0.1.2](./docs/CHANGELOG-0.1.2.md) ｜ [v0.1.1](./docs/CHANGELOG-0.1.1.md) ｜ [v0.1.0](./docs/CHANGELOG-0.1.0.md) ｜ [v0.0.9](./docs/CHANGELOG-0.0.9.md) ｜ [v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
 
 ## 引擎与网络模式
 
