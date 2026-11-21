@@ -4,6 +4,7 @@
     { "name": "EntryAbility_desc", "value": "本地 VPN 控制器" },
     { "name": "EntryAbility_label", "value": "棲雲盾" },
     { "name": "permission_location_reason", "value": "用於定位長任務保活" },
+    { "name": "permission_config_sync_reason", "value": "用於在同一華為帳號的裝置間同步過濾設定和接續應用程式" },
     { "name": "appTitle", "value": "棲雲盾" },
     { "name": "homeTitle", "value": "運行面板" },
     { "name": "configTitle", "value": "規則配置" },

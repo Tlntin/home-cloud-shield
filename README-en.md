@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.1.0-orange)
+![Version](https://img.shields.io/badge/Version-v0.1.1-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `home_cloud_shield` is a local DNS filtering app for **HarmonyOS 6.0+**: it intercepts DNS traffic through a **local VPN** or a **pure DNS proxy**, blocks ad and tracking domains with **AdGuard-style rules**, and ships a **dual filtering engine** (lightweight / full AdGuardHome).
 
-Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.1.0** ([Changelog](#changelog))
+Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.1.1** ([Changelog](#changelog))
 
 ## Table of Contents
 
@@ -76,13 +76,12 @@ Auto-Installer is a free, cross-platform HarmonyOS app deployment and debugging 
 
 ## Changelog
 
-Current version **v0.1.0** (2026-10-07), themed around **a new immersive UI, per-app routing, and data-transfer keep-alive**:
+Version **v0.1.1** (2026-11-21) adds **app continuation and cross-device settings sync**.
 
-- **Per-app routing** (Me → "Per-app routing", VPN mode only): three modes — Off (default) / Bypass (listed apps skip filtering) / Only (filter just the listed apps); pick from 26 common apps or enter a bundle name, toggle each one; **changes apply automatically** without restarting the filter; included in config import / export.
-- **Data-transfer keep-alive** (Me → "Background keep-alive"): a third continuous-task mode with a live-view notification showing status and blocked counts, refreshed every 60 s; off by default.
-- **Immersive UI**: the title bar blends into the status bar and blurs as content scrolls beneath it (immersive gradient blur on API 23+), with system glass buttons; Settings and Per-app routing are separate sub pages with swipe-back; the config page's header is reduced to a "+" in the title bar.
+- Enable the feature under **Me → Settings → Cross-device sync** on both devices signed in to the same HUAWEI ID. Use system app continuation to open the app on the other device, or choose a device in the app to sync manually.
+- Sync filter rules, subscriptions, DNS settings, and per-app routing. Manual sync shows whether the receiving device confirmed delivery.
 
-Full bilingual changelogs: [v0.1.0](./docs/CHANGELOG-0.1.0.md) | [v0.0.9](./docs/CHANGELOG-0.0.9.md) | [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
+Full bilingual changelogs: [v0.1.1](./docs/CHANGELOG-0.1.1.md) | [v0.1.0](./docs/CHANGELOG-0.1.0.md) | [v0.0.9](./docs/CHANGELOG-0.0.9.md) | [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
 
 ## Engines and Network Modes
 

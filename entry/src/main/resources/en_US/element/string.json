@@ -4,6 +4,7 @@
     { "name": "EntryAbility_desc", "value": "Local VPN controller" },
     { "name": "EntryAbility_label", "value": "Home Cloud Shield" },
     { "name": "permission_location_reason", "value": "Used for location long-task keep alive" },
+    { "name": "permission_config_sync_reason", "value": "Syncs filter settings and continues the app across devices on the same HUAWEI ID" },
     { "name": "appTitle", "value": "Home Cloud Shield" },
     { "name": "homeTitle", "value": "Home" },
     { "name": "configTitle", "value": "Rules" },

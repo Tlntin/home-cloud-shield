@@ -4,6 +4,7 @@
     { "name": "EntryAbility_desc", "value": "本地 VPN 控制器" },
     { "name": "EntryAbility_label", "value": "栖云盾" },
     { "name": "permission_location_reason", "value": "用于定位长任务保活" },
+    { "name": "permission_config_sync_reason", "value": "用于在同一华为帐号的设备间同步过滤配置和接续应用" },
     { "name": "appTitle", "value": "栖云盾" },
     { "name": "homeTitle", "value": "运行面板" },
     { "name": "configTitle", "value": "规则配置" },

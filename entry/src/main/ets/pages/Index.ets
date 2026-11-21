@@ -1,4 +1,4 @@
-import { common, ConfigurationConstant, wantAgent, Want, WantAgent } from '@kit.AbilityKit';
+import { AbilityConstant, common, ConfigurationConstant, wantAgent, Want, WantAgent } from '@kit.AbilityKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { picker, fileIo } from '@kit.CoreFileKit';
@@ -19,6 +19,7 @@ import { util } from '@kit.ArkTS';
 import { BLOCKED_SERVICES, BlockedServiceDef } from '../data/BlockedServices';
 import { dnsLogDb, DnsLogRow, DnsLogSummary } from '../data/DnsLogDb';
 import { dnsStats } from '../data/DnsStats';
+import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/ConfigSync';
 import { blurTitleBar } from '../components/BlurTitleBar';
 import {
   APP_SPLIT_MAX_BUNDLES, APP_SPLIT_PRESETS, AppSplitEntry, AppSplitMode, AppSplitPreset, findAppSplitPreset,
@@ -43,6 +44,7 @@ const VPN_ABILITY_NAME = 'MyVpnExtAbility';
 // notification didn't open the app.
 const ENTRY_ABILITY_NAME = 'EntryAbility';
 const VPN_DIR_NAME = 'vpn';
+const CONFIG_SYNC_PERMISSION: Permissions = 'ohos.permission.DISTRIBUTED_DATASYNC';
 // AdGuardHome (full mode) web admin panel — default port. The effective port is
 // user-configurable (aghHttpPort) and passed to the VPN extension via the Want.
 const AGH_HTTP_PORT = 3000;
@@ -786,6 +788,8 @@ interface AppSplitFile {
 }
 
 interface PersistState {
+  configSyncEnabled?: boolean;
+  configSyncDeviceId?: string;
   keepAliveEnabled?: boolean;
   audioKeepAliveEnabled?: boolean;
   locationKeepAliveEnabled?: boolean;
@@ -897,6 +901,19 @@ interface ConfigExport {
   allowed: ConfigHostRule[];
   redirected: ConfigRedirect[];
   app?: ConfigAppSettings;
+}
+
+interface SyncedCustomRules {
+  content: string;
+  enabled: boolean;
+}
+
+interface SyncedConfig {
+  sources: ConfigSource[];
+  redirected: ConfigRedirect[];
+  app: ConfigAppSettings;
+  customBlock: SyncedCustomRules;
+  customAllow: SyncedCustomRules;
 }
 
 // Per-section import tallies for the result toast.
@@ -1189,6 +1206,17 @@ struct Index {
   private configScroller: Scroller = new Scroller();
   private meScroller: Scroller = new Scroller();
   private settingsScroller: Scroller = new Scroller();
+  @State private configSyncEnabled: boolean = false;
+  @State private configSyncBusy: boolean = false;
+  @State private configSyncStatus: string = '';
+  @State private configSyncDevices: ConfigSyncDevice[] = [];
+  private configSyncDeviceId: string = '';
+  private configSyncInboxBusy: boolean = false;
+  private configSyncInboxPending: boolean = false;
+  private readonly onConfigSyncAvailable = (): void => {
+    this.configSyncInboxPending = true;
+    void this.receiveConfigSync();
+  };
   private appSplitScroller: Scroller = new Scroller();
   // Sub pages of the "Me" tab (settings, per-app routing) live on this stack so
   // they get the same immersive title bar, back button and swipe-back.
@@ -1436,6 +1464,10 @@ struct Index {
   // restart it so the change takes effect now; lightweight mode just persists.
   private applyFullModeConfigChange(): void {
     this.savePersistState();
+    this.restartFullEngineForConfig();
+  }
+
+  private restartFullEngineForConfig(): void {
     if (!this.fullModeEnabled || this.busy) {
       return;
     }
@@ -2119,7 +2151,7 @@ struct Index {
     return out;
   }
 
-  private buildConfigExportJson(): string {
+  private buildConfigExport(includeHostRules: boolean = true): ConfigExport {
     const sources: ConfigSource[] = this.filterSubscriptions.map((s: FilterSubscription) => {
       const e: ConfigSource = { label: s.name, url: s.url, enabled: s.enabled, allow: false, redirect: true };
       return e;
@@ -2154,20 +2186,20 @@ struct Index {
       appSplitMode: this.appSplitMode,
       appSplitApps: this.appSplitList,
     };
-    const config: ConfigExport = {
+    return {
       sources: sources,
-      blocked: this.hostRulesFromProfile(CUSTOM_BLOCK_RULE_PROFILE_ID, false),
-      allowed: this.hostRulesFromProfile(CUSTOM_ALLOW_RULE_PROFILE_ID, true),
+      blocked: includeHostRules ? this.hostRulesFromProfile(CUSTOM_BLOCK_RULE_PROFILE_ID, false) : [],
+      allowed: includeHostRules ? this.hostRulesFromProfile(CUSTOM_ALLOW_RULE_PROFILE_ID, true) : [],
       redirected: redirected,
       app: app,
     };
-    return JSON.stringify(config, null, 2);
   }
 
   private async exportConfigFile(): Promise<void> {
     try {
       const fileName: string | undefined =
-        await this.exportTextToDownloadDirectory('home_cloud_shield_config', 'json', this.buildConfigExportJson());
+        await this.exportTextToDownloadDirectory('home_cloud_shield_config', 'json',
+          JSON.stringify(this.buildConfigExport(), null, 2));
       if (fileName === undefined) {
         this.setConfigFeedback(this.exportCanceledMessage());
         return;
@@ -2320,7 +2352,7 @@ struct Index {
   // other scalar settings); apps are merged by bundle name, keeping existing
   // entries as they are. Returns how many apps were added. Mirrors the result
   // to app_split.json so a running VPN picks it up live.
-  private mergeImportedAppSplit(app: ConfigAppSettings): number {
+  private mergeImportedAppSplit(app: ConfigAppSettings, mirror: boolean = true): number {
     let added: number = 0;
     let changed: boolean = false;
     if (typeof app.appSplitMode === 'string' && normalizeAppSplitMode(app.appSplitMode) !== this.appSplitMode) {
@@ -2338,7 +2370,7 @@ struct Index {
         changed = true;
       }
     }
-    if (changed) {
+    if (changed && mirror) {
       this.writeAppSplitFile();
     }
     return added;
@@ -2498,6 +2530,284 @@ struct Index {
       this.errorText = this.errorMessage(err);
       this.setConfigFeedback(this.t('configImportInvalid'));
       this.appendDebugLog(`==/vpn_ui/import_config_error/ ${this.errorText}`);
+    }
+  }
+
+  private syncedAppSettings(app: ConfigAppSettings): ConfigAppSettings {
+    return {
+      upstreamDns: app.upstreamDns,
+      upstreamAuto: app.upstreamAuto,
+      blockedServiceIds: app.blockedServiceIds,
+      advancedDns: app.advancedDns,
+      dnsCacheTtlSeconds: app.dnsCacheTtlSeconds,
+      ruleProfiles: app.ruleProfiles,
+      appSplitMode: app.appSplitMode,
+      appSplitApps: app.appSplitApps,
+    };
+  }
+
+  private buildSyncedConfig(): SyncedConfig {
+    const config = this.buildConfigExport(false);
+    return {
+      sources: config.sources,
+      redirected: config.redirected,
+      app: this.syncedAppSettings(config.app ?? {}),
+      customBlock: this.syncedCustomRules(CUSTOM_BLOCK_RULE_PROFILE_ID),
+      customAllow: this.syncedCustomRules(CUSTOM_ALLOW_RULE_PROFILE_ID),
+    };
+  }
+
+  private syncedCustomRules(id: string): SyncedCustomRules {
+    const profile = this.ruleProfiles.find((item: RuleProfile) => item.id === id);
+    return { content: profile?.content ?? '', enabled: profile?.enabled ?? true };
+  }
+
+  private parseSyncedConfig(raw: string): SyncedConfig | undefined {
+    try {
+      const config = JSON.parse(raw) as SyncedConfig;
+      if (config && Array.isArray(config.sources) && Array.isArray(config.redirected) && config.app &&
+        typeof config.app === 'object' && !Array.isArray(config.app) &&
+        typeof config.customBlock?.content === 'string' && typeof config.customBlock?.enabled === 'boolean' &&
+        typeof config.customAllow?.content === 'string' && typeof config.customAllow?.enabled === 'boolean') {
+        return config;
+      }
+    } catch (_) {}
+    return undefined;
+  }
+
+  private mergeSyncedCustomRules(profile: RuleProfile, incoming: SyncedCustomRules): RuleProfile {
+    const original = this.ruleProfileLines(profile.content);
+    const seen = new Set<string>(original);
+    const merged = original.slice();
+    for (const line of this.ruleProfileLines(incoming.content)) {
+      if (!seen.has(line)) {
+        seen.add(line);
+        merged.push(line);
+      }
+    }
+    if (merged.length === original.length) {
+      return profile;
+    }
+    const updated = this.updateRuleProfileContent(profile, merged, original);
+    if (original.length === 0) {
+      updated.enabled = incoming.enabled;
+    }
+    return updated;
+  }
+
+  private applySyncedConfig(config: SyncedConfig): boolean {
+    const before = JSON.stringify(this.buildSyncedConfig());
+    const subscriptions = this.filterSubscriptions;
+    const rewrites = this.dnsRewrites;
+    const rules = this.ruleProfiles;
+    const services = this.blockedServiceIds;
+    const advancedDns = this.advancedDns;
+    const upstreamDns = this.upstreamDnsInput;
+    const upstreamAuto = this.upstreamAutoEnabled;
+    const cacheTtl = this.dnsCacheTtlSeconds;
+    const cacheTtlInput = this.dnsCacheTtlInput;
+    const appSplitMode = this.appSplitMode;
+    const appSplitList = this.appSplitList;
+    try {
+      this.mergeImportedSources(config.sources);
+      this.mergeImportedRedirects(config.redirected);
+      const app = this.syncedAppSettings(config.app);
+      this.applyImportedAppSettings(app);
+      if (Array.isArray(app.ruleProfiles)) {
+        this.mergeImportedRuleProfiles(app.ruleProfiles);
+      }
+      this.mergeImportedAppSplit(app, false);
+      this.ruleProfiles = this.ruleProfiles.map((profile: RuleProfile): RuleProfile => {
+        if (profile.id === CUSTOM_BLOCK_RULE_PROFILE_ID) {
+          return this.mergeSyncedCustomRules(profile, config.customBlock);
+        }
+        if (profile.id === CUSTOM_ALLOW_RULE_PROFILE_ID) {
+          return this.mergeSyncedCustomRules(profile, config.customAllow);
+        }
+        return profile;
+      });
+      if (before === JSON.stringify(this.buildSyncedConfig())) {
+        return false;
+      }
+      if (!this.savePersistState(true)) {
+        throw new Error('Could not save synced settings');
+      }
+    } catch (err) {
+      this.filterSubscriptions = subscriptions;
+      this.dnsRewrites = rewrites;
+      this.ruleProfiles = rules;
+      this.blockedServiceIds = services;
+      this.advancedDns = advancedDns;
+      this.upstreamDnsInput = upstreamDns;
+      this.upstreamAutoEnabled = upstreamAuto;
+      this.dnsCacheTtlSeconds = cacheTtl;
+      this.dnsCacheTtlInput = cacheTtlInput;
+      this.appSplitMode = appSplitMode;
+      this.appSplitList = appSplitList;
+      throw err as Error;
+    }
+    this.syncRuleCountBadges();
+    this.rulesText = this.buildMergedRulesText();
+    this.rulesDirty = true;
+    this.writeAppSplitFile();
+    if (this.activeRunning()) {
+      this.writeTextFile(this.rulesFilePath, this.rulesText);
+      this.writeUpstreamFile();
+      this.restartFullEngineForConfig();
+    }
+    const previousUrls = new Set<string>(subscriptions.map((source: FilterSubscription) => source.url));
+    const newUrls = this.filterSubscriptions.filter((source: FilterSubscription) => source.enabled &&
+      !previousUrls.has(source.url)).map((source: FilterSubscription) => source.url);
+    void this.downloadSubscriptions(newUrls);
+    return true;
+  }
+
+  private setConfigSyncStatus(message: string): void {
+    this.configSyncStatus = message;
+    if (this.pageVisible) {
+      try {
+        this.ensurePromptAction()?.showToast({ message });
+      } catch (_) {}
+    }
+  }
+
+  private configSyncFailed(): string {
+    return this.tri('Sync failed. Check Multi-Device Collaboration and try again.',
+      '同步失败，请检查系统多设备协同设置后重试。', '同步失敗，請檢查系統多裝置協作設定後重試。');
+  }
+
+  private async updateConfigSync(enabled: boolean, requested: boolean = false): Promise<void> {
+    if (this.configSyncBusy || !this.disclaimerAccepted) {
+      return;
+    }
+    this.configSyncBusy = true;
+    try {
+      if (requested) {
+        this.configSyncStatus = '';
+        this.configSyncDevices = [];
+      }
+      if (enabled) {
+        if (requested && !(await this.hasPermission(CONFIG_SYNC_PERMISSION))) {
+          await abilityAccessCtrl.createAtManager().requestPermissionsFromUser(this.getHostContext(),
+            [CONFIG_SYNC_PERMISSION]);
+        }
+        enabled = await this.hasPermission(CONFIG_SYNC_PERMISSION);
+        if (!enabled) {
+          this.setConfigSyncStatus(this.tri('Allow distributed data sync first.', '请允许分布式数据同步权限。',
+            '請允許分散式資料同步權限。'));
+        }
+      }
+      if (this.configSyncEnabled !== enabled || (enabled && !this.configSyncDeviceId)) {
+        this.configSyncEnabled = enabled;
+        if (enabled && !this.configSyncDeviceId) {
+          this.configSyncDeviceId = util.generateRandomUUID();
+        }
+        if (!this.savePersistState(true)) {
+          throw new Error('Could not save sync preference');
+        }
+      }
+      if (enabled) {
+        await configSync.enable(this.getHostContext(), this.configSyncDeviceId,
+          () => JSON.stringify(this.buildSyncedConfig()), this.onConfigSyncAvailable);
+      } else {
+        configSync.disable();
+      }
+    } catch (_) {
+      this.configSyncEnabled = false;
+      configSync.disable();
+      this.savePersistState(true);
+      this.setConfigSyncStatus(this.configSyncFailed());
+    } finally {
+      const state = configSync.isEnabled(this.onConfigSyncAvailable) ?
+        AbilityConstant.ContinueState.ACTIVE : AbilityConstant.ContinueState.INACTIVE;
+      try {
+        await this.getHostContext().setMissionContinueState(state);
+      } catch (_) {}
+      this.configSyncBusy = false;
+    }
+  }
+
+  private openConfigSyncDevices(): void {
+    this.configSyncStatus = '';
+    try {
+      this.configSyncDevices = configSync.devices(this.getHostContext());
+      if (this.configSyncDevices.length === 0) {
+        this.setConfigSyncStatus(this.tri('No devices available for sync.', '没有找到可同步的设备。',
+          '找不到可同步的裝置。'));
+      }
+    } catch (_) {
+      this.configSyncDevices = [];
+      this.setConfigSyncStatus(this.configSyncFailed());
+    }
+  }
+
+  private async sendConfigSync(device: ConfigSyncDevice): Promise<void> {
+    if (this.configSyncBusy || !configSync.isEnabled(this.onConfigSyncAvailable)) {
+      return;
+    }
+    this.configSyncBusy = true;
+    this.configSyncDevices = [];
+    const name = device.name || this.tri('Nearby device', '附近设备', '附近裝置');
+    this.configSyncStatus = this.tri(`Preparing settings for ${name}…`, `正在准备发送给 ${name} 的配置…`,
+      `正在準備傳送至 ${name} 的設定…`);
+    try {
+      const result = await configSync.send(this.getHostContext(), device.id, {
+        onSubmitted: () => {
+          this.configSyncStatus = this.tri(`Syncing settings to ${name}…`, `正在向 ${name} 同步配置…`,
+            `正在將設定同步至 ${name}…`);
+        }
+      });
+      if (result.confirmation === ConfigSyncConfirmation.Delivered) {
+        this.setConfigSyncStatus(this.tri('Settings received by the other device.', '对方设备已接收配置。',
+          '對方裝置已接收設定。'));
+      } else if (result.confirmation === ConfigSyncConfirmation.Sent) {
+        this.setConfigSyncStatus(this.tri('Settings sent. Check the other device.', '配置已发送，请在对方设备查看。',
+          '設定已傳送，請在對方裝置查看。'));
+      } else {
+        this.setConfigSyncStatus(this.tri('Delivery unconfirmed. Open the app on the other device to check.',
+          '尚未确认送达，请打开对方设备上的应用查看。', '尚未確認送達，請開啟對方裝置上的應用程式查看。'));
+      }
+    } catch (err) {
+      this.setConfigSyncStatus((err as Error).message === 'Config data too large' ?
+        this.tri('Settings are too large to sync.', '配置文件过大，无法同步。', '設定檔過大，無法同步。') :
+        this.configSyncFailed());
+    } finally {
+      this.configSyncBusy = false;
+    }
+  }
+
+  private canReceiveConfigSync(): boolean {
+    return this.pageVisible && !this.showRuleEditorSheet && !this.busy &&
+      configSync.isEnabled(this.onConfigSyncAvailable);
+  }
+
+  private async receiveConfigSync(): Promise<void> {
+    if (!this.configSyncInboxPending || this.configSyncInboxBusy || !this.canReceiveConfigSync()) {
+      return;
+    }
+    this.configSyncInboxBusy = true;
+    this.configSyncInboxPending = false;
+    try {
+      const deliveries = await configSync.inbox();
+      for (const delivery of deliveries) {
+        if (!this.canReceiveConfigSync()) {
+          this.configSyncInboxPending = true;
+          break;
+        }
+        const config = delivery.payload ? this.parseSyncedConfig(delivery.payload.config) : undefined;
+        const changed = config ? this.applySyncedConfig(config) : false;
+        await configSync.finishDelivery(delivery, config !== undefined);
+        if (config) {
+          this.setConfigSyncStatus(delivery.continuation ?
+            this.tri('App continued. Settings are ready.', '已接续应用，配置已就绪。', '已接續應用程式，設定已就緒。') :
+            changed ? this.tri('Synced settings received.', '已接收同步配置。', '已接收同步設定。') :
+            this.tri('Settings received. No changes needed.', '已接收配置，无需更新。', '已接收設定，無需更新。'));
+        }
+      }
+    } catch (_) {
+      this.setConfigSyncStatus(this.configSyncFailed());
+    } finally {
+      this.configSyncInboxBusy = false;
     }
   }
 
@@ -4221,12 +4531,14 @@ struct Index {
     this.syncDnsProxyRunning();
     this.initDnsDb().catch(() => {
     });
+    void this.updateConfigSync(this.configSyncEnabled);
     void this.tryAutoStartFilterOnLaunch();
     this.touchUiWatch(true);
     this.startRefreshTimer();
   }
 
   aboutToDisappear(): void {
+    configSync.detach(this.onConfigSyncAvailable);
     this.stopRefreshTimer();
     // Avoid an orphaned timer firing on a torn-down component. Leave the last
     // published notification in place (don't cancel) — the proxy keeps filtering.
@@ -4245,6 +4557,7 @@ struct Index {
     this.touchUiWatch(true);
     this.startRefreshTimer();
     this.refreshAll();
+    void this.updateConfigSync(this.configSyncEnabled);
   }
 
   onPageHide(): void {
@@ -4585,6 +4898,10 @@ struct Index {
         return;
       }
       const state: PersistState = JSON.parse(raw) as PersistState;
+      this.configSyncEnabled = state.configSyncEnabled === true;
+      if (typeof state.configSyncDeviceId === 'string' && /^[0-9a-f-]{36}$/.test(state.configSyncDeviceId)) {
+        this.configSyncDeviceId = state.configSyncDeviceId;
+      }
       if (state.language === 'zhHans' || state.language === 'en' || state.language === 'zhHant') {
         this.language = state.language;
       } else {
@@ -4748,9 +5065,11 @@ struct Index {
     }
   }
 
-  private savePersistState(): void {
+  private savePersistState(atomic: boolean = false): boolean {
     this.syncKeepAliveEnabledFlag();
     const state: PersistState = {
+      configSyncEnabled: this.configSyncEnabled,
+      configSyncDeviceId: this.configSyncDeviceId,
       keepAliveEnabled: this.keepAliveEnabled,
       audioKeepAliveEnabled: this.audioKeepAliveEnabled,
       locationKeepAliveEnabled: this.locationKeepAliveEnabled,
@@ -4782,10 +5101,28 @@ struct Index {
       appSplitList: this.appSplitList,
       currentTab: this.currentTab,
     };
-    this.writeTextFile(this.stateFilePath, JSON.stringify(state));
+    const serialized = JSON.stringify(state);
+    const saved = atomic ? this.writeSyncedState(serialized) : this.writeTextFile(this.stateFilePath, serialized);
     // Mirror the notification settings (and current localized labels) into
     // notify.json so the running VPN extension applies any change live.
     this.writeNotifyConfigFile();
+    return saved;
+  }
+
+  private writeSyncedState(serialized: string): boolean {
+    const pending = `${this.stateFilePath}.sync`;
+    try {
+      if (!this.writeTextFile(pending, serialized) ||
+        fileIo.statSync(pending).size !== new util.TextEncoder().encodeInto(serialized).byteLength) {
+        return false;
+      }
+      fileIo.renameSync(pending, this.stateFilePath);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      try { fileIo.unlinkSync(pending); } catch (_) {}
+    }
   }
 
   private async loadAppVersion(): Promise<void> {
@@ -4920,6 +5257,9 @@ struct Index {
     // resolved (guarded internally: runs at most once per launch).
     void this.tryAutoStartFilterOnLaunch();
     this.checkAutoRestart();
+    if (this.configSyncInboxPending) {
+      void this.receiveConfigSync();
+    }
   }
 
   // Watchdog: when the service the user started is reported dead (VPN status
@@ -9051,8 +9391,10 @@ struct Index {
     if (content === this.lastAppSplitFileContent) {
       return false;
     }
+    if (!this.writeTextFile(this.appSplitFilePath, content)) {
+      return false;
+    }
     this.lastAppSplitFileContent = content;
-    this.writeTextFile(this.appSplitFilePath, content);
     return true;
   }
 
@@ -10669,6 +11011,71 @@ struct Index {
   }
 
   @Builder
+  private ConfigSyncSettings() {
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.tri('Cross-device sync', '跨设备同步', '跨裝置同步') })
+      Column({ space: 12 }) {
+        Row({ space: 12 }) {
+          this.SettingsIconText({
+            glyph: '⇄', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+            title: this.tri('Enable cross-device sync', '开启跨设备同步', '開啟跨裝置同步'),
+            desc: this.tri('Enable on both devices using the same HUAWEI ID to continue the app or sync settings.',
+              '同一华为帐号下的两台设备都开启后，可接续应用或手动同步配置。',
+              '同一華為帳號下的兩台裝置都開啟後，可接續應用程式或手動同步設定。')
+          })
+          Toggle({ type: ToggleType.Switch, isOn: this.configSyncEnabled })
+            .enabled(!this.configSyncBusy)
+            .onChange((value: boolean) => {
+              if (value !== this.configSyncEnabled) {
+                void this.updateConfigSync(value, true);
+              }
+            })
+        }
+        .width('100%')
+        if (this.configSyncEnabled) {
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+          Button(this.tri('Sync settings manually', '手动同步配置', '手動同步設定'))
+            .width('100%')
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(this.softPanelTone())
+            .enabled(!this.configSyncBusy)
+            .onClick(() => this.openConfigSyncDevices())
+          if (this.configSyncDevices.length > 0) {
+            Text(this.tri('Choose a device', '选择目标设备', '選擇目標裝置'))
+              .fontSize(13)
+              .fontColor(this.secondaryTextColor())
+            ForEach(this.configSyncDevices, (device: ConfigSyncDevice) => {
+              Button(device.name || this.tri('Nearby device', '附近设备', '附近裝置'))
+                .width('100%')
+                .fontColor(this.primaryTextColor())
+                .backgroundColor(this.softPanelTone())
+                .onClick(() => { void this.sendConfigSync(device); })
+            }, (device: ConfigSyncDevice) => device.id)
+            Button(this.tri('Cancel', '取消', '取消'), { type: ButtonType.Normal })
+              .fontColor(this.secondaryTextColor())
+              .backgroundColor(Color.Transparent)
+              .onClick(() => { this.configSyncDevices = []; })
+          }
+        }
+        if (this.configSyncStatus.length > 0) {
+          Text(this.configSyncStatus)
+            .fontSize(13)
+            .fontColor(this.secondaryTextColor())
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding(16)
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
   private SettingsSubPage() {
     Scroll(this.settingsScroller) {
       Column({ space: 14 }) {
@@ -10981,6 +11388,8 @@ struct Index {
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)
+
+        this.ConfigSyncSettings()
 
         // ===== 🔗 上游 DNS =====
         Column({ space: 8 }) {
