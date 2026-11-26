@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.1.2-orange)
+![Version](https://img.shields.io/badge/Version-v0.1.3-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `home_cloud_shield` is a local DNS filtering app for **HarmonyOS 6.0+**: it intercepts DNS traffic through a **local VPN** or a **pure DNS proxy**, blocks ad and tracking domains with **AdGuard-style rules**, and ships a **dual filtering engine** (lightweight / full AdGuardHome).
 
-Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.1.2** ([Changelog](#changelog))
+Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.1.3** ([Changelog](#changelog))
 
 ## Table of Contents
 
@@ -34,10 +34,10 @@ Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **
 
 - **Dual filtering engine**: lightweight (default, low power) / full (embedded AdGuardHome core), switchable from a dropdown on the home page.
 - **Dual network mode**: VPN mode (device-wide DNS takeover) / pure DNS proxy mode (no VPN slot used, **coexists with another VPN / proxy app**).
-- **Per-app routing** (VPN mode): Bypass (chosen apps skip filtering) / Only (filter just the chosen apps), with a quick pick of common apps; changes apply automatically.
+- **Per-app routing** (VPN mode): Bypass (chosen apps skip filtering) / Only (filter just the chosen apps). Add apps by bundle name. Changes apply automatically.
 - **Works on Wi-Fi too**: Wi-Fi-provided resolvers and common public DNS are captured automatically, with re-adaptation on Wi-Fi ↔ cellular switches (fixed in v0.0.5).
 - **Rule management**: import / edit / toggle / export AdGuard-style DNS rules; plus **whole-config JSON import / export** (compatible with the `adguard.json` of the "AdGuard content blocker" app).
-- **Full-mode-only capabilities**: blocked services (one-tap block of common services), **local management of online subscriptions** (subscribing / importing downloads the list to a local cache and validates it; view content, one-tap refresh, check usability; with a recommended library), DNS rewrites, advanced DNS settings (blocking mode / upstream mode / cache / DNSSEC / rate limit), and the AdGuardHome dashboard.
+- **Full-mode-only capabilities**: **local management of online subscriptions** (add a URL to download and validate the list in a local cache, then view, refresh, or check it), DNS rewrites, advanced DNS settings (blocking mode / upstream mode / cache / DNSSEC / rate limit), and the AdGuardHome dashboard.
 - **Logs and stats**: SQLite-backed persistent DNS query log; "allowed / blocked" counters accumulate across restarts; tapping a card jumps straight to the matching filtered list; plus domain rankings, debug logs, and a **persistent status-bar notification** (live Blocked / Allowed / Total counts, off by default to save battery).
 - **More**: custom upstream DNS (IP presets AliDNS / DNSPod / Baidu / AdGuard, plus DoH / DoT and other encrypted upstreams on the full engine), **automatic upstream that follows the system / router** (VPN mode), background keep-alive (audio / location / data transfer), an immersive blurred title bar, light/dark theme, and instant in-app switching between Simplified Chinese / English / Traditional Chinese.
 
@@ -76,12 +76,12 @@ Auto-Installer is a free, cross-platform HarmonyOS app deployment and debugging 
 
 ## Changelog
 
-Version **v0.1.2** (2026-11-22) adds **full VPN for selected apps and a DNS allowlist** and expands cross-device sync and configuration backups.
+Version **v0.1.3** (2026-11-26) updates the Config and Me pages.
 
-- Manage full VPN and IPv6 blocking under **Me → Settings → VPN**. In selected-app mode, set a DNS allowlist and IP blocking rules for the selected apps and review connections in the debug log.
-- App continuation, manual sync, and configuration import and export carry per-app rules, full VPN, and IPv6 settings.
+- The Config page adapts its column count to the available width. You can give imported subscriptions a custom name.
+- Use the language dropdown on Me and preview color themes under Appearance.
 
-Full bilingual changelogs: [v0.1.2](./docs/CHANGELOG-0.1.2.md) | [v0.1.1](./docs/CHANGELOG-0.1.1.md) | [v0.1.0](./docs/CHANGELOG-0.1.0.md) | [v0.0.9](./docs/CHANGELOG-0.0.9.md) | [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
+Full bilingual changelogs: [v0.1.3](./docs/CHANGELOG-0.1.3.md) | [v0.1.2](./docs/CHANGELOG-0.1.2.md) | [v0.1.1](./docs/CHANGELOG-0.1.1.md) | [v0.1.0](./docs/CHANGELOG-0.1.0.md) | [v0.0.9](./docs/CHANGELOG-0.0.9.md) | [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
 
 ## Engines and Network Modes
 
@@ -90,7 +90,7 @@ The home page offers two independent switches: the **filtering engine** (dropdow
 ### Filtering engine
 
 - **Lightweight mode (default)**: an in-house DNS filtering implementation (`entry/src/main/cpp/vpnclient_bridge.cpp`), prioritizing low power usage and fast response for always-on mobile operation.
-- **Full mode (AdGuardHome)**: the ported AdGuardHome filtering core from `native/adguardhome-ohos-lib/`, with broader rule compatibility, unlocking blocked services, online subscriptions, DNS rewrites, advanced settings, and the dashboard; more resource-intensive, enable on demand.
+- **Full mode (AdGuardHome)**: the ported AdGuardHome filtering core from `native/adguardhome-ohos-lib/` supports more rule types, online subscriptions, DNS rewrites, advanced settings, and the dashboard. It uses more resources.
 
 ### Network mode
 
@@ -158,8 +158,8 @@ Not a good fit for:
 
 ## Disclaimer
 
-- This app is an on-device **DNS filtering tool**. The built-in "blocked services" list is derived from the `AdGuardHome` open-source project (`servicelist.go`); online subscriptions and recommended lists are **third-party open-source lists** provided "as is", and may over- or under-block.
-- Whether to enable filtering, which services to block, and which lists to subscribe to are **entirely your own decisions and responsibility**. Use it only on **devices/networks you are authorized to manage**, and never for any unlawful purpose.
+- This app is an on-device **DNS filtering tool**. Online rule subscriptions are provided by third parties and may over- or under-block.
+- You decide whether to enable filtering, which rules to use, and which lists to subscribe to. Use the app only on **devices and networks you are authorized to manage** and for lawful purposes.
 - The authors provide no warranty and are not liable for any service disruption, data loss, or other damage arising from use of this app.
 - This app is open source under `GPL-3.0-only`. **On first launch you must read and accept this disclaimer before using the app**; declining exits the app. You can re-read it anytime via "Me → About → Disclaimer".
 

@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.1.2-orange)
+![Version](https://img.shields.io/badge/Version-v0.1.3-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `栖云盾` 是一个面向 **HarmonyOS 6.0+** 的本地 DNS 过滤应用：通过**本地 VPN** 或**纯 DNS 代理**接管 DNS 流量，按 **AdGuard 风格规则**拦截广告与跟踪域名，内置**轻量级 / 完整（AdGuardHome）双过滤引擎**。
 
-项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.1.2**（[更新日志](#更新日志)）
+项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.1.3**（[更新日志](#更新日志)）
 
 ## 目录
 
@@ -34,10 +34,10 @@
 
 - **双过滤引擎**：轻量级（默认，低功耗）/ 完整（AdGuardHome 内核），首页下拉一键切换。
 - **双网络模式**：VPN 模式（接管全设备 DNS）/ 纯 DNS 代理模式（不占用 VPN，**可与其他 VPN / 代理 App 共存**）。
-- **分应用代理**（VPN 模式）：白名单（指定 App 不过滤）/ 仅代理（只过滤指定 App），内置常见应用快捷选择，修改后自动生效。
+- **分应用代理**（VPN 模式）：白名单（指定 App 不过滤）/ 仅代理（只过滤指定 App），通过包名添加应用，修改后自动生效。
 - **Wi-Fi 下同样有效**：自动捕获 Wi-Fi 下发的解析器与常见公共 DNS，Wi-Fi ↔ 蜂窝切换时自动适配（v0.0.5 修复）。
 - **规则管理**：导入 / 编辑 / 启停 / 导出 AdGuard 风格 DNS 规则；还支持**整体配置的 JSON 导入 / 导出**（兼容「AdGuard 内容拦截」App 的 `adguard.json`）。
-- **完整模式专属**：服务屏蔽（一键屏蔽常见服务）、**在线规则订阅本地化管理**（订阅 / 导入即下载到本地缓存并校验，可查看内容、一键刷新、检测可用性，含推荐规则库）、DNS 重写、DNS 高级设置（拦截方式 / 上游模式 / 缓存 / DNSSEC / 限速）、AdGuardHome 管理面板。
+- **完整模式专属**：**在线规则订阅本地化管理**（导入网址后下载到本地缓存并校验，可查看内容、一键刷新和检测可用性）、DNS 重写、DNS 高级设置（拦截方式 / 上游模式 / 缓存 / DNSSEC / 限速）、AdGuardHome 管理面板。
 - **日志与统计**：DNS 查询日志基于 SQLite 持久存储，「已放行 / 已拦截」跨重启累计，卡片点击直达对应筛选列表，另有域名排行、调试日志，以及**常驻通知栏**（实时显示已拦截 / 已放行 / 总解析，默认关闭以省电）。
 - **其他**：自定义上游 DNS（IP 预设 AliDNS / DNSPod / Baidu / AdGuard，完整引擎还支持 DoH / DoT 等加密上游）、**自动跟随系统 / 路由器上游**（VPN 模式）、后台保活（音频 / 定位 / 数据传输）、沉浸式模糊标题栏、深浅色主题、简中 / English / 繁中三语即时切换。
 
@@ -76,12 +76,12 @@
 
 ## 更新日志
 
-当前版本 **v0.1.2**（2026-11-22）新增**分应用全量 VPN 和 DNS 白名单**，扩展了跨设备同步与配置备份。
+当前版本 **v0.1.3**（2026-11-26）更新了配置页和「我的」页面。
 
-- 在 **我的 → 设置 → VPN** 管理全量 VPN 和 IPv6 屏蔽。在「仅代理」模式下，可以为勾选的应用配置 DNS 白名单和 IP 拦截规则，并在调试日志中查看连接记录。
-- 应用接续、手动同步和配置导入导出均可传递分应用规则、全量 VPN 与 IPv6 设置。
+- 规则配置按可用宽度自动切换列数，导入订阅时可填写备注。
+- 在「我的」可通过下拉菜单切换语言，在「外观」可预览并选择主题配色。
 
-完整变更（中英双语）：[v0.1.2](./docs/CHANGELOG-0.1.2.md) ｜ [v0.1.1](./docs/CHANGELOG-0.1.1.md) ｜ [v0.1.0](./docs/CHANGELOG-0.1.0.md) ｜ [v0.0.9](./docs/CHANGELOG-0.0.9.md) ｜ [v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
+完整变更（中英双语）：[v0.1.3](./docs/CHANGELOG-0.1.3.md) ｜ [v0.1.2](./docs/CHANGELOG-0.1.2.md) ｜ [v0.1.1](./docs/CHANGELOG-0.1.1.md) ｜ [v0.1.0](./docs/CHANGELOG-0.1.0.md) ｜ [v0.0.9](./docs/CHANGELOG-0.0.9.md) ｜ [v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
 
 ## 引擎与网络模式
 
@@ -90,7 +90,7 @@
 ### 过滤引擎
 
 - **轻量级模式（默认）**：自研 DNS 过滤实现（`entry/src/main/cpp/vpnclient_bridge.cpp`），优先保证常驻运行的功耗与响应速度。
-- **完整模式（AdGuardHome）**：接入 `native/adguardhome-ohos-lib/` 移植的 AdGuardHome 过滤内核，规则兼容性更完整，并解锁服务屏蔽、在线订阅、DNS 重写、高级设置与管理面板；相对更耗资源，按需开启。
+- **完整模式（AdGuardHome）**：接入 `native/adguardhome-ohos-lib/` 移植的 AdGuardHome 过滤内核，支持更多规则类型，以及在线订阅、DNS 重写、高级设置与管理面板。完整模式使用更多资源。
 
 ### 网络模式
 
@@ -158,8 +158,8 @@
 
 ## 免责声明
 
-- 本应用是运行在本机的 **DNS 过滤工具**。内置「服务屏蔽」清单来自 `AdGuardHome` 开源项目（`servicelist.go`）；在线订阅与推荐规则库均为**第三方开源列表**，按「现状」提供，可能存在误拦截或漏拦截。
-- 是否启用过滤、屏蔽哪些服务、订阅哪些列表，**均由你自行决定并承担相应后果**。请仅在你**有权管理的设备 / 网络**上使用，请勿用于任何非法用途。
+- 本应用是运行在本机的 **DNS 过滤工具**。在线订阅的规则由第三方提供，可能存在误拦截或漏拦截。
+- 是否启用过滤、使用哪些规则、订阅哪些列表，**均由你自行决定并承担相应后果**。请仅在你**有权管理的设备 / 网络**上使用，请勿用于任何非法用途。
 - 作者不提供任何担保，且不对因使用本应用造成的服务不可用、数据丢失或其他损失承担责任。
 - 本应用基于 `GPL-3.0-only` 开源。**首次启动需阅读并同意本免责声明后方可使用**；如不同意将退出应用。应用内「我的 → 关于 → 免责声明」可随时再次查看。
 

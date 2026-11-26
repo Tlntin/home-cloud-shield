@@ -12,11 +12,10 @@ import {
   hdsMaterial, HdsNavDestination, HdsNavDestinationTitleMode, HdsNavigation, HdsNavigationMenuItemOptions,
   HdsNavigationTitleBarOptions, HdsNavigationTitleMode, HdsTabs
 } from '@kit.UIDesignKit';
-import { SymbolGlyphModifier, window } from '@kit.ArkUI';
+import { LengthMetrics, SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { geoLocationManager } from '@kit.LocationKit';
 import { webview } from '@kit.ArkWeb';
 import { util } from '@kit.ArkTS';
-import { BLOCKED_SERVICES, BlockedServiceDef } from '../data/BlockedServices';
 import { dnsLogDb, DnsLogRow, DnsLogSummary } from '../data/DnsLogDb';
 import { dnsStats } from '../data/DnsStats';
 import {
@@ -26,10 +25,12 @@ import {
 import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/ConfigSync';
 import { aghSubscriptionId, seedAghSubscriptionCache, subscriptionCacheName } from '../data/SubscriptionCache';
 import { blurTitleBar } from '../components/BlurTitleBar';
+import { DEFAULT_SHIELD_PALETTE, paletteAlpha, SHIELD_PALETTES, ShieldColors, ShieldPalette,
+  shieldPalette } from '../theme/ShieldPalette';
 import {
-  APP_SPLIT_MAX_BUNDLES, APP_SPLIT_PRESETS, APP_TUNNEL_LOG_FILE, APP_TUNNEL_RULES_MAX_LENGTH,
-  AppSplitEntry, AppSplitFile, AppSplitMode, AppSplitPreset,
-  findAppSplitPreset, isValidBundleName, normalizeAppSplitList, normalizeAppSplitMode, parseAppSplitDnsAllowlist
+  APP_SPLIT_MAX_BUNDLES, APP_TUNNEL_LOG_FILE, APP_TUNNEL_RULES_MAX_LENGTH,
+  AppSplitEntry, AppSplitFile, AppSplitMode, isValidBundleName,
+  normalizeAppSplitList, normalizeAppSplitMode, parseAppSplitDnsAllowlist
 } from '../data/AppSplit';
 import type { PromptAction } from '@ohos.arkui.UIContext';
 import abilityAccessCtrl, { Permissions } from '@ohos.abilityAccessCtrl';
@@ -129,7 +130,15 @@ const NOTIFICATION_REFRESH_MAX_SECONDS = 5;
 // progress isn't updated for 10 minutes; once a minute leaves ample margin.
 const DATA_TRANSFER_PROGRESS_INTERVAL_MS = 60000;
 // Sub page names on the "Me" tab's navigation stack.
-const ME_PAGE_SETTINGS = 'settings';
+const ME_PAGE_PROTECTION = 'protection';
+const ME_PAGE_PREFERENCES = 'preferences';
+const ME_PAGE_BACKGROUND = 'background';
+const ME_PAGE_DIAGNOSTICS = 'diagnostics';
+const ME_PAGE_SYNC = 'sync';
+const ME_PAGE_ABOUT = 'about';
+const ME_PAGE_NETWORK = 'network';
+const ME_PAGE_DNS = 'dns';
+const ME_PAGE_WEB = 'web';
 const ME_PAGE_APP_SPLIT = 'appSplit';
 // Mirror of the extension's idle heartbeat. While the extension may still be
 // idling (right after this page becomes visible, before it notices ui_watch),
@@ -220,7 +229,7 @@ type LanguageKey =
   | 'configImportInvalid' | 'configImportedSummary' | 'configImportSkipped'
   | 'upstreamAutoTitle' | 'upstreamAutoHint' | 'upstreamAutoCurrent' | 'upstreamAutoWaiting'
   | 'importRuleInvalid'
-  | 'quickImport' | 'dataTransferKeepAlive' | 'dataTransferKeepAliveHint' | 'dataTransferMode' | 'dataTransferNotifyTitle' | 'keepAliveCancelledBySystem' | 'appSplitTitle' | 'appSplitEntryHint' | 'appSplitDesc' | 'appSplitProxyModeNote' | 'appSplitModeOff' | 'appSplitModeBypass' | 'appSplitModeOnly' | 'appSplitModeOffHint' | 'appSplitModeBypassHint' | 'appSplitModeOnlyHint' | 'appSplitCount' | 'appSplitListTitle' | 'appSplitEmpty' | 'appSplitApplying' | 'appSplitAddTitle' | 'appSplitQuickPick' | 'appSplitQuickPickHint' | 'appSplitBundlePlaceholder' | 'appSplitNameLabel' | 'appSplitNamePlaceholder' | 'appSplitAdd' | 'appSplitInvalidBundle' | 'appSplitSelfBundle' | 'appSplitDuplicate' | 'appSplitLimitReached'
+  | 'quickImport' | 'dataTransferKeepAlive' | 'dataTransferKeepAliveHint' | 'dataTransferMode' | 'dataTransferNotifyTitle' | 'keepAliveCancelledBySystem' | 'appSplitTitle' | 'appSplitEntryHint' | 'appSplitDesc' | 'appSplitProxyModeNote' | 'appSplitModeOff' | 'appSplitModeBypass' | 'appSplitModeOnly' | 'appSplitModeOffHint' | 'appSplitModeBypassHint' | 'appSplitModeOnlyHint' | 'appSplitCount' | 'appSplitListTitle' | 'appSplitEmpty' | 'appSplitApplying' | 'appSplitAddTitle' | 'appSplitBundleLabel' | 'appSplitBundlePlaceholder' | 'appSplitNameLabel' | 'appSplitNamePlaceholder' | 'appSplitAdd' | 'appSplitInvalidBundle' | 'appSplitSelfBundle' | 'appSplitDuplicate' | 'appSplitLimitReached'
   | 'configImportedAppSplit';
 
 function resolveStringResource(key: LanguageKey): number {
@@ -530,8 +539,7 @@ function resolveStringResource(key: LanguageKey): number {
     case 'appSplitEmpty': return $r('app.string.appSplitEmpty').id;
     case 'appSplitApplying': return $r('app.string.appSplitApplying').id;
     case 'appSplitAddTitle': return $r('app.string.appSplitAddTitle').id;
-    case 'appSplitQuickPick': return $r('app.string.appSplitQuickPick').id;
-    case 'appSplitQuickPickHint': return $r('app.string.appSplitQuickPickHint').id;
+    case 'appSplitBundleLabel': return $r('app.string.appSplitBundleLabel').id;
     case 'appSplitBundlePlaceholder': return $r('app.string.appSplitBundlePlaceholder').id;
     case 'appSplitNameLabel': return $r('app.string.appSplitNameLabel').id;
     case 'appSplitNamePlaceholder': return $r('app.string.appSplitNamePlaceholder').id;
@@ -726,12 +734,6 @@ interface AdvancedDnsConfig {
   ratelimit: number;      // 0 = unlimited
 }
 
-// A built-in preset offered as a one-tap online subscription.
-interface SubscriptionPreset {
-  name: string;
-  url: string;
-}
-
 // Passed by reference to settings @Builder helpers so they re-render when the
 // in-app language changes (ArkUI memoizes value-type @Builder params, so the
 // translated strings must arrive inside a fresh object each render).
@@ -740,23 +742,32 @@ interface SettingsGroupTitleParam {
 }
 
 interface SettingsRowTextParam {
-  glyph: string;
-  iconBg: string;
-  iconFg: string;
+  glyph: ResourceStr;
+  iconBg?: string;
+  iconFg?: string;
   title: string;
   desc: string;
+  dimmed?: boolean;
 }
+
+interface MeLinkParam {
+  name: string;
+  icon: Resource;
+  description: string;
+  tile?: boolean;
+}
+
+const CONFIG_GRID: GridRowOptions = {
+  columns: { xs: 1, sm: 2, md: 3 },
+  gutter: 10,
+  breakpoints: { value: ['520vp', '870vp'], reference: BreakpointsReference.ComponentSize }
+};
 
 interface ThemeSegButtonParam {
   label: string;
   mode: number;
 }
 
-interface OverviewStatParam {
-  label: string;
-  value: string;
-  valueColor: string;
-}
 
 function defaultAdvancedDnsConfig(): AdvancedDnsConfig {
   return {
@@ -773,22 +784,9 @@ function defaultAdvancedDnsConfig(): AdvancedDnsConfig {
   };
 }
 
-// Mainstream, public DNS filter lists. The first three are sensible defaults
-// (the same ones AdGuardHome ships, plus anti-AD for China); the rest are
-// widely-used community blocklists shown under "show more". All are open and
-// free to subscribe to; users can also add their own custom URLs.
-const SUBSCRIPTION_PRESETS: SubscriptionPreset[] = [
-  { name: 'AdGuard DNS filter', url: 'https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt' },
-  { name: 'AdAway Default Blocklist', url: 'https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt' },
-  { name: 'anti-AD（国内广告）', url: 'https://anti-ad.net/easylist.txt' },
-  { name: 'OISD Blocklist (Big)', url: 'https://big.oisd.nl' },
-  { name: 'HaGeZi Multi PRO', url: 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt' },
-  { name: "Peter Lowe's Ad/Tracking", url: 'https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext' },
-  { name: 'StevenBlack Unified Hosts', url: 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts' },
-  { name: '1Hosts (Lite)', url: 'https://o0.pages.dev/Lite/adblock.txt' },
-];
-
 interface PersistState {
+  // Read only to remove generated service rules from older installations.
+  blockedServiceIds?: string[];
   configSyncEnabled?: boolean;
   configSyncDeviceId?: string;
   keepAliveEnabled?: boolean;
@@ -800,6 +798,7 @@ interface PersistState {
   notificationRefreshSeconds?: number;
   language?: LangCode;
   themeMode?: number;
+  paletteId?: string;
   ruleProfiles?: RuleProfile[];
   dnsCacheTtlSeconds?: number;
   blockAaaa?: boolean;
@@ -816,7 +815,6 @@ interface PersistState {
   dnsProxyPort?: string;
   aghHttpPort?: string;
   aghWebEnabled?: boolean;
-  blockedServiceIds?: string[];
   filterSubscriptions?: FilterSubscription[];
   dnsRewrites?: DnsRewriteRule[];
   advancedDns?: AdvancedDnsConfig;
@@ -894,7 +892,6 @@ interface ConfigAppSettings {
   dnsProxyPort?: string;
   aghHttpPort?: string;
   aghWebEnabled?: boolean;
-  blockedServiceIds?: string[];
   advancedDns?: AdvancedDnsConfig;
   dnsCacheTtlSeconds?: number;
   logRetentionDays?: number;
@@ -1003,6 +1000,7 @@ struct Index {
   @State rulesDirty: boolean = false;
   @State language: LangCode = 'zhHans';
   @State themeMode: number = ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET;
+  @State paletteId: string = DEFAULT_SHIELD_PALETTE;
   @State keepAliveEnabled: boolean = false;
   @State audioKeepAliveEnabled: boolean = true;
   @State locationKeepAliveEnabled: boolean = false;
@@ -1109,16 +1107,11 @@ struct Index {
   // values when those were busy and auto-incremented). 0 = use the configured.
   @State dnsProxyActivePort: number = 0;
   @State aghActiveHttpPort: number = 0;
-  @State blockedServiceIds: string[] = [];
-  @State showServicesSheet: boolean = false;
-  @State servicesSearchText: string = '';
-  @State detailServiceId: string = '';
   @State showAghWebSheet: boolean = false;
   // Full-mode AdGuardHome extras: online subscriptions, DNS rewrites, advanced DNS.
   @State filterSubscriptions: FilterSubscription[] = [];
   @State dnsRewrites: DnsRewriteRule[] = [];
   @State advancedDns: AdvancedDnsConfig = defaultAdvancedDnsConfig();
-  @State showSubscriptionsSheet: boolean = false;
   @State subAddNameInput: string = '';
   @State subAddUrlInput: string = '';
   @State subFeedbackText: string = '';
@@ -1140,7 +1133,7 @@ struct Index {
   @State ratelimitInput: string = '0';
   private aghWebController: webview.WebviewController = new webview.WebviewController();
   @State showImportMenu: boolean = false;
-  @State showRecommendedLibrary: boolean = false;
+  @State configOnlineTab: boolean = false;
   @State showAllMySubscriptions: boolean = false;
   @State showDisclaimerSheet: boolean = false;
   @State showFirstRunDisclaimer: boolean = false;
@@ -1149,6 +1142,8 @@ struct Index {
   @State appVersionCode: number = 0;
   @State avoidPaddingTop: number = 0;
   @State avoidPaddingBottom: number = 0;
+  @State windowWidthVp: number = 0;
+  @State windowHeightVp: number = 0;
 
   private refreshTimer: number = -1;
   // DNS query-log RDB ingestion state. The native layer keeps appending jsonl;
@@ -1186,6 +1181,8 @@ struct Index {
   // When the last start request was issued (manual, auto-start, or watchdog);
   // drives the START_SETTLE_GRACE_MS hold-off.
   private lastStartRequestAt: number = 0;
+  @State private vpnStartTimedOut: boolean = false;
+  private pendingVpnStart: Promise<void> | undefined;
   private fullEngineRestartPending: boolean = false;
   // True while the auto-start permission probe briefly starts/stops the VPN, so
   // the watchdog does not adopt that transient run and restart it afterwards.
@@ -1230,7 +1227,7 @@ struct Index {
   private homeScroller: Scroller = new Scroller();
   private configScroller: Scroller = new Scroller();
   private meScroller: Scroller = new Scroller();
-  private settingsScroller: Scroller = new Scroller();
+  private meSectionScrollers: Map<string, Scroller> = new Map<string, Scroller>();
   @State private configSyncEnabled: boolean = false;
   @State private configSyncBusy: boolean = false;
   @State private configSyncStatus: string = '';
@@ -1428,55 +1425,7 @@ struct Index {
         chunks.push(normalized);
       }
     });
-    const serviceRules: string = this.blockedServiceRulesText();
-    if (serviceRules.length > 0) {
-      chunks.push(serviceRules);
-    }
     return chunks.join('\n\n');
-  }
-
-  // Rules contributed by the user-selected "blocked services". Appended to the
-  // merged rules so they work in both engines (lightweight reads filters.txt;
-  // full mode maps filters.txt to AdGuardHome user_rules).
-  private blockedServiceRulesText(): string {
-    if (this.blockedServiceIds.length === 0) {
-      return '';
-    }
-    const out: string[] = [];
-    BLOCKED_SERVICES.forEach((svc: BlockedServiceDef) => {
-      if (this.blockedServiceIds.includes(svc.id)) {
-        out.push(`! service: ${svc.name}`);
-        svc.rules.forEach((r: string) => out.push(r));
-      }
-    });
-    return out.join('\n');
-  }
-
-  private toggleBlockedService(id: string, enabled: boolean): void {
-    if (enabled) {
-      if (!this.blockedServiceIds.includes(id)) {
-        this.blockedServiceIds = this.blockedServiceIds.concat([id]);
-      }
-    } else {
-      this.blockedServiceIds = this.blockedServiceIds.filter((x: string) => x !== id);
-    }
-    // Persist + write the merged rules file; the VPN extension hot-reloads it in
-    // lightweight mode, and full mode picks it up on the next filter restart.
-    this.saveRules();
-  }
-
-  private filteredBlockedServices(): BlockedServiceDef[] {
-    const kw: string = this.servicesSearchText.trim().toLowerCase();
-    if (kw.length === 0) {
-      return BLOCKED_SERVICES;
-    }
-    return BLOCKED_SERVICES.filter((svc: BlockedServiceDef) => {
-      return svc.name.toLowerCase().includes(kw) || svc.id.toLowerCase().includes(kw);
-    });
-  }
-
-  private serviceById(id: string): BlockedServiceDef | undefined {
-    return BLOCKED_SERVICES.find((svc: BlockedServiceDef) => svc.id === id);
   }
 
   // Trilingual inline label helper (en / zhHans / zhHant).
@@ -1610,35 +1559,6 @@ struct Index {
     this.applyFullModeConfigChange();
     // Download + validate the list now; a failure force-disables it.
     void this.downloadAndCacheSubscription(u, true);
-  }
-
-  private addSubscriptionPreset(preset: SubscriptionPreset): void {
-    this.addFilterSubscription(preset.name, preset.url);
-  }
-
-  // Unsubscribe (remove) the subscription matching a URL — backs both the
-  // recommended-library "Subscribed" toggle and the My-subscriptions list.
-  private removeSubscriptionByUrl(url: string): void {
-    const before: number = this.filterSubscriptions.length;
-    this.filterSubscriptions = this.filterSubscriptions.filter((s: FilterSubscription) => s.url !== url);
-    if (this.filterSubscriptions.length !== before) {
-      this.subFeedbackText = this.tri('Unsubscribed', '已取消订阅', '已取消訂閱');
-      this.applyFullModeConfigChange();
-    }
-  }
-
-  // Recommended-library button: subscribe if not yet subscribed, else unsubscribe.
-  private toggleSubscriptionPreset(preset: SubscriptionPreset): void {
-    if (this.subscriptionPresetActive(preset.url)) {
-      this.removeSubscriptionByUrl(preset.url);
-    } else {
-      this.addSubscriptionPreset(preset);
-    }
-  }
-
-  // View a recommended preset's content via the shared subscription viewer.
-  private viewPresetContent(preset: SubscriptionPreset): void {
-    this.viewSubscriptionContent({ id: 0, name: preset.name, url: preset.url, enabled: true });
   }
 
   // The subscriptions shown in the config-tab "My subscriptions" list — collapsed
@@ -1829,17 +1749,6 @@ struct Index {
       return this.accentGreenTone();
     }
     return this.mutedTextColor();
-  }
-
-  // Status of the subscription matching a URL (for recommended-preset rows).
-  private subStatusTextByUrl(url: string): string {
-    const s: FilterSubscription | undefined = this.filterSubscriptions.find((x: FilterSubscription) => x.url === url);
-    return s !== undefined ? this.subStatusText(s) : '';
-  }
-
-  private subStatusColorByUrl(url: string): string {
-    const s: FilterSubscription | undefined = this.filterSubscriptions.find((x: FilterSubscription) => x.url === url);
-    return s !== undefined ? this.subStatusColor(s) : this.mutedTextColor();
   }
 
   // Re-download + re-validate every subscription, updating each list's cache and
@@ -2194,7 +2103,6 @@ struct Index {
       dnsProxyPort: this.dnsProxyPort,
       aghHttpPort: this.aghHttpPort,
       aghWebEnabled: this.aghWebEnabled,
-      blockedServiceIds: this.blockedServiceIds,
       advancedDns: this.cloneAdvancedDns(),
       dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
       logRetentionDays: this.logRetentionDays,
@@ -2460,18 +2368,6 @@ struct Index {
     if (typeof app.aghWebEnabled === 'boolean') {
       this.aghWebEnabled = app.aghWebEnabled;
     }
-    if (Array.isArray(app.blockedServiceIds)) {
-      const ids: string[] = this.blockedServiceIds.slice();
-      app.blockedServiceIds.forEach((x: string) => {
-        if (typeof x === 'string' && x.length > 0 && !ids.includes(x)) {
-          ids.push(x);
-        }
-      });
-      this.blockedServiceIds = ids;
-    }
-    if (app.advancedDns !== undefined && app.advancedDns !== null) {
-      this.advancedDns = this.normalizeAdvancedDns(app.advancedDns);
-    }
     if (typeof app.dnsCacheTtlSeconds === 'number' && Number.isFinite(app.dnsCacheTtlSeconds)
       && app.dnsCacheTtlSeconds >= 0) {
       this.dnsCacheTtlSeconds = Math.floor(app.dnsCacheTtlSeconds);
@@ -2598,7 +2494,6 @@ struct Index {
       blockIpv6Connections: app.blockIpv6Connections,
       upstreamDns: app.upstreamDns,
       upstreamAuto: app.upstreamAuto,
-      blockedServiceIds: app.blockedServiceIds,
       advancedDns: app.advancedDns,
       dnsCacheTtlSeconds: app.dnsCacheTtlSeconds,
       ruleProfiles: app.ruleProfiles,
@@ -2665,7 +2560,6 @@ struct Index {
     const subscriptions = this.filterSubscriptions;
     const rewrites = this.dnsRewrites;
     const rules = this.ruleProfiles;
-    const services = this.blockedServiceIds;
     const advancedDns = this.advancedDns;
     const upstreamDns = this.upstreamDnsInput;
     const upstreamAuto = this.upstreamAutoEnabled;
@@ -2714,7 +2608,6 @@ struct Index {
       this.filterSubscriptions = subscriptions;
       this.dnsRewrites = rewrites;
       this.ruleProfiles = rules;
-      this.blockedServiceIds = services;
       this.advancedDns = advancedDns;
       this.upstreamDnsInput = upstreamDns;
       this.upstreamAutoEnabled = upstreamAuto;
@@ -3113,15 +3006,14 @@ struct Index {
     }
   }
 
-  private ruleProfileMetaText(profile: RuleProfile): string {
+  private ruleProfileCountText(profile: RuleProfile): string {
     let lineCount: number = this.ruleProfileLineCount(profile);
     if (profile.id === CUSTOM_BLOCK_RULE_PROFILE_ID) {
       lineCount = this.customBlockRuleCountBadge;
     } else if (profile.id === CUSTOM_ALLOW_RULE_PROFILE_ID) {
       lineCount = this.customAllowRuleCountBadge;
     }
-    const lockedText: string = profile.builtIn ? ` · ${this.t('builtInRuleProfileLocked')}` : '';
-    return `${lineCount} ${this.t('lines')} · ${profile.enabled ? this.t('enabled') : this.t('disabled')}${lockedText}`;
+    return `${lineCount} ${this.t('lines')}`;
   }
 
   private ruleProfileRenderKey(profile: RuleProfile): string {
@@ -3672,8 +3564,8 @@ struct Index {
 
   private engineModeLabel(): string {
     return this.fullModeEnabled
-      ? this.tri('🔒 Full', '🔒 完整', '🔒 完整')
-      : this.tri('⚡ Lite', '⚡ 轻量', '⚡ 輕量');
+      ? this.tri('Full engine', '完整引擎', '完整引擎')
+      : this.tri('Lite engine', '轻量引擎', '輕量引擎');
   }
 
   // Whether the currently selected network mode is running. VPN mode tracks the
@@ -3807,11 +3699,6 @@ struct Index {
       this.aghHttpPortFeedback = '';
     }
     this.savePersistState();
-  }
-
-  // Whether a recommended preset list is already present in the subscriptions.
-  private subscriptionPresetActive(url: string): boolean {
-    return this.filterSubscriptions.some((s: FilterSubscription) => s.url === url);
   }
 
   // Shown when a user taps a full-engine-only settings row while the lightweight
@@ -4535,6 +4422,9 @@ struct Index {
     }
     try {
       const uiContext = this.getUIContext();
+      const rect = this.mainWindow.getWindowProperties().windowRect;
+      this.windowWidthVp = uiContext.px2vp(rect.width);
+      this.windowHeightVp = uiContext.px2vp(rect.height);
       let topInsetVp = 0;
       let bottomInsetVp = 0;
       try {
@@ -4613,6 +4503,19 @@ struct Index {
   private setTheme(mode: number): void {
     this.applyTheme(mode);
     this.savePersistState();
+  }
+
+  private setPalette(id: string): void {
+    const next = shieldPalette(id).id;
+    if (this.paletteId !== next) {
+      this.paletteId = next;
+      this.savePersistState();
+    }
+  }
+
+  private paletteColors(): ShieldColors {
+    const palette = shieldPalette(this.paletteId);
+    return this.isDarkModeActive() ? palette.dark : palette.light;
   }
 
   private isDarkModeActive(): boolean {
@@ -5050,6 +4953,7 @@ struct Index {
       if (typeof state.themeMode === 'number') {
         this.themeMode = state.themeMode;
       }
+      this.paletteId = shieldPalette(typeof state.paletteId === 'string' ? state.paletteId : DEFAULT_SHIELD_PALETTE).id;
       if (typeof state.audioKeepAliveEnabled === 'boolean') {
         this.audioKeepAliveEnabled = state.audioKeepAliveEnabled;
       } else if (typeof state.keepAliveEnabled === 'boolean') {
@@ -5141,15 +5045,6 @@ struct Index {
       if (typeof state.aghWebEnabled === 'boolean') {
         this.aghWebEnabled = state.aghWebEnabled;
       }
-      if (Array.isArray(state.blockedServiceIds)) {
-        const ids: string[] = [];
-        state.blockedServiceIds.forEach((x: string) => {
-          if (typeof x === 'string' && x.length > 0 && !ids.includes(x)) {
-            ids.push(x);
-          }
-        });
-        this.blockedServiceIds = ids;
-      }
       if (Array.isArray(state.filterSubscriptions)) {
         const subs: FilterSubscription[] = [];
         state.filterSubscriptions.forEach((s: FilterSubscription, index: number) => {
@@ -5215,7 +5110,21 @@ struct Index {
       if (this.keepAliveEnabled) {
         this.keepAliveStatusText = this.keepAliveModeSummary(false);
       }
-      if (migrateLogDefaults) {
+      const migrateServiceRules = Array.isArray(state.blockedServiceIds) && state.blockedServiceIds.length > 0;
+      if (migrateServiceRules) {
+        const currentRules = this.normalizeRuleContent(this.readTextFile(this.rulesFilePath));
+        const suffixStart = currentRules.lastIndexOf('\n\n! service: ');
+        const legacyStart = suffixStart >= 0 ? suffixStart : (currentRules.startsWith('! service: ') ? 0 : -1);
+        if (legacyStart >= 0) {
+          const userRules = this.ruleProfiles.length > 0
+            ? this.buildMergedRulesText() : currentRules.slice(0, legacyStart);
+          if (!this.writeAtomicTextFile(this.rulesFilePath, userRules)) {
+            this.errorText = this.t('saveRulesFailed');
+            return;
+          }
+        }
+      }
+      if (migrateLogDefaults || migrateServiceRules) {
         this.savePersistState(true);
       }
     } catch (_) {
@@ -5236,6 +5145,7 @@ struct Index {
       notificationRefreshSeconds: this.notificationRefreshSeconds,
       language: this.language,
       themeMode: this.themeMode,
+      paletteId: this.paletteId,
       ruleProfiles: this.ruleProfiles,
       dnsCacheTtlSeconds: this.dnsCacheTtlSeconds,
       blockAaaa: this.blockAaaa,
@@ -5252,7 +5162,6 @@ struct Index {
       dnsProxyPort: this.dnsProxyPort,
       aghHttpPort: this.aghHttpPort,
       aghWebEnabled: this.aghWebEnabled,
-      blockedServiceIds: this.blockedServiceIds,
       filterSubscriptions: this.filterSubscriptions,
       dnsRewrites: this.dnsRewrites,
       advancedDns: this.advancedDns,
@@ -5473,21 +5382,26 @@ struct Index {
 
   private refreshStatus(): void {
     const raw = this.readTextFile(this.statusFilePath);
-    if (raw.trim().length === 0) {
-      this.launchStatusPending = false;
-      this.suppressRuntimeArtifacts = true;
-      this.status = this.buildInactiveStatus();
-      this.stopping = false;
-      return;
-    }
-
     try {
-      const snapshot = JSON.parse(raw) as StatusSnapshot;
-      if (this.isStaleRunningSnapshot(snapshot)) {
+      const missing = raw.trim().length === 0;
+      const snapshot = missing ? defaultStatus() : JSON.parse(raw) as StatusSnapshot;
+      const now = Date.now();
+      const updatedAt = Date.parse(snapshot.updatedAt);
+      const startPhase = snapshot.phase === 'starting' || snapshot.phase === 'creating';
+      const transition = !snapshot.running && (startPhase || snapshot.phase === 'stopping');
+      // Old versions could leave an undated "starting" snapshot written by the
+      // UI. Only a recent request or a fresh extension snapshot keeps it alive.
+      const transitionSince = Math.max(Number.isFinite(updatedAt) ? updatedAt : 0,
+        startPhase ? this.lastStartRequestAt : 0);
+      const staleTransition = transition && (transitionSince === 0 || now - transitionSince >= START_SETTLE_GRACE_MS);
+      const staleRunning = this.isStaleRunningSnapshot(snapshot);
+      if (missing || staleRunning || staleTransition) {
         this.launchStatusPending = false;
         this.suppressRuntimeArtifacts = true;
         this.status = this.buildInactiveStatus();
-        this.writeTextFile(this.statusFilePath, JSON.stringify(defaultStatus()));
+        if (staleRunning) {
+          this.writeTextFile(this.statusFilePath, JSON.stringify(defaultStatus()));
+        }
       } else if (this.isPendingLaunchSnapshot(snapshot)) {
         // Unconfirmed pre-launch "running": don't trust it (a killed session's
         // leftover) and don't kill it (the extension may stamp a fresh write any
@@ -5505,6 +5419,21 @@ struct Index {
         this.launchStatusPending = false;
         this.suppressRuntimeArtifacts = false;
         this.status = this.normalizeStatusSnapshot(snapshot);
+      }
+      if (!this.proxyModeEnabled && !this.busy && !this.launchStatusPending) {
+        const afterRequest = this.lastStartRequestAt === 0 || updatedAt >= this.lastStartRequestAt;
+        const requestExpired = this.lastStartRequestAt > 0 && now - this.lastStartRequestAt >= START_SETTLE_GRACE_MS;
+        if (afterRequest && (this.status.running || this.status.phase === 'error')) {
+          this.lastStartRequestAt = 0;
+          this.vpnStartTimedOut = false;
+        } else if (!this.status.running && ((staleTransition && startPhase) ||
+          (requestExpired && (!transition || staleTransition)))) {
+          if (!this.vpnStartTimedOut) {
+            this.appendDebugLog('==/vpn_ui/start_timeout/');
+          }
+          this.lastStartRequestAt = 0;
+          this.vpnStartTimedOut = true;
+        }
       }
       if (!this.status.running) {
         this.stopping = false;
@@ -5906,8 +5835,22 @@ struct Index {
     }
   }
 
+  private async waitForVpnRequest(request: Promise<void>): Promise<boolean> {
+    let timer = -1;
+    try {
+      return await Promise.race([
+        request.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), START_SETTLE_GRACE_MS);
+        })
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async startVpn(auto: boolean = false, restart: boolean = false): Promise<void> {
-    if (this.busy) {
+    if (this.busy || (!this.status.running && Date.now() - this.lastStartRequestAt < START_SETTLE_GRACE_MS)) {
       return;
     }
 
@@ -5931,9 +5874,28 @@ struct Index {
     this.busy = true;
     this.errorText = '';
     const wasRunning: boolean = this.status.running;
+    const recoverTimedOutStart = this.vpnStartTimedOut;
+    this.vpnStartTimedOut = false;
     try {
       if (restart && wasRunning) {
         await vpnExtension.stopVpnExtensionAbility(this.buildVpnWant());
+      } else if ((recoverTimedOutStart || this.pendingVpnStart !== undefined) && !wasRunning) {
+        try {
+          const stopped = await this.waitForVpnRequest(vpnExtension.stopVpnExtensionAbility(this.buildVpnWant()));
+          if (!stopped) {
+            this.vpnStartTimedOut = true;
+            this.appendDebugLog('==/vpn_ui/start_recovery_stop_timeout/');
+            return;
+          }
+        } catch (err) {
+          this.appendDebugLog(`==/vpn_ui/start_recovery_stop_error/ ${this.errorMessage(err)}`);
+        }
+        // Even after requesting a stop, the original start call may still be
+        // awaiting the system response. Never enqueue another start over it.
+        if (this.pendingVpnStart !== undefined) {
+          this.vpnStartTimedOut = true;
+          return;
+        }
       }
       if (!this.writeTextFile(this.rulesFilePath, this.rulesText)) {
         throw new Error('Failed to write rules file');
@@ -5963,7 +5925,20 @@ struct Index {
       );
       this.appendDebugLog(`==/vpn_ui/start_request/ rules=${this.rulesFilePath} query=${this.queryLogFilePath}`);
       this.lastStartRequestAt = Date.now();
-      await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
+      const startRequest = vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
+      this.pendingVpnStart = startRequest;
+      const clearPendingStart = () => {
+        if (this.pendingVpnStart === startRequest) {
+          this.pendingVpnStart = undefined;
+        }
+      };
+      void startRequest.then(clearPendingStart, clearPendingStart);
+      if (!(await this.waitForVpnRequest(startRequest))) {
+        this.lastStartRequestAt = 0;
+        this.vpnStartTimedOut = true;
+        this.appendDebugLog('==/vpn_ui/start_api_timeout/');
+        return;
+      }
       hilog.info(DOMAIN, TAG, '%{public}s', '==/vpn_ui/start_resolved/');
       this.appendDebugLog('==/vpn_ui/start_resolved/');
       this.vpnDesiredRunning = true;
@@ -6049,7 +6024,7 @@ struct Index {
     // VPN. activeRunning() is mode-aware so we don't re-start something already up.
     // While the launch snapshot is unconfirmed, hold the decision (re-invoked by
     // the refresh ticks): starting now could double-start a live extension.
-    if (this.autoStartAttempted || !this.autoStartFilterEnabled || this.busy || this.activeRunning()
+    if (this.autoStartAttempted || !this.autoStartFilterEnabled || this.homeStarting() || this.activeRunning()
       || this.launchStatusPending) {
       return;
     }
@@ -6057,13 +6032,10 @@ struct Index {
     if (this.proxyModeEnabled) {
       await this.startDnsProxy();
     } else {
-      // Surface "auto-starting" right away (and persist it so the refresh ticks
-      // agree until the extension's own status pump takes over) instead of
-      // sitting on "stopped" while the extension spins up. Skipped when the
-      // keep-alive confirm dialog will block the start anyway.
+      // Keep the optimistic state in the UI. Only the extension can confirm
+      // that VPN setup has actually begun.
       if (this.keepAliveModeList().length > 0) {
         this.status = this.updatedStatus('starting', this.t('autoStarting'));
-        this.writeTextFile(this.statusFilePath, JSON.stringify(this.status));
       }
       await this.startVpn();
     }
@@ -6076,6 +6048,7 @@ struct Index {
 
     this.vpnDesiredRunning = false;  // user intent: stay down, no watchdog restart
     this.lastStartRequestAt = 0;  // close the start-settle window
+    this.vpnStartTimedOut = false;
     this.busy = true;
     // Surface the teardown immediately: the system VPN takes a moment to close,
     // so flag `stopping` now and keep it until the status file reports not
@@ -7078,9 +7051,9 @@ struct Index {
 
   private disclaimerText(): string {
     return this.tri(
-      'This app is an on-device DNS filtering tool.\n\n• The built-in "blocked services" list is derived from the AdGuardHome open-source project (servicelist.go). Online subscriptions and recommended lists are third-party open-source lists provided "as is", and may over- or under-block.\n\n• Whether to enable filtering, which services to block and which lists to subscribe to are entirely your own decisions and responsibility. Use it only on devices/networks you are authorized to manage, and never for any unlawful purpose.\n\n• The authors provide no warranty and are not liable for any service disruption, data loss or other damage arising from use of this app.\n\n• This app is open source under GPL-3.0.',
-      '本应用是运行在本机的 DNS 过滤工具。\n\n• 内置「服务屏蔽」清单来自 AdGuardHome 开源项目（servicelist.go）；在线订阅与推荐规则库均为第三方开源列表，按「现状」提供，可能存在误拦截或漏拦截。\n\n• 是否启用过滤、屏蔽哪些服务、订阅哪些列表，均由你自行决定并承担相应后果。请仅在你有权管理的设备 / 网络上使用，请勿用于任何非法用途。\n\n• 作者不提供任何担保，且不对因使用本应用造成的服务不可用、数据丢失或其他损失承担责任。\n\n• 本应用基于 GPL-3.0 开源。',
-      '本應用是執行在本機的 DNS 過濾工具。\n\n• 內建「服務屏蔽」清單來自 AdGuardHome 開源專案（servicelist.go）；線上訂閱與推薦規則庫均為第三方開源清單，按「現狀」提供，可能存在誤攔截或漏攔截。\n\n• 是否啟用過濾、屏蔽哪些服務、訂閱哪些清單，均由你自行決定並承擔相應後果。請僅在你有權管理的裝置 / 網路上使用，請勿用於任何非法用途。\n\n• 作者不提供任何擔保，且不對因使用本應用造成的服務不可用、資料遺失或其他損失承擔責任。\n\n• 本應用基於 GPL-3.0 開源。');
+      'This app is an on-device DNS filtering tool.\n\n• Online rule subscriptions are provided by third parties and may over- or under-block.\n\n• Whether to enable filtering, which rules to use and which lists to subscribe to are entirely your own decisions and responsibility. Use it only on devices/networks you are authorized to manage, and never for any unlawful purpose.\n\n• The authors provide no warranty and are not liable for any service disruption, data loss or other damage arising from use of this app.\n\n• This app is open source under GPL-3.0.',
+      '本应用是运行在本机的 DNS 过滤工具。\n\n• 在线订阅的规则由第三方提供，可能存在误拦截或漏拦截。\n\n• 是否启用过滤、使用哪些规则、订阅哪些列表，均由你自行决定并承担相应后果。请仅在你有权管理的设备 / 网络上使用，请勿用于任何非法用途。\n\n• 作者不提供任何担保，且不对因使用本应用造成的服务不可用、数据丢失或其他损失承担责任。\n\n• 本应用基于 GPL-3.0 开源。',
+      '本應用是執行在本機的 DNS 過濾工具。\n\n• 線上訂閱的規則由第三方提供，可能存在誤攔截或漏攔截。\n\n• 是否啟用過濾、使用哪些規則、訂閱哪些清單，均由你自行決定並承擔相應後果。請僅在你有權管理的裝置 / 網路上使用，請勿用於任何非法用途。\n\n• 作者不提供任何擔保，且不對因使用本應用造成的服務不可用、資料遺失或其他損失承擔責任。\n\n• 本應用基於 GPL-3.0 開源。');
   }
 
   private acceptDisclaimer(): void {
@@ -7137,7 +7110,7 @@ struct Index {
             .height(46)
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
-            .backgroundColor(this.accentBlueTone())
+            .backgroundColor(this.actionTone())
             .fontColor('#FFFFFF')
             .borderRadius(14)
             .onClick(() => {
@@ -7190,7 +7163,7 @@ struct Index {
         .height(46)
         .fontSize(15)
         .fontWeight(FontWeight.Medium)
-        .backgroundColor(this.accentBlueTone())
+        .backgroundColor(this.actionTone())
         .fontColor('#FFFFFF')
         .borderRadius(14)
         .onClick(() => {
@@ -7244,10 +7217,24 @@ struct Index {
   // (auto-starting / start requested), falling back to the generic label.
   private homeStartingHint(): string {
     const note: string = this.status.note.trim();
-    if (!this.proxyModeEnabled && note.length > 0) {
+    if (!this.proxyModeEnabled && note.length > 0 &&
+      (this.status.phase === 'starting' || this.status.phase === 'creating')) {
       return note;
     }
     return this.t('working');
+  }
+
+  private homeStoppedHint(): string {
+    if (!this.proxyModeEnabled) {
+      if (this.vpnStartTimedOut) {
+        return this.tri('VPN startup timed out. Try starting again.',
+          'VPN 启动超时，请重试。', 'VPN 啟動逾時，請重試。');
+      }
+      if (this.status.phase === 'error' && this.status.note.trim().length > 0) {
+        return this.status.note;
+      }
+    }
+    return this.t('stoppedHint');
   }
 
   private buildInactiveStatus(): StatusSnapshot {
@@ -7407,73 +7394,76 @@ struct Index {
   }
 
   private mutedTextColor(): string {
-    return this.isDarkModeActive() ? '#7E8795' : '#97A0AD';
+    return this.isDarkModeActive() ? '#9AA6BA' : '#647085';
   }
 
-  // Single solid page colour (HarmonyOS secondary background in light mode);
-  // cards carry the hierarchy. The title bar fades from this same RGB.
+  // Base color shared by the page gradient and immersive title bar.
   private canvasTone(): string {
-    return this.isDarkModeActive() ? '#0E1320' : '#F1F3F5';
+    return this.paletteColors().canvas;
   }
 
   private cardSurfaceTone(): string {
-    return this.isDarkModeActive() ? '#182234' : '#FFFFFF';
+    return this.paletteColors().card;
   }
 
   private cardBorderTone(): string {
-    return this.isDarkModeActive() ? '#1FFFFFFF' : '#14101828';
+    return this.paletteColors().border;
   }
 
   private cardShadowTone(): string {
-    return this.isDarkModeActive() ? '#55000000' : '#22101A2E';
+    return this.isDarkModeActive() ? '#32070C1B' : '#1023355B';
   }
 
   private chipSurfaceTone(): string {
-      return this.isDarkModeActive() ? '#222E42' : '#F1F3F7';
+    return this.paletteColors().soft;
   }
 
   private floatingBarTone(): string {
-      return this.isDarkModeActive() ? '#182235F2' : '#FFFFFFF2';
+    return paletteAlpha(this.cardSurfaceTone(), 'F2');
   }
 
   private elevatedSurfaceTone(): string {
-      return this.isDarkModeActive() ? '#1B2638' : '#FFFFFF';
+    return this.paletteColors().card;
   }
 
   private softPanelTone(): string {
-      return this.isDarkModeActive() ? '#212C40' : '#F2F4F8';
+    return this.paletteColors().soft;
   }
 
   private selectedChipSurfaceTone(): string {
-        return this.isDarkModeActive() ? '#2C436E' : '#E6EEFF';
+    return this.paletteColors().selected;
   }
 
   private selectedChipTextTone(): string {
-      return this.isDarkModeActive() ? '#9FC0FF' : '#255DFF';
+    return this.paletteColors().accent;
   }
 
   private coolChipSurfaceTone(): string {
-        return this.isDarkModeActive() ? '#25375A' : '#E9F0FF';
+    return this.selectedChipSurfaceTone();
   }
 
   private coolNeutralChipSurfaceTone(): string {
-        return this.isDarkModeActive() ? '#212C40' : '#F1F3F7';
-    }
+    return this.softPanelTone();
+  }
 
     private warmChipSurfaceTone(): string {
       return this.isDarkModeActive() ? '#3E2630' : '#FCEAEA';
     }
 
     private selectedOutlineTone(): string {
-      return this.isDarkModeActive() ? '#9CC2FF' : '#5B8EFF';
+      return this.selectedChipTextTone();
     }
 
     private selectedShadowTone(): string {
-      return this.isDarkModeActive() ? '#40000000' : '#1F255DFF';
+      return this.isDarkModeActive() ? '#40000000' : paletteAlpha(this.actionTone(), '1F');
   }
 
   private accentBlueTone(): string {
-    return this.isDarkModeActive() ? '#8CB3FF' : '#255DFF';
+    return this.selectedChipTextTone();
+  }
+
+  private actionTone(): string {
+    return this.paletteColors().action;
   }
 
   private accentGreenTone(): string {
@@ -7518,7 +7508,7 @@ struct Index {
   }
 
   private softBlueTone(): string {
-      return this.isDarkModeActive() ? '#25375A' : '#E9F0FF';
+    return this.selectedChipSurfaceTone();
   }
 
   private softGreenTone(): string {
@@ -7526,7 +7516,7 @@ struct Index {
   }
 
   private softAmberTone(): string {
-      return this.isDarkModeActive() ? '#212C40' : '#F2F4F8';
+    return this.softPanelTone();
   }
 
   private softRedTone(): string {
@@ -7583,19 +7573,19 @@ struct Index {
   }
 
   private sheetSurfaceTone(): string {
-    return this.isDarkModeActive() ? '#172335' : '#FFFFFF';
+    return this.cardSurfaceTone();
   }
 
   private sheetSecondarySurfaceTone(): string {
-    return this.isDarkModeActive() ? '#212C40' : '#F4F6F9';
+    return this.softPanelTone();
   }
 
   private sheetInputSurfaceTone(): string {
-    return this.isDarkModeActive() ? '#212C40' : '#F2F4F8';
+    return this.softPanelTone();
   }
 
   private sheetBorderTone(): string {
-    return this.isDarkModeActive() ? '#1FFFFFFF' : '#14101828';
+    return this.cardBorderTone();
   }
 
   private sheetShadowTone(): string {
@@ -7603,7 +7593,7 @@ struct Index {
   }
 
   private sheetGlowTone(): string {
-    return this.isDarkModeActive() ? '#224C8BCB' : '#14255DFF';
+    return paletteAlpha(this.selectedChipTextTone(), this.isDarkModeActive() ? '22' : '14');
   }
 
   private getBottomTabOverlayHeight(): number {
@@ -7613,7 +7603,21 @@ struct Index {
   }
 
   private contentBottomInset(): number {
-    return Math.max(0, this.avoidPaddingBottom) + this.getBottomTabOverlayHeight();
+    return Math.max(0, this.avoidPaddingBottom) + (this.useSidebarLayout() ? 16 : this.getBottomTabOverlayHeight());
+  }
+
+  private useSidebarLayout(): boolean {
+    return deviceInfo.deviceType === '2in1' ||
+      (deviceInfo.deviceType === 'tablet' && this.windowHeightVp > 0 && this.windowWidthVp > this.windowHeightVp);
+  }
+
+  private useWideMe(): boolean {
+    return this.useSidebarLayout() || (deviceInfo.deviceType === 'tablet' && this.windowWidthVp >= 620);
+  }
+
+  private contentSideInset(): number {
+    const contentWidth = this.windowWidthVp - (this.useSidebarLayout() ? 170 : 0);
+    return this.useWideMe() ? Math.max(20, Math.round((contentWidth - 1720) / 2)) : 16;
   }
 
   @Builder
@@ -7678,31 +7682,6 @@ struct Index {
   }
 
   @Builder
-  private OverviewStatCell(p: OverviewStatParam) {
-    Column({ space: 3 }) {
-      Text(p.label)
-        .fontSize(11)
-        .fontColor(this.secondaryTextColor())
-        .width('100%')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text(p.value)
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(p.valueColor)
-        .width('100%')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-    }
-    .layoutWeight(1)
-    .alignItems(HorizontalAlign.Start)
-    .padding(12)
-    .backgroundColor(this.softPanelTone())
-    .borderRadius(12)
-    .border({ width: 1, color: this.cardBorderTone() })
-  }
-
-  @Builder
   private SettingsGroupTitle(p: SettingsGroupTitleParam) {
     Text(p.text)
       .fontSize(13)
@@ -7731,25 +7710,6 @@ struct Index {
       })
   }
 
-  @Builder
-  private LangSegButton(label: string, lang: LangCode) {
-    Button(label)
-      .type(ButtonType.Normal)
-      .layoutWeight(1)
-      .height(36)
-      .fontSize(13)
-      .fontWeight(this.language === lang ? FontWeight.Bold : FontWeight.Medium)
-      .backgroundColor(this.language === lang ? this.cardSurfaceTone() : Color.Transparent)
-      .fontColor(this.language === lang ? this.accentBlueTone() : this.secondaryTextColor())
-      .borderRadius(11)
-      .shadow(this.language === lang
-        ? { radius: 8, color: this.cardShadowTone(), offsetX: 0, offsetY: 2 }
-        : { radius: 0, color: '#00000000' })
-      .onClick(() => {
-        this.setLanguage(lang);
-      })
-  }
-
   // One segment of the persistent-notification refresh-interval selector (1-5s).
   @Builder
   private NotifyIntervalSegButton(seconds: number) {
@@ -7775,16 +7735,21 @@ struct Index {
   @Builder
   private SettingsIconText(p: SettingsRowTextParam) {
     Row({ space: 12 }) {
-      this.IconBubble(p.glyph, p.iconBg, p.iconFg, 36, 16)
+      if (typeof p.glyph === 'string') {
+        this.IconBubble(p.glyph, p.iconBg ?? this.selectedChipSurfaceTone(),
+          p.iconFg ?? this.selectedChipTextTone(), 36, 16)
+      } else {
+        this.MeLinkIcon(p.glyph)
+      }
       Column({ space: 2 }) {
         Text(p.title)
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.primaryTextColor())
+          .fontColor(p.dimmed ? this.secondaryTextColor() : this.primaryTextColor())
         Text(p.desc)
           .fontSize(12)
           .lineHeight(17)
-          .fontColor(this.secondaryTextColor())
+          .fontColor(p.dimmed ? this.mutedTextColor() : this.secondaryTextColor())
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
@@ -7794,11 +7759,11 @@ struct Index {
   }
 
   // One of the user's active subscriptions: tap the card to preview its content
-  // (cache first). The switch enables/disables the list (a failed list defaults
-  // off); the 🗑 button removes it after a confirmation. Disabling never deletes.
+  // (cache first), use the switch to enable it, or open the menu to remove it.
   @Builder
   private MySubscriptionRow(s: FilterSubscription) {
-    Row({ space: 10 }) {
+    Row({ space: 8 }) {
+      this.MeLinkIcon($r('sys.symbol.link'))
       Column({ space: 2 }) {
         Text(s.name)
           .fontSize(15)
@@ -7823,88 +7788,33 @@ struct Index {
       .alignItems(HorizontalAlign.Start)
 
       Toggle({ type: ToggleType.Switch, isOn: s.enabled })
-        .selectedColor(this.accentBlueTone())
+        .enabled(this.fullModeEnabled)
+        .selectedColor(this.actionTone())
         .onChange((value: boolean) => {
-          // Enable/disable only — removal is the 🗑 button. Enabling (re)downloads
-          // and validates; a failure flips it back off.
           this.toggleFilterSubscription(s.id, value);
         })
-      Button('🗑')
-        .type(ButtonType.Circle)
-        .width(34)
-        .height(34)
-        .fontSize(15)
-        .backgroundColor(this.softRedTone())
-        .fontColor(this.isDarkModeActive() ? '#FF8A8A' : '#B42318')
-        .onClick(() => {
-          this.confirmDeleteSubscription(s);
-        })
+      Button('···')
+        .width(28)
+        .height(36)
+        .padding(0)
+        .fontSize(20)
+        .fontColor(this.secondaryTextColor())
+        .backgroundColor(Color.Transparent)
+        .accessibilityText(this.tri('Subscription actions', '订阅操作', '訂閱操作'))
+        .bindMenu([{
+          value: this.t('deleteRule'),
+          action: () => this.confirmDeleteSubscription(s)
+        }])
     }
     .width('100%')
-    .padding(14)
+    .constraintSize({ minHeight: 72 })
+    .padding(10)
     .backgroundColor(this.cardSurfaceTone())
-    .borderRadius(16)
-    .shadow({ radius: 12, color: this.cardShadowTone() })
-    .margin({ bottom: 10 })
-    // Tapping the card (anywhere but the switch / delete button) previews content.
+    .borderRadius(13)
+    .border({ width: 1, color: this.cardBorderTone() })
+    // Tapping the card (anywhere but the switch / menu) previews content.
     .onClick(() => {
       this.viewSubscriptionContent(s);
-    })
-  }
-
-  // One recommended online-list row: tap the text to preview its content, and the
-  // button subscribes (or unsubscribes when already subscribed).
-  @Builder
-  private RecommendedPresetRow(preset: SubscriptionPreset) {
-    Row({ space: 10 }) {
-      Column({ space: 2 }) {
-        Text(preset.name)
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.primaryTextColor())
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(preset.url)
-          .fontSize(12)
-          .fontColor(this.secondaryTextColor())
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        if (this.subStatusTextByUrl(preset.url).length > 0) {
-          Text(this.subStatusTextByUrl(preset.url))
-            .fontSize(11)
-            .fontColor(this.subStatusColorByUrl(preset.url))
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }
-      }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
-
-      Button(this.subscriptionPresetActive(preset.url)
-          ? this.tri('Subscribed ✕', '已订阅 ✕', '已訂閱 ✕')
-          : this.tri('Subscribe', '订阅', '訂閱'))
-        .height(32)
-        .padding({ left: 14, right: 14 })
-        .fontSize(12)
-        .fontWeight(FontWeight.Medium)
-        .backgroundColor(this.subscriptionPresetActive(preset.url)
-          ? this.coolNeutralChipSurfaceTone() : this.accentBlueTone())
-        .fontColor(this.subscriptionPresetActive(preset.url)
-          ? this.secondaryTextColor() : '#FFFFFF')
-        .borderRadius(8)
-        .onClick(() => {
-          this.toggleSubscriptionPreset(preset);
-        })
-    }
-    .width('100%')
-    .padding(14)
-    .backgroundColor(this.cardSurfaceTone())
-    .borderRadius(16)
-    .shadow({ radius: 12, color: this.cardShadowTone() })
-    .margin({ bottom: 10 })
-    // Tapping the card (anywhere but the button) previews the list content.
-    .onClick(() => {
-      this.viewPresetContent(preset);
     })
   }
 
@@ -8332,171 +8242,6 @@ struct Index {
   }
 
   @Builder
-  private ServicesSheet() {
-    Column({ space: 12 }) {
-      if (this.detailServiceId.length > 0) {
-        // ===== Detail view: one service's full rule list =====
-        Row({ space: 12 }) {
-          Button(this.tri('← Back', '← 返回', '← 返回'))
-            .fontSize(13)
-            .height(36)
-            .padding({ left: 14, right: 14 })
-            .backgroundColor(this.coolNeutralChipSurfaceTone())
-            .fontColor(this.primaryTextColor())
-            .borderRadius(12)
-            .border({ width: 1, color: this.cardBorderTone() })
-            .onClick(() => {
-              this.detailServiceId = '';
-            })
-
-          Column({ space: 2 }) {
-            Text(this.serviceById(this.detailServiceId)?.name ?? this.detailServiceId)
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.primaryTextColor())
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(`${this.serviceById(this.detailServiceId)?.rules.length ?? 0} ${this.language === 'en' ? 'rules' : '条规则'}`)
-              .fontSize(12)
-              .fontColor(this.mutedTextColor())
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-
-          Toggle({ type: ToggleType.Switch, isOn: this.blockedServiceIds.includes(this.detailServiceId) })
-            .onChange((value: boolean) => {
-              this.toggleBlockedService(this.detailServiceId, value);
-            })
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-
-        Text(this.tri('Long-press a rule to copy. Lookups matching these domains are blocked.',
-          '长按可复制。命中这些域名的解析会被拦截。', '長按可複製。命中這些網域的解析會被攔截。'))
-          .fontSize(12)
-          .lineHeight(17)
-          .fontColor(this.secondaryTextColor())
-          .width('100%')
-
-        List() {
-          ForEach(this.serviceById(this.detailServiceId)?.rules ?? [], (rule: string, idx: number) => {
-            ListItem() {
-              Text(rule)
-                .fontSize(13)
-                .fontColor(this.primaryTextColor())
-                .copyOption(CopyOptions.LocalDevice)
-                .width('100%')
-                .padding({ left: 14, right: 14, top: 11, bottom: 11 })
-                .backgroundColor(this.sheetSecondarySurfaceTone())
-                .borderRadius(12)
-                .border({ width: 1, color: this.sheetBorderTone() })
-            }
-          }, (rule: string, idx: number) => `${idx}_${rule}`)
-        }
-        .width('100%')
-        .layoutWeight(1)
-        .scrollBar(BarState.Off)
-        .cachedCount(12)
-        .divider({ strokeWidth: 8, color: Color.Transparent })
-      } else {
-        // ===== List view: all services =====
-        Row({ space: 12 }) {
-          Column({ space: 4 }) {
-            Text(this.language === 'en' ? 'Blocked services' : (this.language === 'zhHant' ? '服務屏蔽' : '服务屏蔽'))
-              .fontSize(20)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.primaryTextColor())
-            Text(this.language === 'en'
-              ? `${this.blockedServiceIds.length} blocked`
-              : (this.language === 'zhHant' ? `已屏蔽 ${this.blockedServiceIds.length} 個` : `已屏蔽 ${this.blockedServiceIds.length} 个`))
-              .fontSize(12)
-              .fontColor(this.mutedTextColor())
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-
-          Button(this.language === 'en' ? 'Close' : (this.language === 'zhHant' ? '關閉' : '关闭'))
-            .fontSize(13)
-            .height(36)
-            .backgroundColor(this.coolChipSurfaceTone())
-            .fontColor(this.primaryTextColor())
-            .borderRadius(12)
-            .onClick(() => {
-              this.showServicesSheet = false;
-            })
-        }
-        .width('100%')
-
-        TextInput({ text: this.servicesSearchText, placeholder: this.language === 'en' ? 'Search services' : '搜索服务' })
-          .width('100%')
-          .height(44)
-          .fontSize(15)
-          .backgroundColor(this.sheetInputSurfaceTone())
-          .borderRadius(16)
-          .border({ width: 1, color: this.sheetBorderTone() })
-          .padding({ left: 14, right: 14 })
-          .onChange((value: string) => {
-            this.servicesSearchText = value;
-          })
-
-        List() {
-          ForEach(this.filteredBlockedServices(), (svc: BlockedServiceDef) => {
-            ListItem() {
-              Row() {
-                Column({ space: 2 }) {
-                  Text(svc.name)
-                    .fontSize(15)
-                    .fontWeight(FontWeight.Medium)
-                    .fontColor(this.primaryTextColor())
-                  Row({ space: 6 }) {
-                    Text(`${svc.rules.length} ${this.language === 'en' ? 'rules' : '条规则'}`)
-                      .fontSize(11)
-                      .fontColor(this.mutedTextColor())
-                    Text(this.tri('view ›', '查看 ›', '查看 ›'))
-                      .fontSize(11)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor(this.accentBlueTone())
-                  }
-                }
-                .layoutWeight(1)
-                .alignItems(HorizontalAlign.Start)
-                .onClick(() => {
-                  this.detailServiceId = svc.id;
-                })
-
-                Toggle({ type: ToggleType.Switch, isOn: this.blockedServiceIds.includes(svc.id) })
-                  .onChange((value: boolean) => {
-                    this.toggleBlockedService(svc.id, value);
-                  })
-              }
-              .width('100%')
-              .alignItems(VerticalAlign.Center)
-              .padding(14)
-              .backgroundColor(this.sheetSecondarySurfaceTone())
-              .borderRadius(14)
-              .border({ width: 1, color: this.sheetBorderTone() })
-            }
-          }, (svc: BlockedServiceDef) => svc.id)
-        }
-        .width('100%')
-        .layoutWeight(1)
-        .scrollBar(BarState.Off)
-        .cachedCount(10)
-        .divider({ strokeWidth: 8, color: Color.Transparent })
-      }
-    }
-    .width('100%')
-    .height('100%')
-    .padding({
-      left: 14,
-      right: 14,
-      top: Math.max(18, this.avoidPaddingTop + 12),
-      bottom: Math.max(18, this.avoidPaddingBottom + 12)
-    })
-    .backgroundColor(this.sheetSurfaceTone())
-  }
-
-  @Builder
   private AghWebSheet() {
     Column({ space: 12 }) {
       Row({ space: 12 }) {
@@ -8570,184 +8315,6 @@ struct Index {
       .onClick(() => {
         onTap();
       })
-  }
-
-  @Builder
-  private SubscriptionsSheet() {
-    Column({ space: 12 }) {
-      Row({ space: 12 }) {
-        Column({ space: 4 }) {
-          Text(this.tri('Online subscriptions', '在线规则订阅', '線上規則訂閱'))
-            .fontSize(20)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.primaryTextColor())
-          Text(this.tri(`${this.enabledSubscriptionCount()} enabled / ${this.filterSubscriptions.length} total`,
-            `已启用 ${this.enabledSubscriptionCount()} / 共 ${this.filterSubscriptions.length}`,
-            `已啟用 ${this.enabledSubscriptionCount()} / 共 ${this.filterSubscriptions.length}`))
-            .fontSize(12)
-            .fontColor(this.mutedTextColor())
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-
-        Button(this.tri('Close', '关闭', '關閉'))
-          .fontSize(13)
-          .height(36)
-          .backgroundColor(this.coolChipSurfaceTone())
-          .fontColor(this.primaryTextColor())
-          .borderRadius(12)
-          .onClick(() => {
-            this.showSubscriptionsSheet = false;
-          })
-      }
-      .width('100%')
-
-      Text(this.tri('Full engine only. Enabled lists download a few seconds after the filter starts; changes restart filtering while running.',
-        '仅完整引擎有效。启用的列表会在过滤启动几秒后下载；运行中更改会重启过滤。',
-        '僅完整引擎有效。啟用的列表會在過濾啟動幾秒後下載；執行中更改會重啟過濾。'))
-        .fontSize(12)
-        .lineHeight(18)
-        .fontColor(this.secondaryTextColor())
-        .width('100%')
-
-      Column({ space: 10 }) {
-        TextInput({ text: this.subAddNameInput, placeholder: this.tri('Name (optional)', '名称（可选）', '名稱（可選）') })
-          .width('100%')
-          .height(44)
-          .fontSize(15)
-          .backgroundColor(this.sheetInputSurfaceTone())
-          .borderRadius(14)
-          .border({ width: 1, color: this.sheetBorderTone() })
-          .padding({ left: 12, right: 12 })
-          .onChange((value: string) => {
-            this.subAddNameInput = value;
-          })
-        TextInput({ text: this.subAddUrlInput, placeholder: 'https://example.com/list.txt' })
-          .width('100%')
-          .height(44)
-          .fontSize(15)
-          .backgroundColor(this.sheetInputSurfaceTone())
-          .borderRadius(14)
-          .border({ width: 1, color: this.sheetBorderTone() })
-          .padding({ left: 12, right: 12 })
-          .onChange((value: string) => {
-            this.subAddUrlInput = value;
-          })
-        Button(this.tri('Add', '添加', '新增'))
-          .type(ButtonType.Normal)
-          .width('100%')
-          .height(44)
-          .fontSize(15)
-          .fontColor(Color.White)
-          .backgroundColor('#2B5B95')
-          .borderRadius(14)
-          .onClick(() => {
-            this.addFilterSubscription(this.subAddNameInput, this.subAddUrlInput);
-          })
-
-        Flex({ wrap: FlexWrap.Wrap }) {
-          ForEach(SUBSCRIPTION_PRESETS, (p: SubscriptionPreset) => {
-            Button(p.name)
-              .type(ButtonType.Normal)
-              .fontSize(12)
-              .fontColor(this.primaryTextColor())
-              .backgroundColor(this.sheetInputSurfaceTone())
-              .borderRadius(12)
-              .border({ width: 1, color: this.sheetBorderTone() })
-              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-              .margin({ right: 8, bottom: 8 })
-              .onClick(() => {
-                this.addSubscriptionPreset(p);
-              })
-          }, (p: SubscriptionPreset) => p.url)
-        }
-        .width('100%')
-      }
-      .width('100%')
-      .padding(14)
-      .backgroundColor(this.sheetSecondarySurfaceTone())
-      .borderRadius(18)
-      .border({ width: 1, color: this.sheetBorderTone() })
-
-      if (this.subFeedbackText.length > 0) {
-        Text(this.subFeedbackText)
-          .fontSize(12)
-          .fontColor(this.accentBlueTone())
-          .fontWeight(FontWeight.Medium)
-          .width('100%')
-      }
-
-      if (this.filterSubscriptions.length === 0) {
-        Text(this.tri('No subscriptions yet.', '暂无订阅。', '尚無訂閱。'))
-          .fontSize(13)
-          .fontColor(this.secondaryTextColor())
-          .width('100%')
-      }
-
-      List() {
-        ForEach(this.filterSubscriptions, (s: FilterSubscription) => {
-          ListItem() {
-            Row({ space: 10 }) {
-              Column({ space: 2 }) {
-                Text(s.name)
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.primaryTextColor())
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                Text(s.url)
-                  .fontSize(11)
-                  .fontColor(this.mutedTextColor())
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                Text(this.tri('👁 Tap to preview content', '👁 点按查看订阅内容', '👁 點按查看訂閱內容'))
-                  .fontSize(11)
-                  .fontColor(this.accentBlueTone())
-              }
-              .layoutWeight(1)
-              .alignItems(HorizontalAlign.Start)
-              // Tap the text area to fetch and browse the list's actual content.
-              .onClick(() => {
-                this.viewSubscriptionContent(s);
-              })
-
-              Toggle({ type: ToggleType.Switch, isOn: s.enabled })
-                .onChange((value: boolean) => {
-                  this.toggleFilterSubscription(s.id, value);
-                })
-              Button(this.tri('Delete', '删除', '刪除'))
-                .fontSize(12)
-                .height(34)
-                .backgroundColor(this.coolChipSurfaceTone())
-                .fontColor(this.primaryTextColor())
-                .borderRadius(10)
-                .onClick(() => {
-                  this.removeFilterSubscription(s.id);
-                })
-            }
-            .width('100%')
-            .padding(14)
-            .backgroundColor(this.sheetSecondarySurfaceTone())
-            .borderRadius(14)
-            .border({ width: 1, color: this.sheetBorderTone() })
-          }
-        }, (s: FilterSubscription) => `${s.id}`)
-      }
-      .width('100%')
-      .layoutWeight(1)
-      .scrollBar(BarState.Off)
-      .cachedCount(8)
-      .divider({ strokeWidth: 8, color: Color.Transparent })
-    }
-    .width('100%')
-    .height('100%')
-    .padding({
-      left: 14,
-      right: 14,
-      top: Math.max(18, this.avoidPaddingTop + 12),
-      bottom: Math.max(18, this.avoidPaddingBottom + 12)
-    })
-    .backgroundColor(this.sheetSurfaceTone())
   }
 
   @Builder
@@ -9374,7 +8941,7 @@ struct Index {
   // The title bar fades between the page colour at alpha 0 and the blur, so the
   // RGB must match canvasTone (see components/BlurTitleBar.ets).
   private pageToneClear(): string {
-    return this.isDarkModeActive() ? '#000E1320' : '#00F1F3F5';
+    return paletteAlpha(this.canvasTone(), '00');
   }
 
   private pageTitleBar(title: string, menu?: Array<HdsNavigationMenuItemOptions>): HdsNavigationTitleBarOptions {
@@ -9386,7 +8953,7 @@ struct Index {
     return [{
       content: {
         icon: new SymbolGlyphModifier($r(this.showImportMenu ? 'sys.symbol.xmark' : 'sys.symbol.plus')),
-        label: this.t('quickImport'),
+        label: this.configOnlineTab ? this.tri('Add subscription', '添加订阅', '新增訂閱') : this.t('quickImport'),
         action: () => {
           this.showImportMenu = !this.showImportMenu;
           if (this.showImportMenu) {
@@ -9409,14 +8976,13 @@ struct Index {
     }];
   }
 
-  // Plain page colour behind tab roots and sub pages (sub pages need an opaque
-  // fill so the tab root doesn't show through during the push transition).
+  // Opaque backdrop prevents the tab root from showing during navigation.
   @Builder
   private PageBackdrop() {
     Column() {}
       .width('100%')
       .height('100%')
-      .backgroundColor(this.canvasTone())
+      .linearGradient({ angle: 155, colors: [[this.canvasTone(), 0], [this.paletteColors().canvasEnd, 1]] })
   }
 
   // Each tab is its own HdsNavigation so the immersive title bar tracks that
@@ -9467,16 +9033,7 @@ struct Index {
 
   @Builder
   private MePageMap(name: string) {
-    if (name === ME_PAGE_SETTINGS) {
-      HdsNavDestination() {
-        this.SettingsSubPage()
-      }
-      .titleBar(this.pageTitleBar(this.t('settingsTitle')))
-      .bindToScrollable([this.settingsScroller])
-      .titleMode(HdsNavDestinationTitleMode.MINI)
-      .hideToolBar(true)
-      .background(this.PageBackdrop())
-    } else if (name === ME_PAGE_APP_SPLIT) {
+    if (name === ME_PAGE_APP_SPLIT) {
       HdsNavDestination() {
         this.AppSplitPage()
       }
@@ -9493,7 +9050,26 @@ struct Index {
           this.showAppSplitAddSheet = false;
         }
       })
+    } else {
+      HdsNavDestination() {
+        this.SettingsSubPage(name)
+      }
+      .titleBar(this.pageTitleBar(this.mePageTitle(name)))
+      .bindToScrollable([this.meSectionScroller(name)])
+      .titleMode(HdsNavDestinationTitleMode.MINI)
+      .hideToolBar(true)
+      .background(this.PageBackdrop())
     }
+  }
+
+  private meSectionScroller(name: string): Scroller {
+    const existing = this.meSectionScrollers.get(name);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const scroller = new Scroller();
+    this.meSectionScrollers.set(name, scroller);
+    return scroller;
   }
 
   // ===== Per-app routing (分应用代理) ========================================
@@ -9505,24 +9081,7 @@ struct Index {
   }
 
   private appSplitDisplayName(e: AppSplitEntry): string {
-    if (e.name.length > 0) {
-      return e.name;
-    }
-    const preset: AppSplitPreset | undefined = findAppSplitPreset(e.bundle);
-    if (preset !== undefined) {
-      return this.appSplitPresetLabel(preset);
-    }
-    return e.bundle;
-  }
-
-  private appSplitPresetLabel(preset: AppSplitPreset): string {
-    return this.language === 'en' ? preset.nameEn : preset.name;
-  }
-
-  // Presets not yet in the list, for the quick-pick menu.
-  private availableAppSplitPresets(): AppSplitPreset[] {
-    return APP_SPLIT_PRESETS.filter((p: AppSplitPreset) =>
-      this.appSplitList.find((e: AppSplitEntry) => e.bundle === p.bundle) === undefined);
+    return e.name.length > 0 ? e.name : e.bundle;
   }
 
   private appSplitModeHint(): string {
@@ -9926,7 +9485,7 @@ struct Index {
               .height(36)
               .fontSize(14)
               .margin({ top: 4 })
-              .backgroundColor(this.accentBlueTone())
+              .backgroundColor(this.actionTone())
               .fontColor('#FFFFFF')
               .onClick(() => {
                 this.openAppSplitAddSheet();
@@ -9966,11 +9525,9 @@ struct Index {
     Text(label)
       .fontSize(15)
       .fontColor(this.primaryTextColor())
-      .width(84)
+      .width(96)
   }
 
-  // Add-app sheet, modelled on the familiar "whitelist" pattern: a quick-pick
-  // of common apps (bundle names verified on-device), or a manual bundle name.
   @Builder
   private AppSplitAddSheet() {
     Column({ space: 12 }) {
@@ -9998,32 +9555,7 @@ struct Index {
 
       Column() {
         Row() {
-          this.AppSplitFieldLabel(this.t('appSplitQuickPick'))
-          Select(this.availableAppSplitPresets().map((p: AppSplitPreset): SelectOption => {
-            return { value: this.appSplitPresetLabel(p) };
-          }))
-            .layoutWeight(1)
-            .value(this.t('appSplitQuickPickHint'))
-            .font({ size: 15, weight: FontWeight.Medium })
-            .fontColor(this.primaryTextColor())
-            .backgroundColor(Color.Transparent)
-            .onSelect((index: number) => {
-              const presets: AppSplitPreset[] = this.availableAppSplitPresets();
-              if (index >= 0 && index < presets.length) {
-                this.appSplitBundleInput = presets[index].bundle;
-                this.appSplitNameInput = this.appSplitPresetLabel(presets[index]);
-                this.appSplitAddError = '';
-              }
-            })
-        }
-        .width('100%')
-        .padding({ left: 16, right: 8, top: 6, bottom: 6 })
-        .alignItems(VerticalAlign.Center)
-
-        Divider().strokeWidth(1).color(this.cardBorderTone()).margin({ left: 16, right: 16 })
-
-        Row() {
-          this.AppSplitFieldLabel('Bundle')
+          this.AppSplitFieldLabel(this.t('appSplitBundleLabel'))
           TextInput({ text: this.appSplitBundleInput, placeholder: this.t('appSplitBundlePlaceholder') })
             .layoutWeight(1)
             .fontSize(15)
@@ -10031,6 +9563,12 @@ struct Index {
             .onChange((value: string) => {
               this.appSplitBundleInput = value;
               this.appSplitAddError = '';
+            })
+            .onBlur(() => {
+              const bundle = this.appSplitBundleInput.trim();
+              if (bundle.length > 0 && !isValidBundleName(bundle)) {
+                this.appSplitAddError = this.t('appSplitInvalidBundle');
+              }
             })
         }
         .width('100%')
@@ -10079,7 +9617,7 @@ struct Index {
       .width('100%')
       .height(48)
       .margin({ top: 4 })
-      .backgroundColor(this.accentBlueTone())
+      .backgroundColor(this.actionTone())
       .onClick(() => {
         this.addAppSplitEntry();
       })
@@ -10143,6 +9681,264 @@ struct Index {
   }
 
   @Builder
+  private NetworkModeControl() {
+    Row() {
+      Button(this.t('modeVpn'))
+        .layoutWeight(1)
+        .height(34)
+        .fontSize(13)
+        .fontWeight(this.proxyModeEnabled ? FontWeight.Normal : FontWeight.Bold)
+        .fontColor(this.proxyModeEnabled ? this.secondaryTextColor() : this.selectedChipTextTone())
+        .backgroundColor(this.proxyModeEnabled ? Color.Transparent : this.selectedChipSurfaceTone())
+        .borderRadius(9)
+        .enabled(!this.status.running && !this.dnsProxyRunning && !this.busy && !this.stopping)
+        .onClick(() => {
+          this.setNetworkProxyMode(false);
+        })
+      Button(this.t('modeDnsProxy'))
+        .layoutWeight(1)
+        .height(34)
+        .fontSize(13)
+        .fontWeight(this.proxyModeEnabled ? FontWeight.Bold : FontWeight.Normal)
+        .fontColor(this.proxyModeEnabled ? this.selectedChipTextTone() : this.secondaryTextColor())
+        .backgroundColor(this.proxyModeEnabled ? this.selectedChipSurfaceTone() : Color.Transparent)
+        .borderRadius(9)
+        .enabled(!this.status.running && !this.dnsProxyRunning && !this.busy && !this.stopping)
+        .onClick(() => {
+          this.setNetworkProxyMode(true);
+        })
+    }
+    .width(this.useWideMe() ? 344 : '100%')
+    .padding(3)
+    .backgroundColor(this.coolNeutralChipSurfaceTone())
+    .borderRadius(12)
+    .border({ width: 1, color: this.cardBorderTone() })
+    .alignSelf(ItemAlign.Center)
+  }
+
+  @Builder
+  private HomeActions() {
+    Flex({ direction: this.useWideMe() ? FlexDirection.Row : FlexDirection.Column,
+      justifyContent: FlexAlign.Center, alignItems: ItemAlign.Center, space: { main: LengthMetrics.vp(10) } }) {
+      Button(this.stopping
+        ? this.tri('Stopping…', '停止中…', '停止中…')
+        : (this.busy || this.homeStarting() ? this.t('working')
+          : (this.proxyModeEnabled
+            ? (this.dnsProxyRunning ? this.t('dnsProxyStop') : this.t('dnsProxyStart'))
+            : (this.status.running ? this.t('stopFilter') : this.t('startFilter')))))
+        .enabled(!this.busy && !this.stopping && !this.homeStarting())
+        .width(this.useWideMe() ? 152 : '100%')
+        .height(this.useWideMe() ? 44 : 48)
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .backgroundColor(this.busy || this.stopping || this.homeStarting() ? this.chipSurfaceTone() : this.actionTone())
+        .fontColor((this.busy || this.stopping || this.homeStarting()) ? this.secondaryTextColor() : '#FFFFFF')
+        .borderRadius(16)
+        .shadow({ radius: 10, color: paletteAlpha(this.actionTone(), '26') })
+        .onClick(() => {
+          if (this.proxyModeEnabled) {
+            if (this.dnsProxyRunning) {
+              this.stopDnsProxy().catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            } else {
+              this.startDnsProxy().catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            }
+          } else {
+            if (this.status.running) {
+              this.stopVpn().catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            } else {
+              this.startVpn().catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            }
+          }
+        })
+
+      if (this.activeRunning() && !this.busy && !this.stopping) {
+        Button(this.t('restartFilter'))
+          .width(this.useWideMe() ? 132 : '100%')
+          .height(44)
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .backgroundColor(this.softPanelTone())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(14)
+          .border({ width: 1, color: this.cardBorderTone() })
+          .onClick(() => this.restartActiveFilter())
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  private DnsRequestsCard() {
+    Column({ space: 10 }) {
+      Row() {
+        Text(this.t('recentDnsRequests'))
+          .fontSize(18)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+        Blank()
+        Text(this.t('clickToExpand'))
+          .fontSize(13)
+          .fontColor(this.accentBlueTone())
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Row({ space: 6 }) {
+        Text(`${this.querySummary.total}`)
+          .fontSize(34)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.primaryTextColor())
+        Text(this.t('lines'))
+          .fontSize(14)
+          .fontColor(this.secondaryTextColor())
+          .padding({ bottom: 6 })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Bottom)
+
+      Text(`${this.t('dnsTraffic')}: ${this.formatBytes(this.querySummary.totalDnsBytes)} (${this.t('requestBytes')} ${this.formatBytes(this.querySummary.requestBytes)} / ${this.t('responseBytes')} ${this.formatBytes(this.querySummary.responseBytes)})`)
+        .fontSize(12)
+        .fontColor(this.mutedTextColor())
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding(18)
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(20)
+    .shadow({ radius: 14, color: this.cardShadowTone() })
+    .onClick(() => {
+      // Expanding from the "recent DNS requests" card always lands on the
+      // "All" tab (the Allowed/Blocked cards above jump to their own tab).
+      this.openDnsSheetWithFilter('all');
+    })
+  }
+
+  @Builder
+  private DomainRankingCard() {
+    Column({ space: 12 }) {
+      Row() {
+        Text(this.t('domainLeaderboard'))
+          .fontSize(18)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+        Blank()
+        Text(this.t('clickToExpand'))
+          .fontSize(13)
+          .fontColor(this.accentBlueTone())
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Column({ space: 10 }) {
+        if (this.domainPreviewStats().length === 0) {
+          Text(this.t('noDnsLogsHint'))
+            .fontSize(13)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+        } else {
+          ForEach(this.domainPreviewStats(), (item: DomainQueryStats, index: number) => {
+            Column({ space: 6 }) {
+              Row({ space: 10 }) {
+                Text(`${index + 1}. ${item.domain}`)
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.primaryTextColor())
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(item.lastAction === 'blocked' ? this.t('blockedTag') : this.t('allowedTag'))
+                  .fontSize(10)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.queryActionBadgeTextTone(item.lastAction))
+                  .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                  .backgroundColor(this.queryActionBadgeSurfaceTone(item.lastAction))
+                  .border({ width: 1, color: this.queryActionBadgeBorderTone(item.lastAction) })
+                  .borderRadius(10)
+                  .shadow({ radius: 10, color: this.queryActionBadgeShadowTone(item.lastAction), offsetX: 0, offsetY: 3 })
+              }
+              .width('100%')
+
+              Text(`${this.t('queryCount')}: ${item.total}`)
+                .fontSize(12)
+                .fontColor(this.secondaryTextColor())
+                .width('100%')
+              Text(`${this.t('allowed')}: ${item.allowed} · ${this.t('blocked')}: ${item.blocked}`)
+                .fontSize(12)
+                .fontColor(this.secondaryTextColor())
+                .width('100%')
+              if (item.lastAction === 'blocked') {
+                Text(`${this.t('rulePrefix')}: ${item.lastRule || this.t('none')}`)
+                  .fontSize(12)
+                  .fontColor(this.secondaryTextColor())
+                  .width('100%')
+              }
+            }
+            .width('100%')
+            .padding(14)
+            .backgroundColor(this.sheetSecondarySurfaceTone())
+            .borderRadius(14)
+          }, (item: DomainQueryStats) => `${item.domain}_${item.total}_${item.totalDnsBytes}`)
+        }
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding(18)
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(20)
+    .shadow({ radius: 14, color: this.cardShadowTone() })
+    .onClick(() => {
+      this.domainSheetFeedbackText = '';
+      this.showDomainSheet = true;
+    })
+    .bindSheet(this.showDomainSheet, this.DomainLeaderboardSheet(), {
+      height: '92%',
+      backgroundColor: this.sheetSurfaceTone(),
+      showClose: false,
+      onDisappear: () => {
+        this.showDomainSheet = false;
+      }
+    })
+  }
+
+  @Builder
+  private EngineModePicker(height: number) {
+    Button(this.engineModeLabel() + ' ▾')
+      .enabled(this.canChangeFilterSettings())
+      .opacity(this.canChangeFilterSettings() ? 1 : 0.5)
+      .height(height)
+      .padding({ left: 11, right: 11 })
+      .fontSize(12)
+      .fontWeight(FontWeight.Medium)
+      .fontColor(this.selectedChipTextTone())
+      .backgroundColor(this.coolNeutralChipSurfaceTone())
+      .borderRadius(8)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .bindMenu([
+        {
+          value: this.tri('Lite engine', '轻量引擎', '輕量引擎'),
+          action: () => this.setEngineFullMode(false)
+        },
+        {
+          value: this.tri('Full engine', '完整引擎', '完整引擎'),
+          action: () => this.setEngineFullMode(true)
+        }
+      ])
+  }
+
+  @Builder
   private HomeTab() {
     Scroll(this.homeScroller) {
       Column({ space: 16 }) {
@@ -10156,31 +9952,7 @@ struct Index {
               .fontColor(this.secondaryTextColor())
             Blank()
             Row({ space: 10 }) {
-              Button(this.engineModeLabel() + ' ▾')
-                .enabled(!this.busy && !this.stopping)
-                .opacity((this.busy || this.stopping) ? 0.5 : 1)
-                .height(30)
-                .padding({ left: 11, right: 11 })
-                .fontSize(12)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.selectedChipTextTone())
-                .backgroundColor(this.coolNeutralChipSurfaceTone())
-                .borderRadius(8)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .bindMenu([
-                  {
-                    value: this.tri('⚡ Lite', '⚡ 轻量', '⚡ 輕量'),
-                    action: () => {
-                      this.setEngineFullMode(false);
-                    }
-                  },
-                  {
-                    value: this.tri('🔒 Full', '🔒 完整', '🔒 完整'),
-                    action: () => {
-                      this.setEngineFullMode(true);
-                    }
-                  }
-                ])
+              this.EngineModePicker(30)
               Row({ space: 6 }) {
                 Column() {}
                   .width(7)
@@ -10203,40 +9975,7 @@ struct Index {
           .width('100%')
           .alignItems(VerticalAlign.Center)
 
-          // Network mode (two-axis with the engine dropdown above): whole-device
-          // VPN, or pure DNS proxy that coexists with another VPN. Locked while
-          // running so the two modes never overlap.
-          Row() {
-            Button(this.t('modeVpn'))
-              .layoutWeight(1)
-              .height(34)
-              .fontSize(13)
-              .fontWeight(this.proxyModeEnabled ? FontWeight.Normal : FontWeight.Bold)
-              .fontColor(this.proxyModeEnabled ? this.secondaryTextColor() : '#FFFFFF')
-              .backgroundColor(this.proxyModeEnabled ? Color.Transparent : '#0099CC')
-              .borderRadius(9)
-              .enabled(!this.status.running && !this.dnsProxyRunning && !this.busy && !this.stopping)
-              .onClick(() => {
-                this.setNetworkProxyMode(false);
-              })
-            Button(this.t('modeDnsProxy'))
-              .layoutWeight(1)
-              .height(34)
-              .fontSize(13)
-              .fontWeight(this.proxyModeEnabled ? FontWeight.Bold : FontWeight.Normal)
-              .fontColor(this.proxyModeEnabled ? '#FFFFFF' : this.secondaryTextColor())
-              .backgroundColor(this.proxyModeEnabled ? '#0099CC' : Color.Transparent)
-              .borderRadius(9)
-              .enabled(!this.status.running && !this.dnsProxyRunning && !this.busy && !this.stopping)
-              .onClick(() => {
-                this.setNetworkProxyMode(true);
-              })
-          }
-          .width('100%')
-          .padding(3)
-          .backgroundColor(this.coolNeutralChipSurfaceTone())
-          .borderRadius(12)
-          .border({ width: 1, color: this.cardBorderTone() })
+          this.NetworkModeControl()
 
           Column({ space: 10 }) {
             Stack() {
@@ -10245,16 +9984,16 @@ struct Index {
                 .fontWeight(FontWeight.Bold)
                 .fontColor('#FFFFFF')
             }
-            .width(86)
-            .height(86)
-            .borderRadius(43)
+            .width(78)
+            .height(78)
+            .borderRadius(39)
             .shadow({ radius: 18, color: this.activeRunning() ? '#5910B981' : '#590099CC', offsetX: 0, offsetY: 6 })
             .linearGradient({
               angle: 135,
               colors: this.activeRunning()
                 ? (this.isDarkModeActive()
                     ? [['#10997D', 0.0], ['#047D5F', 1.0]]
-                    : [['#34D399', 0.0], ['#10B981', 1.0]])
+                    : [['#25BA8C', 0.0], ['#07936B', 1.0]])
                 : (this.isDarkModeActive()
                     ? [['#06B6D4', 0.0], ['#0891B2', 1.0]]
                     : [['#00D9FF', 0.0], ['#0099CC', 1.0]])
@@ -10268,7 +10007,7 @@ struct Index {
               .fontColor(this.primaryTextColor())
             Text(this.activeRunning()
               ? this.t('runningHint')
-              : (this.homeStarting() ? this.homeStartingHint() : this.t('stoppedHint')))
+              : (this.homeStarting() ? this.homeStartingHint() : this.homeStoppedHint()))
               .fontSize(13)
               .lineHeight(19)
               .fontColor(this.secondaryTextColor())
@@ -10280,59 +10019,7 @@ struct Index {
           .alignItems(HorizontalAlign.Center)
           .margin({ top: 4, bottom: 4 })
 
-          Button(this.stopping
-            ? this.tri('Stopping…', '停止中…', '停止中…')
-            : (this.busy ? this.t('working')
-              : (this.proxyModeEnabled
-                ? (this.dnsProxyRunning ? this.t('dnsProxyStop') : this.t('dnsProxyStart'))
-                : (this.status.running ? this.t('stopFilter') : this.t('startFilter')))))
-            .enabled(!this.busy && !this.stopping)
-            .width('100%')
-            .height(50)
-            .fontSize(16)
-            .fontWeight(FontWeight.Medium)
-            .backgroundColor((this.busy || this.stopping)
-              ? this.chipSurfaceTone()
-              : (this.activeRunning() ? '#10B981' : '#0099CC'))
-            .fontColor((this.busy || this.stopping) ? this.secondaryTextColor() : '#FFFFFF')
-            .borderRadius(16)
-            .shadow({ radius: 12, color: this.activeRunning() ? '#3310B981' : '#330099CC' })
-            .onClick(() => {
-              if (this.proxyModeEnabled) {
-                if (this.dnsProxyRunning) {
-                  this.stopDnsProxy().catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                } else {
-                  this.startDnsProxy().catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                }
-              } else {
-                if (this.status.running) {
-                  this.stopVpn().catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                } else {
-                  this.startVpn().catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                }
-              }
-            })
-
-          if (this.activeRunning() && !this.busy && !this.stopping) {
-            Button(this.t('restartFilter'))
-              .width('100%')
-              .height(44)
-              .fontSize(16)
-              .fontWeight(FontWeight.Medium)
-              .backgroundColor(this.softGreenTone())
-              .fontColor(this.accentGreenTone())
-              .borderRadius(14)
-              .border({ width: 1, color: this.cardBorderTone() })
-              .onClick(() => this.restartActiveFilter())
-          }
+          this.HomeActions()
 
           // DNS-proxy mode: show the local DNS address (TCP + UDP) + active engine
           // so the user can point their proxy app's DNS upstream at it.
@@ -10406,143 +10093,24 @@ struct Index {
         }
         .width('100%')
 
-        Column({ space: 10 }) {
-          Row() {
-            Text(this.t('recentDnsRequests'))
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.primaryTextColor())
-            Blank()
-            Text(this.t('clickToExpand'))
-              .fontSize(13)
-              .fontColor(this.accentBlueTone())
+        if (this.useSidebarLayout() && this.windowWidthVp >= 880) {
+          Row({ space: 12 }) {
+            Column() { this.DnsRequestsCard() }.layoutWeight(1)
+            Column() { this.DomainRankingCard() }.layoutWeight(1)
           }
+          .alignItems(VerticalAlign.Top)
           .width('100%')
-          .alignItems(VerticalAlign.Center)
-
-          Row({ space: 6 }) {
-            Text(`${this.querySummary.total}`)
-              .fontSize(34)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.primaryTextColor())
-            Text(this.t('lines'))
-              .fontSize(14)
-              .fontColor(this.secondaryTextColor())
-              .padding({ bottom: 6 })
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Bottom)
-
-          Text(`${this.t('dnsTraffic')}: ${this.formatBytes(this.querySummary.totalDnsBytes)} (${this.t('requestBytes')} ${this.formatBytes(this.querySummary.requestBytes)} / ${this.t('responseBytes')} ${this.formatBytes(this.querySummary.responseBytes)})`)
-            .fontSize(12)
-            .fontColor(this.mutedTextColor())
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
+        } else {
+          this.DnsRequestsCard()
+          this.DomainRankingCard()
         }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding(18)
-        .backgroundColor(this.cardSurfaceTone())
-        .borderRadius(20)
-        .shadow({ radius: 14, color: this.cardShadowTone() })
-        .onClick(() => {
-          // Expanding from the "recent DNS requests" card always lands on the
-          // "All" tab (the Allowed/Blocked cards above jump to their own tab).
-          this.openDnsSheetWithFilter('all');
-        })
-
-        Column({ space: 12 }) {
-          Row() {
-            Text(this.t('domainLeaderboard'))
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.primaryTextColor())
-            Blank()
-            Text(this.t('clickToExpand'))
-              .fontSize(13)
-              .fontColor(this.accentBlueTone())
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
-
-          Column({ space: 10 }) {
-            if (this.domainPreviewStats().length === 0) {
-              Text(this.t('noDnsLogsHint'))
-                .fontSize(13)
-                .fontColor(this.secondaryTextColor())
-                .width('100%')
-            } else {
-              ForEach(this.domainPreviewStats(), (item: DomainQueryStats, index: number) => {
-                Column({ space: 6 }) {
-                  Row({ space: 10 }) {
-                    Text(`${index + 1}. ${item.domain}`)
-                      .fontSize(15)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor(this.primaryTextColor())
-                      .layoutWeight(1)
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(item.lastAction === 'blocked' ? this.t('blockedTag') : this.t('allowedTag'))
-                      .fontSize(10)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor(this.queryActionBadgeTextTone(item.lastAction))
-                      .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                      .backgroundColor(this.queryActionBadgeSurfaceTone(item.lastAction))
-                      .border({ width: 1, color: this.queryActionBadgeBorderTone(item.lastAction) })
-                      .borderRadius(10)
-                      .shadow({ radius: 10, color: this.queryActionBadgeShadowTone(item.lastAction), offsetX: 0, offsetY: 3 })
-                  }
-                  .width('100%')
-
-                  Text(`${this.t('queryCount')}: ${item.total}`)
-                    .fontSize(12)
-                    .fontColor(this.secondaryTextColor())
-                    .width('100%')
-                  Text(`${this.t('allowed')}: ${item.allowed} · ${this.t('blocked')}: ${item.blocked}`)
-                    .fontSize(12)
-                    .fontColor(this.secondaryTextColor())
-                    .width('100%')
-                  if (item.lastAction === 'blocked') {
-                    Text(`${this.t('rulePrefix')}: ${item.lastRule || this.t('none')}`)
-                      .fontSize(12)
-                      .fontColor(this.secondaryTextColor())
-                      .width('100%')
-                  }
-                }
-                .width('100%')
-                .padding(14)
-                .backgroundColor(this.sheetSecondarySurfaceTone())
-                .borderRadius(14)
-              }, (item: DomainQueryStats) => `${item.domain}_${item.total}_${item.totalDnsBytes}`)
-            }
-          }
-          .width('100%')
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding(18)
-        .backgroundColor(this.cardSurfaceTone())
-        .borderRadius(20)
-        .shadow({ radius: 14, color: this.cardShadowTone() })
-        .onClick(() => {
-          this.domainSheetFeedbackText = '';
-          this.showDomainSheet = true;
-        })
-        .bindSheet(this.showDomainSheet, this.DomainLeaderboardSheet(), {
-          height: '92%',
-          backgroundColor: this.sheetSurfaceTone(),
-          showClose: false,
-          onDisappear: () => {
-            this.showDomainSheet = false;
-          }
-        })
       }
       .width('100%')
       .constraintSize({ minHeight: '100%' })
       .justifyContent(FlexAlign.Start)
       .alignItems(HorizontalAlign.Start)
-      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
+      .padding({ left: this.contentSideInset(), right: this.contentSideInset(), top: 8,
+        bottom: this.contentBottomInset() })
       // Bound on the shared parent (ancestor of the Allowed/Blocked cards and the
       // recent-requests card) so any of them opens it reliably — a cross-component
       // bindSheet anchored on one sibling card was flaky when triggered from another.
@@ -10563,10 +10131,270 @@ struct Index {
   }
 
   @Builder
+  private ConfigSegment(online: boolean, title: string) {
+    Button(title)
+      .layoutWeight(1)
+      .height(36)
+      .fontColor(this.configOnlineTab === online ? this.selectedChipTextTone() : this.secondaryTextColor())
+      .backgroundColor(this.configOnlineTab === online ? this.cardSurfaceTone() : Color.Transparent)
+      .borderRadius(9)
+      .onClick(() => {
+        this.configOnlineTab = online;
+        this.showImportMenu = false;
+        this.configScroller.scrollEdge(Edge.Top);
+      })
+  }
+
+  @Builder
+  private SubscriptionImportForm() {
+    Column({ space: 9 }) {
+      if (this.fullModeEnabled) {
+        TextInput({ text: this.subAddNameInput,
+          placeholder: this.tri('Custom name (optional)', '备注名称（可选）', '備註名稱（可選）') })
+          .width('100%')
+          .height(42)
+          .fontSize(14)
+          .maxLength(100)
+          .backgroundColor(this.softPanelTone())
+          .borderRadius(10)
+          .onChange((value: string) => { this.subAddNameInput = value; })
+        Row({ space: 8 }) {
+          TextInput({ text: this.subAddUrlInput, placeholder: 'https://example.com/list.txt' })
+            .layoutWeight(1)
+            .height(42)
+            .fontSize(14)
+            .backgroundColor(this.softPanelTone())
+            .borderRadius(10)
+            .onChange((value: string) => { this.subAddUrlInput = value; })
+          Button(this.tri('Import', '导入', '匯入'))
+            .height(42)
+            .backgroundColor(this.actionTone())
+            .fontColor(Color.White)
+            .borderRadius(10)
+            .onClick(() => {
+              this.addFilterSubscription(this.subAddNameInput, this.subAddUrlInput);
+            })
+        }
+        .width('100%')
+        if (this.subFeedbackText.length > 0) {
+          Text(this.subFeedbackText).fontSize(12).fontColor(this.selectedChipTextTone()).width('100%')
+        }
+      } else {
+        Text(this.tri('Online subscriptions require the full engine.', '在线订阅需要完整引擎。', '線上訂閱需要完整引擎。'))
+          .fontSize(13)
+          .fontColor(this.secondaryTextColor())
+          .width('100%')
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  private ConfigAction(label: string, action: () => void) {
+    Button(label)
+      .height(34)
+      .padding({ left: 11, right: 11 })
+      .fontSize(12)
+      .fontWeight(FontWeight.Medium)
+      .fontColor(this.selectedChipTextTone())
+      .backgroundColor(this.selectedChipSurfaceTone())
+      .borderRadius(9)
+      .onClick(action)
+  }
+
+  @Builder
+  private ConfigSectionTitle(title: string) {
+    Text(title)
+      .fontSize(16)
+      .fontWeight(FontWeight.Bold)
+      .fontColor(this.primaryTextColor())
+      .maxLines(2)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+  }
+
+  @Builder
+  private RuleProfileCard(profile: RuleProfile) {
+    Row({ space: 8 }) {
+      Row({ space: 8 }) {
+        this.MeLinkIcon($r('sys.symbol.doc_text'))
+        Column({ space: 3 }) {
+          Text(profile.name)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.ruleProfileCountText(profile))
+            .fontSize(12)
+            .fontColor(this.secondaryTextColor())
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+      }
+      .layoutWeight(1)
+      .constraintSize({ minHeight: 44 })
+      .onClick(() => this.openRuleEditor(profile.id))
+
+      Toggle({ type: ToggleType.Switch, isOn: profile.enabled })
+        .selectedColor(this.actionTone())
+        .accessibilityText(profile.name)
+        .onChange((value: boolean) => this.toggleRuleProfileEnabled(profile.id, value))
+
+      if (profile.builtIn) {
+        Button(this.t('editRule'))
+          .width(48)
+          .height(44)
+          .padding(0)
+          .fontSize(12)
+          .fontColor(this.accentBlueTone())
+          .backgroundColor(Color.Transparent)
+          .onClick(() => this.openRuleEditor(profile.id))
+      } else {
+        Button('···')
+          .width(48)
+          .height(44)
+          .padding(0)
+          .fontSize(20)
+          .fontColor(this.secondaryTextColor())
+          .backgroundColor(Color.Transparent)
+          .accessibilityText(this.tri('Rule actions', '规则操作', '規則操作'))
+          .bindMenu([
+            { value: this.t('editRule'), action: () => this.openRuleEditor(profile.id) },
+            { value: this.t('deleteRule'), action: () => this.confirmDeleteRuleProfile(profile.id) }
+          ])
+      }
+    }
+    .width('100%')
+    .constraintSize({ minHeight: 72 })
+    .padding(10)
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(13)
+    .border({ width: 1, color: this.cardBorderTone() })
+  }
+
+  @Builder
+  private RuleProfileGrid(profiles: RuleProfile[]) {
+    GridRow(CONFIG_GRID) {
+      ForEach(profiles, (profile: RuleProfile) => {
+        GridCol() {
+          this.RuleProfileCard(profile)
+        }
+      }, (profile: RuleProfile) => this.ruleProfileRenderKey(profile))
+    }
+    .width('100%')
+  }
+
+  @Builder
+  private ConfigRuleSections() {
+    if (this.ruleProfiles.some((profile: RuleProfile) => profile.builtIn)) {
+      Column({ space: 8 }) {
+        this.ConfigSectionTitle(this.tri('Built-in rules', '内置规则', '內建規則'))
+        this.RuleProfileGrid(this.ruleProfiles.filter((profile: RuleProfile) => profile.builtIn))
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+    }
+
+    Column({ space: 8 }) {
+      this.ConfigSectionTitle(this.tri('Imported rules', '导入的规则', '匯入的規則'))
+      if (this.ruleProfiles.some((profile: RuleProfile) => !profile.builtIn)) {
+        this.RuleProfileGrid(this.ruleProfiles.filter((profile: RuleProfile) => !profile.builtIn))
+      } else {
+        Row({ space: 8 }) {
+          this.MeLinkIcon($r('sys.symbol.doc_text'))
+          Text(this.tri('No imported rules', '还没有导入的规则', '還沒有匯入的規則'))
+            .fontSize(13)
+            .fontColor(this.secondaryTextColor())
+            .layoutWeight(1)
+          this.ConfigAction(this.t('importFile'), () => {
+            this.importRulesFile().catch((err: BusinessError) => {
+              this.errorText = this.errorMessage(err);
+            });
+          })
+        }
+        .width('100%')
+        .constraintSize({ maxWidth: 430 })
+        .padding(10)
+        .backgroundColor(this.cardSurfaceTone())
+        .borderRadius(13)
+        .border({ width: 1, color: this.cardBorderTone() })
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private ConfigOnlineSections() {
+    Column({ space: 8 }) {
+      Row({ space: 6 }) {
+        Column() {
+          this.ConfigSectionTitle(this.tri('My subscriptions', '我的订阅', '我的訂閱'))
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        if (this.filterSubscriptions.length > 0) {
+          this.ConfigAction(this.tri('Refresh', '刷新', '重新整理'), () => { void this.refreshAllSubscriptions(false); })
+          this.ConfigAction(this.tri('Check', '检测', '檢測'), () => { void this.refreshAllSubscriptions(true); })
+        }
+      }
+      .width('100%')
+      if (this.filterSubscriptions.length === 0) {
+        Row({ space: 8 }) {
+          this.MeLinkIcon($r('sys.symbol.link'))
+          Text(this.tri('No subscriptions yet', '还没有在线订阅', '還沒有線上訂閱'))
+            .fontSize(13)
+            .fontColor(this.secondaryTextColor())
+            .layoutWeight(1)
+          this.ConfigAction(this.tri('Add', '添加', '新增'), () => {
+            this.showImportMenu = true;
+            this.configScroller.scrollEdge(Edge.Top);
+          })
+        }
+        .width('100%')
+        .constraintSize({ maxWidth: 430 })
+        .padding(10)
+        .backgroundColor(this.cardSurfaceTone())
+        .borderRadius(13)
+        .border({ width: 1, color: this.cardBorderTone() })
+      } else {
+        GridRow(CONFIG_GRID) {
+          ForEach(this.mySubscriptionsToShow(), (s: FilterSubscription) => {
+            GridCol() {
+              this.MySubscriptionRow(s)
+            }
+          }, (s: FilterSubscription) => JSON.stringify(s))
+        }
+        .width('100%')
+        if (this.filterSubscriptions.length > 4) {
+          this.ConfigAction(this.showAllMySubscriptions ? this.tri('Show fewer', '收起', '收起')
+            : this.tri('Show all', '查看全部', '查看全部'), () => {
+            this.showAllMySubscriptions = !this.showAllMySubscriptions;
+          })
+        }
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
   private ConfigTab() {
     Scroll(this.configScroller) {
       Column({ space: 16 }) {
-        // Title and the "+" quick-import toggle live in the immersive title bar.
+        Row({ space: 4 }) {
+          this.ConfigSegment(false, this.tri('Custom rules', '自定义规则', '自訂規則'))
+          this.ConfigSegment(true, this.tri('Online subscriptions', '在线订阅', '線上訂閱'))
+        }
+        .width('100%')
+        .constraintSize({ maxWidth: 380 })
+        .padding(4)
+        .backgroundColor(this.softPanelTone())
+        .borderRadius(13)
+        .border({ width: 1, color: this.cardBorderTone() })
+
         if (this.configFeedbackText.length > 0) {
           Text(this.configFeedbackText)
             .fontSize(12)
@@ -10576,11 +10404,11 @@ struct Index {
             .padding({ left: 4, right: 4 })
         }
 
-        // ===== Quick import menu (toggled by the + button) =====
         if (this.showImportMenu) {
           Column({ space: 10 }) {
             Row() {
-              Text(this.tri('📥 Quick import', '📥 快速导入', '📥 快速匯入'))
+              Text(this.configOnlineTab ? this.tri('Add subscription', '添加订阅', '新增訂閱')
+                : this.tri('Quick import', '快速导入', '快速匯入'))
                 .fontSize(14)
                 .fontWeight(FontWeight.Bold)
                 .fontColor(this.primaryTextColor())
@@ -10599,383 +10427,302 @@ struct Index {
             .width('100%')
             .alignItems(VerticalAlign.Center)
 
-            Row({ space: 8 }) {
-              Text(this.tri('Import from file', '从文件导入', '從檔案匯入'))
-                .fontSize(14)
-                .fontColor(this.primaryTextColor())
-                .layoutWeight(1)
-              Button(this.tri('Choose', '选择', '選擇'), { type: ButtonType.Normal })
-                .width(84)
-                .height(42)
-                .fontSize(14)
-                .fontWeight(FontWeight.Medium)
-                .backgroundColor(this.softBlueTone())
-                .fontColor(this.primaryTextColor())
-                .borderRadius(12)
-                .onClick(() => {
-                  this.showImportMenu = false;
-                  this.importRulesFile().catch((err: BusinessError) => {
-                    this.errorText = this.errorMessage(err);
-                  });
-                })
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Center)
-
-            Row({ space: 8 }) {
-              Text(this.tri('Import from clipboard', '从剪贴板导入', '從剪貼簿匯入'))
-                .fontSize(14)
-                .fontColor(this.primaryTextColor())
-                .layoutWeight(1)
-              PasteButton({ text: PasteDescription.PASTE, buttonType: ButtonType.Normal })
-                .width(84)
-                .height(42)
-                .fontSize(14)
-                .fontWeight(FontWeight.Medium)
-                .backgroundColor(this.softBlueTone())
-                .fontColor(this.primaryTextColor())
-                .borderRadius(12)
-                .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
-                  if (result === PasteButtonOnClickResult.SUCCESS) {
-                    void this.importRulesFromClipboard();
-                  }
-                })
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Center)
-
-            Row({ space: 8 }) {
-              TextInput({ text: this.subAddUrlInput, placeholder: 'https://example.com/list.txt' })
-                .layoutWeight(1)
-                .height(42)
-                .fontSize(14)
-                .backgroundColor(this.softPanelTone())
-                .borderRadius(12)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .padding({ left: 12, right: 12 })
-                .onChange((value: string) => {
-                  this.subAddUrlInput = value;
-                })
-              Button(this.tri('🔗 Add', '🔗 导入', '🔗 匯入'))
-                .type(ButtonType.Normal)
-                .height(42)
-                .padding({ left: 14, right: 14 })
-                .fontSize(14)
-                .fontWeight(FontWeight.Medium)
-                .backgroundColor(this.accentBlueTone())
-                .fontColor('#FFFFFF')
-                .borderRadius(12)
-                .onClick(() => {
-                  this.addFilterSubscription('', this.subAddUrlInput);
-                })
-            }
-            .width('100%')
-
-            if (this.subFeedbackText.length > 0) {
-              Text(this.subFeedbackText)
-                .fontSize(12)
-                .fontColor(this.accentBlueTone())
-                .fontWeight(FontWeight.Medium)
-                .width('100%')
-            }
-
-            Text(this.tri('📚 Browse online library — see Recommended lists below',
-              '📚 浏览在线库：见下方「推荐规则库」', '📚 瀏覽線上庫：見下方「推薦規則庫」'))
-              .fontSize(12)
-              .fontColor(this.mutedTextColor())
-              .width('100%')
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding(16)
-          .backgroundColor(this.cardSurfaceTone())
-          .borderRadius(20)
-          .shadow({ radius: 14, color: this.cardShadowTone() })
-        }
-
-        // ===== Overview stats =====
-        Column({ space: 10 }) {
-          Text(this.tri('OVERVIEW', '概览统计', '概覽統計'))
-            .fontSize(11)
-            .fontWeight(FontWeight.Bold)
-            .letterSpacing(1.5)
-            .fontColor(this.selectedChipTextTone())
-            .width('100%')
-          Row({ space: 10 }) {
-            this.OverviewStatCell({ label: this.tri('Enabled rules', '已启用规则', '已啟用規則'),
-              value: `${this.enabledRuleProfileCount() + this.enabledSubscriptionCount()}`, valueColor: this.accentGreenTone() })
-            this.OverviewStatCell({ label: this.tri('Local · Subs', '本地 · 订阅', '本地 · 訂閱'),
-              value: `${this.ruleProfiles.length} · ${this.filterSubscriptions.length}`, valueColor: this.primaryTextColor() })
-          }
-          .width('100%')
-          Row({ space: 10 }) {
-            this.OverviewStatCell({ label: this.tri('Blocked', '已拦截', '已攔截'),
-              value: `${this.displayBlocked()}`, valueColor: this.isDarkModeActive() ? '#FF8A8A' : '#D14343' })
-            this.OverviewStatCell({ label: this.tri('Allowed', '已放行', '已放行'),
-              value: `${this.displayAllowed()}`, valueColor: this.accentGreenTone() })
-          }
-          .width('100%')
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding(18)
-        .backgroundColor(this.cardSurfaceTone())
-        .borderRadius(20)
-        .shadow({ radius: 14, color: this.cardShadowTone() })
-
-        if (this.ruleProfiles.length === 0) {
-          Column({ space: 14 }) {
-            Stack() {
-              Text('⚙')
-                .fontSize(30)
-                .fontColor(this.accentBlueTone())
-            }
-            .width(64)
-            .height(64)
-            .borderRadius(32)
-            .backgroundColor(this.softBlueTone())
-
-            Text(this.t('noRuleProfiles'))
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.primaryTextColor())
-            Text(this.t('noRuleProfilesHint'))
-              .fontSize(13)
-              .lineHeight(20)
-              .textAlign(TextAlign.Center)
-              .fontColor(this.secondaryTextColor())
-            Button(this.t('importFile'))
-              .height(46)
-              .margin({ top: 4 })
-              .padding({ left: 28, right: 28 })
-              .fontSize(16)
-              .fontWeight(FontWeight.Medium)
-              .backgroundColor(this.accentBlueTone())
-              .fontColor('#FFFFFF')
-              .borderRadius(14)
-              .shadow({ radius: 12, color: '#33255DFF' })
-              .onClick(() => {
-                this.importRulesFile().catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
-              })
-          }
-          .width('100%')
-          .margin({ top: 4 })
-          .padding({ left: 24, right: 24, top: 40, bottom: 40 })
-          .alignItems(HorizontalAlign.Center)
-          .backgroundColor(this.cardSurfaceTone())
-          .borderRadius(20)
-          .shadow({ radius: 14, color: this.cardShadowTone() })
-        } else {
-          Text(this.tri('MY RULES', '我的规则', '我的規則'))
-            .fontSize(11)
-            .fontWeight(FontWeight.Bold)
-            .letterSpacing(1.5)
-            .fontColor(this.selectedChipTextTone())
-            .width('100%')
-            .margin({ top: 4, bottom: 2 })
-
-          Column({ space: 12 }) {
-            ForEach(this.ruleProfiles, (profile: RuleProfile, index: number) => {
-              Column({ space: 10 }) {
-                Row({ space: 10 }) {
-                  Column({ space: 4 }) {
-                    Text(profile.name)
-                      .fontSize(17)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor(this.primaryTextColor())
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(this.ruleProfileMetaText(profile))
-                      .fontSize(12)
-                      .fontColor(this.secondaryTextColor())
-                  }
+            if (this.configOnlineTab) {
+              this.SubscriptionImportForm()
+            } else {
+              Row({ space: 8 }) {
+                Text(this.tri('Import from file', '从文件导入', '從檔案匯入'))
+                  .fontSize(14)
+                  .fontColor(this.primaryTextColor())
                   .layoutWeight(1)
-                  .alignItems(HorizontalAlign.Start)
-
-                  Toggle({ type: ToggleType.Switch, isOn: profile.enabled })
-                    .selectedColor(this.accentBlueTone())
-                    .onChange((value: boolean) => {
-                      this.toggleRuleProfileEnabled(profile.id, value);
-                    })
-                }
-                .width('100%')
-
-                Row({ space: 8 }) {
-                  Button(this.t('editRule'))
-                    .height(36)
-                    .layoutWeight(1)
-                    .fontSize(14)
-                    .backgroundColor(this.softBlueTone())
-                    .fontColor(this.selectedChipTextTone())
-                    .borderRadius(12)
-                    .onClick(() => {
-                      this.openRuleEditor(profile.id);
-                    })
-                  Button(this.t('deleteRule'))
-                    .enabled(!profile.builtIn)
-                    .height(36)
-                    .layoutWeight(1)
-                    .fontSize(14)
-                    .backgroundColor(this.softRedTone())
-                    .fontColor(this.isDarkModeActive() ? '#FF8A8A' : '#B42318')
-                    .borderRadius(12)
-                    .onClick(() => {
-                      this.confirmDeleteRuleProfile(profile.id);
-                    })
-                }
-                .width('100%')
+                Button(this.tri('Choose', '选择', '選擇'), { type: ButtonType.Normal })
+                  .width(84)
+                  .height(42)
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+                  .backgroundColor(this.softBlueTone())
+                  .fontColor(this.primaryTextColor())
+                  .borderRadius(12)
+                  .onClick(() => {
+                    this.showImportMenu = false;
+                    this.importRulesFile().catch((err: BusinessError) => {
+                      this.errorText = this.errorMessage(err);
+                    });
+                  })
               }
               .width('100%')
-              .alignItems(HorizontalAlign.Start)
-              .padding({ left: 16, right: 16, top: 18, bottom: 18 })
-              .backgroundColor(this.cardSurfaceTone())
-              .borderRadius(18)
-              .shadow({ radius: 14, color: this.cardShadowTone() })
-            }, (profile: RuleProfile) => this.ruleProfileRenderKey(profile))
-          }
-          .width('100%')
-          .margin({ top: 4 })
-        }
+              .alignItems(VerticalAlign.Center)
 
-        // ===== My subscriptions (imported + subscribed online lists) =====
-        Column({ space: 10 }) {
-          Row({ space: 10 }) {
-            Column({ space: 2 }) {
-              Text(this.tri('📡 My subscriptions', '📡 我的订阅', '📡 我的訂閱'))
-                .fontSize(11)
-                .fontWeight(FontWeight.Bold)
-                .letterSpacing(1.5)
-                .fontColor(this.selectedChipTextTone())
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-
-            // Refresh = re-download all lists; Check = re-download + report how many
-            // are usable. Both update each list's cache and ✓/✗ status.
-            if (this.filterSubscriptions.length > 0) {
-              Text(this.tri('🔄 Refresh', '🔄 刷新', '🔄 刷新'))
-                .fontSize(12)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.selectedChipTextTone())
-                .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-                .backgroundColor(this.coolNeutralChipSurfaceTone())
-                .borderRadius(10)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .onClick(() => {
-                  void this.refreshAllSubscriptions(false);
-                })
-              Text(this.tri('🩺 Check', '🩺 检测', '🩺 檢測'))
-                .fontSize(12)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.selectedChipTextTone())
-                .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-                .backgroundColor(this.coolNeutralChipSurfaceTone())
-                .borderRadius(10)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .margin({ left: 6 })
-                .onClick(() => {
-                  void this.refreshAllSubscriptions(true);
-                })
-            }
-
-            if (this.filterSubscriptions.length > 4) {
-              Text(this.showAllMySubscriptions
-                  ? this.tri('Collapse ▲', '收起 ▲', '收起 ▲')
-                  : this.tri(`Show all (${this.filterSubscriptions.length}) ▼`,
-                      `全部 (${this.filterSubscriptions.length}) ▼`,
-                      `全部 (${this.filterSubscriptions.length}) ▼`))
-                .fontSize(12)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.selectedChipTextTone())
-                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                .backgroundColor(this.coolNeutralChipSurfaceTone())
-                .borderRadius(10)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .onClick(() => {
-                  this.showAllMySubscriptions = !this.showAllMySubscriptions;
-                })
-            }
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
-
-          if (this.filterSubscriptions.length === 0) {
-            Text(this.tri('No subscriptions yet. Import a config, or subscribe to a list below.',
-              '暂无订阅。可导入配置，或在下方「推荐规则库」订阅。',
-              '尚無訂閱。可匯入設定，或在下方「推薦規則庫」訂閱。'))
-              .fontSize(13)
-              .fontColor(this.secondaryTextColor())
+              Row({ space: 8 }) {
+                Text(this.tri('Import from clipboard', '从剪贴板导入', '從剪貼簿匯入'))
+                  .fontSize(14)
+                  .fontColor(this.primaryTextColor())
+                  .layoutWeight(1)
+                PasteButton({ text: PasteDescription.PASTE, buttonType: ButtonType.Normal })
+                  .width(84)
+                  .height(42)
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+                  .backgroundColor(this.softBlueTone())
+                  .fontColor(this.primaryTextColor())
+                  .borderRadius(12)
+                  .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
+                    if (result === PasteButtonOnClickResult.SUCCESS) {
+                      void this.importRulesFromClipboard();
+                    }
+                  })
+              }
               .width('100%')
-              .padding({ top: 6, bottom: 6 })
-          } else {
-            ForEach(this.mySubscriptionsToShow(), (s: FilterSubscription) => {
-              this.MySubscriptionRow(s)
-            }, (s: FilterSubscription) => `${s.id}`)
-          }
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .margin({ top: 8 })
-
-        // ===== Recommended rule libraries (collapsible, wired to real subscriptions) =====
-        Column({ space: 10 }) {
-          Row({ space: 10 }) {
-            Column({ space: 2 }) {
-              Text(this.tri('📚 Recommended lists', '📚 推荐规则库', '📚 推薦規則庫'))
-                .fontSize(11)
-                .fontWeight(FontWeight.Bold)
-                .letterSpacing(1.5)
-                .fontColor(this.selectedChipTextTone())
-              Text(this.tri('Full engine only · applied when filtering starts',
-                '仅完整引擎有效 · 启动过滤时生效', '僅完整引擎有效 · 啟動過濾時生效'))
-                .fontSize(11)
-                .fontColor(this.mutedTextColor())
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-
-            if (SUBSCRIPTION_PRESETS.length > 3) {
-              Text(this.showRecommendedLibrary
-                  ? this.tri('Collapse ▲', '收起 ▲', '收起 ▲')
-                  : this.tri(`Show more (${SUBSCRIPTION_PRESETS.length - 3}) ▼`,
-                      `查看更多 (${SUBSCRIPTION_PRESETS.length - 3}) ▼`,
-                      `查看更多 (${SUBSCRIPTION_PRESETS.length - 3}) ▼`))
-                .fontSize(12)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.selectedChipTextTone())
-                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                .backgroundColor(this.coolNeutralChipSurfaceTone())
-                .borderRadius(10)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .onClick(() => {
-                  this.showRecommendedLibrary = !this.showRecommendedLibrary;
-                })
+              .alignItems(VerticalAlign.Center)
             }
           }
           .width('100%')
-          .alignItems(VerticalAlign.Center)
-
-          ForEach(SUBSCRIPTION_PRESETS.slice(0, 3), (preset: SubscriptionPreset) => {
-            this.RecommendedPresetRow(preset)
-          }, (preset: SubscriptionPreset) => preset.url)
-
-          if (this.showRecommendedLibrary) {
-            ForEach(SUBSCRIPTION_PRESETS.slice(3), (preset: SubscriptionPreset) => {
-              this.RecommendedPresetRow(preset)
-            }, (preset: SubscriptionPreset) => preset.url)
-          }
+          .constraintSize({ maxWidth: 600 })
+          .alignItems(HorizontalAlign.Start)
+          .padding(14)
+          .backgroundColor(this.cardSurfaceTone())
+          .borderRadius(14)
+          .border({ width: 1, color: this.cardBorderTone() })
         }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .margin({ top: 8 })
+
+        if (this.configOnlineTab) {
+          this.ConfigOnlineSections()
+        } else {
+          this.ConfigRuleSections()
+        }
       }
       .width('100%')
       .constraintSize({ minHeight: '100%' })
       .justifyContent(FlexAlign.Start)
       .alignItems(HorizontalAlign.Start)
-      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
+      .padding({ left: this.contentSideInset(), right: this.contentSideInset(), top: 8,
+        bottom: this.contentBottomInset() })
+    }
+    .width('100%')
+    .height('100%')
+    .scrollBar(BarState.Off)
+    .clip(false)
+    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+  }
+
+  private mePageTitle(name: string): string {
+    switch (name) {
+      case ME_PAGE_PROTECTION: return this.tri('Protection settings', '防护设置', '防護設定');
+      case ME_PAGE_PREFERENCES: return this.tri('Appearance', '外观', '外觀');
+      case ME_PAGE_BACKGROUND: return this.tri('Background & notifications', '后台与通知', '背景與通知');
+      case ME_PAGE_DIAGNOSTICS: return this.tri('Logs & diagnostics', '日志与诊断', '日誌與診斷');
+      case ME_PAGE_SYNC: return this.tri('Sync & backup', '同步与备份', '同步與備份');
+      case ME_PAGE_ABOUT: return this.tri('About Home Cloud Shield', '关于栖云盾', '關於棲雲盾');
+      case ME_PAGE_NETWORK: return this.tri('Network routing', '网络接管', '網路接管');
+      case ME_PAGE_DNS: return this.tri('DNS resolution', 'DNS 解析', 'DNS 解析');
+      case ME_PAGE_WEB: return this.tri('Management dashboard', '管理面板', '管理面板');
+      default: return this.t('settingsTitle');
+    }
+  }
+
+  @Builder
+  private MeLink(p: MeLinkParam) {
+    if (p.tile) {
+      Column({ space: 6 }) {
+        Row() {
+          this.MeLinkIcon(p.icon)
+          Blank()
+          SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(13).fontColor([this.secondaryTextColor()])
+        }
+        .width('100%')
+        this.MeLinkLabel(p)
+      }
+      .layoutWeight(1)
+      .padding(12)
+      .alignItems(HorizontalAlign.Start)
+      .backgroundColor(this.cardSurfaceTone())
+      .borderRadius(16)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .onClick(() => this.openMeLink(p))
+    } else {
+      Row({ space: 10 }) {
+        this.MeLinkIcon(p.icon)
+        Column() {
+          this.MeLinkLabel(p)
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(13).fontColor([this.secondaryTextColor()])
+      }
+      .width('100%')
+      .constraintSize({ minHeight: 56 })
+      .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+      .onClick(() => this.openMeLink(p))
+    }
+  }
+
+  private openMeLink(p: MeLinkParam): void {
+    this.meStack.pushPathByName(p.name, null);
+  }
+
+  @Builder
+  private MeLinkIcon(icon: Resource) {
+    Stack() {
+      SymbolGlyph(icon).fontSize(17).fontColor([this.selectedChipTextTone()])
+    }
+    .width(32)
+    .height(32)
+    .backgroundColor(this.selectedChipSurfaceTone())
+    .borderRadius(9)
+  }
+
+  @Builder
+  private MeLinkLabel(p: MeLinkParam) {
+    Column({ space: 3 }) {
+      Text(this.mePageTitle(p.name))
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.primaryTextColor())
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text(p.description)
+        .fontSize(11)
+        .fontColor(this.secondaryTextColor())
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  private meThemeLabel(): string {
+    const palette = shieldPalette(this.paletteId);
+    return this.tri(palette.en, palette.zh, palette.hant);
+  }
+
+  @Builder
+  private MeTop() {
+    Column({ space: 10 }) {
+      Row({ space: 11 }) {
+        Image($r('app.media.foreground'))
+          .width(44)
+          .height(44)
+          .objectFit(ImageFit.Contain)
+          .backgroundColor(Color.White)
+          .borderRadius(12)
+        Column({ space: 3 }) {
+          Text(this.t('appTitle')).fontSize(17).fontWeight(FontWeight.Bold).fontColor(this.primaryTextColor())
+          Text(this.useWideMe()
+            ? this.tri('On-device DNS protection', '本地 DNS 防护', '本機 DNS 防護')
+            : this.tri('Version ', '版本 ', '版本 ') + this.appVersionName)
+            .fontSize(12).fontColor(this.secondaryTextColor())
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        if (!this.useWideMe()) {
+          Text(this.tri('About ›', '关于 ›', '關於 ›'))
+            .fontSize(12).fontColor(this.selectedChipTextTone())
+            .padding({ left: 9, right: 9, top: 6, bottom: 6 })
+            .borderRadius(8)
+            .backgroundColor(this.selectedChipSurfaceTone())
+        }
+      }
+      .width('100%')
+      .padding(12)
+      .backgroundColor(this.elevatedSurfaceTone())
+      .border({ width: 1, color: this.cardBorderTone() })
+      .borderRadius(16)
+      .onClick(() => {
+        if (!this.useWideMe()) {
+          this.meStack.pushPathByName(ME_PAGE_ABOUT, null);
+        }
+      })
+
+      Row({ space: 10 }) {
+        this.MeLink({ name: ME_PAGE_PROTECTION, icon: $r('sys.symbol.gearshape'), tile: true,
+          description: (this.proxyModeEnabled ? this.t('modeDnsProxy') : this.t('modeVpn')) + ' · ' + this.engineModeLabel() })
+        this.MeLink({ name: ME_PAGE_PREFERENCES, icon: $r('sys.symbol.sun_max'), tile: true,
+          description: this.meThemeLabel() })
+      }
+      .width('100%')
+    }
+    .width('100%')
+  }
+
+  @Builder
+  private MeLanguagePicker() {
+    Row({ space: 10 }) {
+      this.MeLinkIcon($r('sys.symbol.translation'))
+      Text(this.tri('Language', '语言', '語言'))
+        .layoutWeight(1)
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.primaryTextColor())
+      Button(this.t(this.language === 'en' ? 'langEn' :
+        (this.language === 'zhHant' ? 'langZhHant' : 'langZhHans')) + ' ▾')
+        .constraintSize({ minWidth: 86 })
+        .height(36)
+        .padding({ left: 11, right: 11 })
+        .fontSize(13)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.selectedChipTextTone())
+        .backgroundColor(this.coolNeutralChipSurfaceTone())
+        .borderRadius(8)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .bindMenu([
+          { value: this.t('langZhHans'), action: () => this.setLanguage('zhHans') },
+          { value: this.t('langEn'), action: () => this.setLanguage('en') },
+          { value: this.t('langZhHant'), action: () => this.setLanguage('zhHant') }
+        ])
+    }
+    .width('100%')
+    .constraintSize({ minHeight: 56 })
+    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+    .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
+  private MeManagement() {
+    Column() {
+      this.MeLanguagePicker()
+      Divider().color(this.cardBorderTone())
+      this.MeLink({ name: ME_PAGE_BACKGROUND, icon: $r('sys.symbol.bell'),
+        description: this.tri('Auto-start, keep-alive and notifications', '自动启动、保活与通知频率', '自動啟動、背景保活與通知頻率') })
+      Divider().color(this.cardBorderTone())
+      this.MeLink({ name: ME_PAGE_DIAGNOSTICS, icon: $r('sys.symbol.doc_text'),
+        description: this.logRetentionDays + this.tri(' days', ' 天', ' 天') + ' · ' + this.logMaxSizeMb + ' MB' })
+      Divider().color(this.cardBorderTone())
+      this.MeLink({ name: ME_PAGE_SYNC, icon: $r('sys.symbol.arrow_clockwise'),
+        description: this.tri('Device sync, JSON import and export', '设备同步、JSON 导入与导出', '裝置同步、JSON 匯入與匯出') })
+    }
+    .width('100%')
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(16)
+    .border({ width: 1, color: this.cardBorderTone() })
+  }
+
+  private useMeColumns(): boolean {
+    return this.useWideMe() && this.windowWidthVp - (this.useSidebarLayout() ? 170 : 0) >= 700;
+  }
+
+  @Builder
+  private MeTab() {
+    Scroll(this.meScroller) {
+      Column({ space: 12 }) {
+        if (this.useMeColumns()) {
+          Row({ space: 14 }) {
+            Column() { this.MeTop() }.layoutWeight(1)
+            Column() { this.MeManagement() }.layoutWeight(1)
+          }
+          .alignItems(VerticalAlign.Top)
+          .width('100%')
+        } else {
+          this.MeTop()
+          this.MeManagement()
+        }
+        if (this.useWideMe()) {
+          this.MeAbout()
+        }
+      }
+      .width('100%')
+      .constraintSize({ minHeight: '100%' })
+      .justifyContent(FlexAlign.Start)
+      .padding({ left: this.contentSideInset(), right: this.contentSideInset(), top: 8,
+        bottom: this.contentBottomInset() })
     }
     .width('100%')
     .height('100%')
@@ -10985,389 +10732,56 @@ struct Index {
   }
 
   @Builder
-  private MeTab() {
-    Scroll(this.meScroller) {
-      Column({ space: 16 }) {
-      // 🎨 外观
-      Column({ space: 8 }) {
-        this.SettingsGroupTitle({ text: this.tri('🎨 Appearance', '🎨 外观', '🎨 外觀') })
-        Column({ space: 12 }) {
-          Text(this.tri('Theme', '主题', '主題'))
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.primaryTextColor())
-            .width('100%')
-          Row({ space: 5 }) {
-            this.ThemeSegButton({ label: this.t('themeAuto'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET })
-            this.ThemeSegButton({ label: this.t('themeLight'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT })
-            this.ThemeSegButton({ label: this.t('themeDark'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_DARK })
-          }
-          .width('100%')
-          .padding(5)
-          .backgroundColor(this.softPanelTone())
-          .borderRadius(14)
-          .border({ width: 1, color: this.cardBorderTone() })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding(16)
-        .backgroundColor(this.elevatedSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(22)
-        .border({ width: 1, color: this.cardBorderTone() })
-        .shadow({ radius: 12, color: this.cardShadowTone() })
-        .linearGradient({
-          angle: 145,
-          colors: this.isDarkModeActive()
-            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-        })
+  private MeAboutItem(title: string, detail: string, action: string = '') {
+    Row({ space: 8 }) {
+      Column({ space: 4 }) {
+        Text(title).fontSize(13).fontWeight(FontWeight.Medium).fontColor(this.primaryTextColor())
+        Text(detail).fontSize(12).fontColor(this.secondaryTextColor()).maxLines(2)
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+      if (action.length > 0) {
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(13).fontColor([this.secondaryTextColor()])
+      }
+    }
+    .alignSelf(ItemAlign.Stretch)
+    .layoutWeight(this.useMeColumns() ? 1 : 0)
+    .padding(10)
+    .constraintSize({ minHeight: 54 })
+    .backgroundColor(this.softPanelTone())
+    .borderRadius(12)
+    .onClick(() => {
+      if (action === 'license') {
+        this.openLicensePage();
+      } else if (action === 'disclaimer') {
+        this.showDisclaimerSheet = true;
+      }
+    })
+  }
+
+  @Builder
+  private MeAbout() {
+    Column({ space: 10 }) {
+      if (this.useWideMe()) {
+        this.SettingsGroupTitle({ text: this.mePageTitle(ME_PAGE_ABOUT) })
+      }
+      Flex({ direction: this.useMeColumns() ? FlexDirection.Row : FlexDirection.Column, space: { main: LengthMetrics.vp(8) } }) {
+        this.MeAboutItem(this.tri('Version', '应用版本', '應用版本'), this.appVersionName)
+        this.MeAboutItem(this.t('openSource'), 'GPL-3.0-only', 'license')
+        this.MeAboutItem(this.tri('Disclaimer', '免责声明', '免責聲明'),
+          this.tri('DNS requests are processed on this device.', 'DNS 请求在本机处理', 'DNS 請求在本機處理'), 'disclaimer')
       }
       .width('100%')
-      .alignItems(HorizontalAlign.Start)
-
-      // ⚙️ 功能
-      Column({ space: 8 }) {
-        this.SettingsGroupTitle({ text: this.tri('⚙️ Features', '⚙️ 功能', '⚙️ 功能') })
-        Column() {
-          Row({ space: 12 }) {
-            this.SettingsIconText({ glyph: this.sectionGlyph('settings'), iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-              title: this.t('settingsTitle'), desc: this.t('settingsEntryHint') })
-            Text('›')
-              .fontSize(20)
-              .fontColor(this.secondaryTextColor())
-          }
-          .width('100%')
-          .padding({ top: 10, bottom: 10 })
-          .alignItems(VerticalAlign.Center)
-          .onClick(() => {
-            this.meStack.pushPathByName(ME_PAGE_SETTINGS, null);
-          })
-
-          Divider().strokeWidth(1).color(this.cardBorderTone())
-
-          Row({ space: 12 }) {
-            this.SettingsIconText({ glyph: '⊞', iconBg: this.isDarkModeActive() ? '#163238' : '#E3F6F9', iconFg: '#0891B2',
-              title: this.t('appSplitTitle'), desc: this.appSplitSummary() })
-            Text('›')
-              .fontSize(20)
-              .fontColor(this.secondaryTextColor())
-          }
-          .width('100%')
-          .padding({ top: 10, bottom: 10 })
-          .alignItems(VerticalAlign.Center)
-          .onClick(() => {
-            this.meStack.pushPathByName(ME_PAGE_APP_SPLIT, null);
-          })
-
-          Divider().strokeWidth(1).color(this.cardBorderTone())
-
-          Row({ space: 12 }) {
-            this.SettingsIconText({ glyph: '⚡', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-              title: this.t('autoStartFilter'), desc: this.t('autoStartFilterHint') })
-            Toggle({ type: ToggleType.Switch, isOn: this.autoStartFilterEnabled })
-              .onChange((value: boolean) => {
-                this.onAutoStartFilterChange(value).catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
-              })
-          }
-          .width('100%')
-          .padding({ top: 10, bottom: 10 })
-          .alignItems(VerticalAlign.Center)
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-        .backgroundColor(this.elevatedSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(22)
-        .border({ width: 1, color: this.cardBorderTone() })
-        .shadow({ radius: 12, color: this.cardShadowTone() })
-        .linearGradient({
-          angle: 145,
-          colors: this.isDarkModeActive()
-            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-        })
-      }
-      .width('100%')
-      .alignItems(HorizontalAlign.Start)
-
-      // 🔋 后台保活
-      Column({ space: 8 }) {
-        this.SettingsGroupTitle({ text: this.tri('🔋 Background', '🔋 后台保活', '🔋 背景保活') })
-        Column() {
-          Row({ space: 12 }) {
-            this.SettingsIconText({ glyph: '♪', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF8F2', iconFg: '#179160',
-              title: this.t('audioKeepAlive'), desc: this.t('audioKeepAliveHint') })
-            Toggle({ type: ToggleType.Switch, isOn: this.audioKeepAliveEnabled })
-              .selectedColor(this.accentGreenTone())
-              .onChange((value: boolean) => {
-                this.toggleAudioKeepAlive(value).catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
-              })
-          }
-          .width('100%')
-          .padding({ top: 10, bottom: 10 })
-          .alignItems(VerticalAlign.Center)
-
-          Divider().strokeWidth(1).color(this.cardBorderTone())
-
-          Row({ space: 12 }) {
-            this.SettingsIconText({ glyph: '◉', iconBg: this.isDarkModeActive() ? '#3A2E12' : '#FBEFD7', iconFg: '#C77E12',
-              title: this.t('locationKeepAlive'), desc: this.t('locationKeepAliveHint') })
-            Toggle({ type: ToggleType.Switch, isOn: this.locationKeepAliveEnabled })
-              .onChange((value: boolean) => {
-                this.onLocationKeepAliveChange(value).catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
-              })
-          }
-          .width('100%')
-          .padding({ top: 10, bottom: 10 })
-          .alignItems(VerticalAlign.Center)
-
-          Divider().strokeWidth(1).color(this.cardBorderTone())
-
-          Row({ space: 12 }) {
-            this.SettingsIconText({ glyph: '⇅', iconBg: this.isDarkModeActive() ? '#1E2E4A' : '#E8F1FE', iconFg: '#2F6FDB',
-              title: this.t('dataTransferKeepAlive'), desc: this.t('dataTransferKeepAliveHint') })
-            Toggle({ type: ToggleType.Switch, isOn: this.dataTransferKeepAliveEnabled })
-              .onChange((value: boolean) => {
-                this.onDataTransferKeepAliveChange(value).catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
-              })
-          }
-          .width('100%')
-          .padding({ top: 10, bottom: 10 })
-          .alignItems(VerticalAlign.Center)
-
-          if (this.keepAliveStatusText.length > 0) {
-            Text(this.keepAliveStatusText)
-              .fontSize(12)
-              .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.secondaryTextColor())
-              .width('100%')
-              .margin({ top: 4, bottom: 4 })
-          }
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-        .backgroundColor(this.elevatedSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(22)
-        .border({ width: 1, color: this.cardBorderTone() })
-        .shadow({ radius: 12, color: this.cardShadowTone() })
-        .linearGradient({
-          angle: 145,
-          colors: this.isDarkModeActive()
-            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-        })
-      }
-      .width('100%')
-      .alignItems(HorizontalAlign.Start)
-
-      // 🔔 通知栏
-      Column({ space: 8 }) {
-        this.SettingsGroupTitle({ text: this.t('notificationGroup') })
-        Column() {
-          Row({ space: 12 }) {
-            this.SettingsIconText({ glyph: '🔔', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-              title: this.t('persistentNotification'), desc: this.t('persistentNotificationHint') })
-            Toggle({ type: ToggleType.Switch, isOn: this.persistentNotificationEnabled })
-              .onChange((value: boolean) => {
-                this.onPersistentNotificationChange(value).catch((err: BusinessError) => {
-                  this.errorText = this.errorMessage(err);
-                });
-              })
-          }
-          .width('100%')
-          .padding({ top: 10, bottom: 10 })
-          .alignItems(VerticalAlign.Center)
-
-          if (this.persistentNotificationEnabled) {
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row({ space: 12 }) {
-              Column({ space: 2 }) {
-                Text(this.t('notificationRefreshInterval'))
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.primaryTextColor())
-                Text(this.t('notificationRefreshIntervalHint'))
-                  .fontSize(12)
-                  .lineHeight(17)
-                  .fontColor(this.secondaryTextColor())
-              }
-              .layoutWeight(1)
-              .alignItems(HorizontalAlign.Start)
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 6 })
-            .alignItems(VerticalAlign.Center)
-
-            Row({ space: 5 }) {
-              this.NotifyIntervalSegButton(1)
-              this.NotifyIntervalSegButton(2)
-              this.NotifyIntervalSegButton(3)
-              this.NotifyIntervalSegButton(4)
-              this.NotifyIntervalSegButton(5)
-            }
-            .width('100%')
-            .padding(5)
-            .margin({ bottom: 6 })
-            .backgroundColor(this.softPanelTone())
-            .borderRadius(14)
-            .border({ width: 1, color: this.cardBorderTone() })
-          }
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-        .backgroundColor(this.elevatedSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(22)
-        .border({ width: 1, color: this.cardBorderTone() })
-        .shadow({ radius: 12, color: this.cardShadowTone() })
-        .linearGradient({
-          angle: 145,
-          colors: this.isDarkModeActive()
-            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-        })
-      }
-      .width('100%')
-      .alignItems(HorizontalAlign.Start)
-
-      // ℹ️ 关于
-      Column({ space: 8 }) {
-        this.SettingsGroupTitle({ text: this.tri('ℹ️ About', 'ℹ️ 关于', 'ℹ️ 關於') })
-        Column() {
-          Row() {
-            Text(this.tri('Version', '版本', '版本'))
-              .fontSize(14)
-              .fontColor(this.secondaryTextColor())
-            Blank()
-            Text(`${this.appVersionName} (${this.appVersionCode})`)
-              .fontSize(14)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.primaryTextColor())
-          }
-          .width('100%')
-          .padding({ top: 11, bottom: 11 })
-          .alignItems(VerticalAlign.Center)
-
-          Divider().strokeWidth(1).color(this.cardBorderTone())
-
-          Row() {
-            Text(this.tri('Mode', '模式', '模式'))
-              .fontSize(14)
-              .fontColor(this.secondaryTextColor())
-            Blank()
-            Text(this.t('modeValue'))
-              .fontSize(14)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.primaryTextColor())
-          }
-          .width('100%')
-          .padding({ top: 11, bottom: 11 })
-          .alignItems(VerticalAlign.Center)
-
-          Divider().strokeWidth(1).color(this.cardBorderTone())
-
-          Row() {
-            Text('IPv6 DNS')
-              .fontSize(14)
-              .fontColor(this.secondaryTextColor())
-            Blank()
-            Text(this.blockAaaa ? this.tri('Blocked', '已屏蔽', '已封鎖') : this.t('enabled'))
-              .fontSize(14)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.primaryTextColor())
-          }
-          .width('100%')
-          .padding({ top: 11, bottom: 11 })
-          .alignItems(VerticalAlign.Center)
-
-          Divider().strokeWidth(1).color(this.cardBorderTone())
-
-          Row() {
-            Text(this.t('openSource'))
-              .fontSize(14)
-              .fontColor(this.secondaryTextColor())
-            Blank()
-            Text(this.tri('View ›', '查看 ›', '查看 ›'))
-              .fontSize(14)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.accentBlueTone())
-          }
-          .width('100%')
-          .padding({ top: 11, bottom: 11 })
-          .alignItems(VerticalAlign.Center)
-          .onClick(() => {
-            this.openLicensePage();
-          })
-
-          Divider().strokeWidth(1).color(this.cardBorderTone())
-
-          Row() {
-            Text(this.tri('Disclaimer', '免责声明', '免責聲明'))
-              .fontSize(14)
-              .fontColor(this.secondaryTextColor())
-            Blank()
-            Text(this.tri('View ›', '查看 ›', '查看 ›'))
-              .fontSize(14)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.accentBlueTone())
-          }
-          .width('100%')
-          .padding({ top: 11, bottom: 11 })
-          .alignItems(VerticalAlign.Center)
-          .onClick(() => {
-            this.showDisclaimerSheet = true;
-          })
-          .bindSheet(this.showDisclaimerSheet, this.DisclaimerSheet(), {
-            height: '60%',
-            backgroundColor: this.sheetSurfaceTone(),
-            showClose: false,
-            onDisappear: () => {
-              this.showDisclaimerSheet = false;
-            }
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding({ left: 16, right: 16, top: 4, bottom: 4 })
-        .backgroundColor(this.elevatedSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-        .borderRadius(22)
-        .border({ width: 1, color: this.cardBorderTone() })
-        .shadow({ radius: 12, color: this.cardShadowTone() })
-        .linearGradient({
-          angle: 145,
-          colors: this.isDarkModeActive()
-            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-        })
-      }
-      .width('100%')
-      .alignItems(HorizontalAlign.Start)
-      }
-      .width('100%')
-      .constraintSize({ minHeight: '100%' })
-      .justifyContent(FlexAlign.Start)
-      .alignItems(HorizontalAlign.Start)
-      .padding({ left: 16, right: 16, top: 8, bottom: this.contentBottomInset() })
     }
     .width('100%')
-    .height('100%')
-    .scrollBar(BarState.Off)
-    .clip(false)
-    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+    .padding(14)
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(16)
+    .border({ width: 1, color: this.cardBorderTone() })
+    .bindSheet(this.showDisclaimerSheet, this.DisclaimerSheet(), {
+      height: '60%', backgroundColor: this.sheetSurfaceTone(), showClose: false,
+      onDisappear: () => { this.showDisclaimerSheet = false; }
+    })
   }
 
   @Builder
@@ -11436,935 +10850,1144 @@ struct Index {
   }
 
   @Builder
-  private SettingsSubPage() {
-    Scroll(this.settingsScroller) {
+  private SettingsSubPage(name: string) {
+    Scroll(this.meSectionScroller(name)) {
       Column({ space: 14 }) {
-        // ===== 🌍 语言 =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('🌍 Language', '🌍 语言', '🌍 語言') })
-          Column() {
-            Row({ space: 5 }) {
-              this.LangSegButton(this.t('langZhHans'), 'zhHans')
-              this.LangSegButton(this.t('langEn'), 'en')
-              this.LangSegButton(this.t('langZhHant'), 'zhHant')
-            }
-            .width('100%')
-            .padding(5)
-            .backgroundColor(this.softPanelTone())
-            .borderRadius(14)
-            .border({ width: 1, color: this.cardBorderTone() })
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding(12)
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
+        if (name === ME_PAGE_PROTECTION) {
+          this.ProtectionSettings()
+        } else if (name === ME_PAGE_PREFERENCES) {
+          this.AppearanceSettings()
+        } else if (name === ME_PAGE_BACKGROUND) {
+          this.BackgroundSettings()
+        } else if (name === ME_PAGE_DIAGNOSTICS) {
+          this.DiagnosticsSettings()
+        } else if (name === ME_PAGE_SYNC) {
+          this.ConfigSyncSettings()
+          this.BackupSettings()
+        } else if (name === ME_PAGE_ABOUT) {
+          this.MeAbout()
+        } else if (name === ME_PAGE_NETWORK) {
+          this.NetworkSettings()
+        } else if (name === ME_PAGE_DNS) {
+          this.DnsSettings()
+        } else if (name === ME_PAGE_WEB) {
+          this.WebSettings()
         }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // ===== 🛡️ 过滤规则 =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('🛡️ Filtering', '🛡️ 过滤规则', '🛡️ 過濾規則') })
-          Column() {
-            // Blocked services — works in both engines, always enabled.
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '✕', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.tri('Blocked services', '服务屏蔽', '服務屏蔽'),
-                desc: this.tri(`${this.blockedServiceIds.length} blocked`,
-                  `已屏蔽 ${this.blockedServiceIds.length} 个`, `已屏蔽 ${this.blockedServiceIds.length} 個`) })
-              Text('›')
-                .fontSize(20)
-                .fontColor(this.secondaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            .onClick(() => {
-              this.servicesSearchText = '';
-              this.detailServiceId = '';
-              this.showServicesSheet = true;
-            })
-            .bindContentCover(this.showServicesSheet, this.ServicesSheet(), {
-              modalTransition: ModalTransition.DEFAULT,
-              onDisappear: () => {
-                this.showServicesSheet = false;
-                this.detailServiceId = '';
-              }
-            })
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            // Online subscriptions — full engine only.
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '≋', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.tri('Online subscriptions', '在线规则订阅', '線上規則訂閱'),
-                desc: this.tri(`${this.enabledSubscriptionCount()} on / ${this.filterSubscriptions.length} total`,
-                  `已启用 ${this.enabledSubscriptionCount()} / 共 ${this.filterSubscriptions.length}`,
-                  `已啟用 ${this.enabledSubscriptionCount()} / 共 ${this.filterSubscriptions.length}`) })
-              Text('›')
-                .fontSize(20)
-                .fontColor(this.secondaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            .opacity(this.fullModeEnabled ? 1 : 0.4)
-            .onClick(() => {
-              if (!this.fullModeEnabled) {
-                this.notifyFullEngineRequired();
-                return;
-              }
-              this.subFeedbackText = '';
-              this.subAddNameInput = '';
-              this.subAddUrlInput = '';
-              this.showSubscriptionsSheet = true;
-            })
-            .bindContentCover(this.showSubscriptionsSheet, this.SubscriptionsSheet(), {
-              modalTransition: ModalTransition.DEFAULT,
-              onDisappear: () => {
-                this.showSubscriptionsSheet = false;
-              }
-            })
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            // DNS rewrites — full engine only.
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '◎', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.tri('DNS rewrites', 'DNS 重写', 'DNS 重寫'),
-                desc: this.tri(`${this.dnsRewrites.length} rewrites`,
-                  `共 ${this.dnsRewrites.length} 条`, `共 ${this.dnsRewrites.length} 條`) })
-              Text('›')
-                .fontSize(20)
-                .fontColor(this.secondaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            .opacity(this.fullModeEnabled ? 1 : 0.4)
-            .onClick(() => {
-              if (!this.fullModeEnabled) {
-                this.notifyFullEngineRequired();
-                return;
-              }
-              this.rewriteFeedbackText = '';
-              this.rewriteAddDomainInput = '';
-              this.rewriteAddAnswerInput = '';
-              this.showRewritesSheet = true;
-            })
-            .bindContentCover(this.showRewritesSheet, this.RewritesSheet(), {
-              modalTransition: ModalTransition.DEFAULT,
-              onDisappear: () => {
-                this.showRewritesSheet = false;
-              }
-            })
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            // Advanced DNS — full engine only.
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '⚙', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.tri('Advanced DNS', 'DNS 高级设置', 'DNS 進階設定'),
-                desc: `${this.blockingModeLabel(this.advancedDns.blockingMode)} · ${this.upstreamModeLabel(this.advancedDns.upstreamMode)}` })
-              Text('›')
-                .fontSize(20)
-                .fontColor(this.secondaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            .opacity(this.fullModeEnabled ? 1 : 0.4)
-            .onClick(() => {
-              if (!this.fullModeEnabled) {
-                this.notifyFullEngineRequired();
-                return;
-              }
-              this.cacheSizeInput = `${this.advancedDns.cacheSizeMb}`;
-              this.ratelimitInput = `${this.advancedDns.ratelimit}`;
-              this.showAdvancedDnsSheet = true;
-            })
-            .bindContentCover(this.showAdvancedDnsSheet, this.AdvancedDnsSheet(), {
-              modalTransition: ModalTransition.DEFAULT,
-              onDisappear: () => {
-                this.showAdvancedDnsSheet = false;
-              }
-            })
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            // AdGuardHome web dashboard service — full engine only. Off by
-            // default: the panel's HTTP server costs battery while running.
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '🌐', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.tri('Web dashboard service', 'Web 管理面板服务', 'Web 管理面板服務'),
-                desc: this.tri('Off saves battery · toggling restarts the filter',
-                  '默认关闭更省电 · 切换后自动重启过滤', '預設關閉更省電 · 切換後自動重啟過濾') })
-              Toggle({ type: ToggleType.Switch, isOn: this.aghWebEnabled })
-                .enabled(this.fullModeEnabled)
-                .onChange((value: boolean) => {
-                  this.updateAghWebEnabled(value);
-                })
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            .opacity(this.fullModeEnabled ? 1 : 0.4)
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            // AdGuardHome dashboard — full engine + dashboard service + running.
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '⌘', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.tri('AdGuardHome dashboard', 'AdGuardHome 管理面板', 'AdGuardHome 管理面板'),
-                desc: this.tri('Opens in browser · needs full engine running', '浏览器打开 · 需完整引擎并正在运行', '瀏覽器開啟 · 需完整引擎並正在執行') })
-              Text('↗')
-                .fontSize(18)
-                .fontColor(this.secondaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            // Enabled whenever the full engine is running with the dashboard
-            // service on, in either VPN or DNS-proxy mode.
-            .opacity(this.fullModeEnabled && this.aghWebEnabled && this.activeRunning() ? 1 : 0.4)
-            .onClick(() => {
-              if (!this.fullModeEnabled) {
-                this.notifyFullEngineRequired();
-                return;
-              }
-              if (!this.aghWebEnabled) {
-                try {
-                  this.ensurePromptAction()?.showToast({
-                    message: this.tri('Turn on the web dashboard service first',
-                      '请先开启 Web 管理面板服务', '請先開啟 Web 管理面板服務')
-                  });
-                } catch (_) {
-                }
-                return;
-              }
-              if (!this.activeRunning()) {
-                try {
-                  this.ensurePromptAction()?.showToast({
-                    message: this.tri('Start filtering first', '请先启动过滤', '請先啟動過濾')
-                  });
-                } catch (_) {
-                }
-                return;
-              }
-              this.openAghInBrowser();
-            })
-
-            if (!this.fullModeEnabled) {
-              Text(this.tri('Subscriptions / rewrites / advanced DNS / dashboard need the full engine — switch it on the Home page.',
-                '订阅 / 重写 / 高级 DNS / 管理面板 需完整引擎，请在首页切换。',
-                '訂閱 / 重寫 / 進階 DNS / 管理面板 需完整引擎，請在首頁切換。'))
-                .fontSize(11)
-                .lineHeight(16)
-                .fontColor(this.mutedTextColor())
-                .width('100%')
-                .margin({ top: 8, bottom: 4 })
-            }
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // ===== 💾 配置备份 =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.t('configBackupGroup') })
-          Column() {
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '⬇', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.t('importConfig'), desc: this.t('importConfigHint') })
-              Text('›')
-                .fontSize(20)
-                .fontColor(this.secondaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            .onClick(() => {
-              this.importConfigFile().catch((err: BusinessError) => {
-                this.errorText = this.errorMessage(err);
-              });
-            })
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row({ space: 12 }) {
-              this.SettingsIconText({ glyph: '⬆', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-                title: this.t('exportConfig'), desc: this.t('exportConfigHint') })
-              Text('›')
-                .fontSize(20)
-                .fontColor(this.secondaryTextColor())
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-            .onClick(() => {
-              this.exportConfigFile().catch((err: BusinessError) => {
-                this.errorText = this.errorMessage(err);
-              });
-            })
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        this.ConfigSyncSettings()
-
-        // ===== 🔗 上游 DNS =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('🔗 Upstream DNS', '🔗 上游 DNS', '🔗 上游 DNS') })
-          Column({ space: 10 }) {
-            // Auto upstream: follow the system/router DNS (VPN mode). The manual
-            // list below stays editable and is used as the fallback.
-            Row({ space: 12 }) {
-              Column({ space: 2 }) {
-                Text(this.t('upstreamAutoTitle'))
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.primaryTextColor())
-                Text(this.t('upstreamAutoHint'))
-                  .fontSize(12)
-                  .lineHeight(17)
-                  .fontColor(this.secondaryTextColor())
-              }
-              .layoutWeight(1)
-              .alignItems(HorizontalAlign.Start)
-              .opacity(this.upstreamAutoAvailable() ? 1 : 0.4)
-              Toggle({ type: ToggleType.Switch, isOn: this.upstreamAutoEnabled && this.upstreamAutoAvailable() })
-                .enabled(this.upstreamAutoAvailable())
-                .opacity(this.upstreamAutoAvailable() ? 1 : 0.4)
-                .onChange((value: boolean) => {
-                  this.onUpstreamAutoChange(value);
-                })
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Center)
-
-            // Proxy mode can't follow the system DNS — explain why it's greyed out.
-            if (!this.upstreamAutoAvailable()) {
-              Text(this.tri('Unavailable in DNS-proxy mode — the manual upstream below is used.',
-                '纯 DNS 代理模式下不可用，将使用下方手动填写的上游。',
-                '純 DNS 代理模式下不可用，將使用下方手動填寫的上游。'))
-                .fontSize(12)
-                .lineHeight(17)
-                .fontColor(this.mutedTextColor())
-                .width('100%')
-            } else if (this.upstreamAutoEnabled) {
-              Text(this.effectiveUpstreamDisplay().length > 0
-                ? this.t('upstreamAutoCurrent', this.effectiveUpstreamDisplay())
-                : this.t('upstreamAutoWaiting'))
-                .fontSize(12)
-                .lineHeight(17)
-                .fontColor(this.accentBlueTone())
-                .width('100%')
-              Divider().strokeWidth(1).color(this.cardBorderTone())
-            }
-
-            Text(this.t('upstreamDnsHint'))
-              .fontSize(12)
-              .lineHeight(18)
-              .fontColor(this.secondaryTextColor())
-              .width('100%')
-
-            TextArea({ text: this.upstreamDnsInput, placeholder: DEFAULT_UPSTREAM_DNS_IP })
-              .width('100%')
-              .height(80)
-              .fontSize(15)
-              .backgroundColor(this.sheetInputSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .borderRadius(14)
-              .border({ width: 1, color: this.sheetBorderTone() })
-              .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-              .onChange((value: string) => {
-                this.onUpstreamDnsInputChange(value);
-              })
-
-            Flex({ wrap: FlexWrap.Wrap }) {
-              Button('AliDNS')
-                .type(ButtonType.Normal)
-                .fontSize(13)
-                .fontColor(this.primaryTextColor())
-                .backgroundColor(this.softPanelTone())
-                .borderRadius(10)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                .margin({ right: 8, bottom: 8 })
-                .onClick(() => {
-                  this.addUpstreamPreset('223.5.5.5');
-                })
-              Button('DNSPod')
-                .type(ButtonType.Normal)
-                .fontSize(13)
-                .fontColor(this.primaryTextColor())
-                .backgroundColor(this.softPanelTone())
-                .borderRadius(10)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                .margin({ right: 8, bottom: 8 })
-                .onClick(() => {
-                  this.addUpstreamPreset('119.29.29.29');
-                })
-              Button('Baidu')
-                .type(ButtonType.Normal)
-                .fontSize(13)
-                .fontColor(this.primaryTextColor())
-                .backgroundColor(this.softPanelTone())
-                .borderRadius(10)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                .margin({ right: 8, bottom: 8 })
-                .onClick(() => {
-                  this.addUpstreamPreset('180.76.76.76');
-                })
-              Button('AdGuard')
-                .type(ButtonType.Normal)
-                .fontSize(13)
-                .fontColor(this.primaryTextColor())
-                .backgroundColor(this.softPanelTone())
-                .borderRadius(10)
-                .border({ width: 1, color: this.cardBorderTone() })
-                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                .margin({ right: 8, bottom: 8 })
-                .onClick(() => {
-                  this.addUpstreamPreset('94.140.14.14');
-                })
-            }
-            .width('100%')
-
-            // Encrypted upstreams (DoH/DoT) — only the full AdGuardHome engine can
-            // resolve these, so the row is greyed out and disabled on lite mode.
-            Text(this.t('upstreamDnsEncryptedLabel'))
-              .fontSize(12)
-              .fontColor(this.secondaryTextColor())
-              .opacity(this.fullModeEnabled ? 1 : 0.4)
-              .width('100%')
-            Flex({ wrap: FlexWrap.Wrap }) {
-              ForEach(this.upstreamEncryptedPresets(), (preset: UpstreamPreset) => {
-                Button(preset.label)
-                  .type(ButtonType.Normal)
-                  .fontSize(13)
-                  .fontColor(this.primaryTextColor())
-                  .backgroundColor(this.softPanelTone())
-                  .borderRadius(10)
-                  .border({ width: 1, color: this.cardBorderTone() })
-                  .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                  .margin({ right: 8, bottom: 8 })
-                  .enabled(this.fullModeEnabled)
-                  .opacity(this.fullModeEnabled ? 1 : 0.4)
-                  .onClick(() => {
-                    this.addUpstreamPreset(preset.value);
-                  })
-              }, (preset: UpstreamPreset) => preset.value)
-            }
-            .width('100%')
-
-            if (this.upstreamInputHasUnsupportedForLite()) {
-              Text(this.t('upstreamDnsLiteOnlyIp'))
-                .fontSize(12)
-                .lineHeight(18)
-                .fontColor(this.isDarkModeActive() ? '#F5A524' : '#B54708')
-                .width('100%')
-            }
-
-            Button(this.t('upstreamDnsApply'))
-              .type(ButtonType.Normal)
-              .width('100%')
-              .height(42)
-              .fontSize(15)
-              .fontColor(Color.White)
-              .backgroundColor(this.accentBlueTone())
-              .borderRadius(12)
-              .onClick(() => {
-                this.applyUpstreamDns(this.upstreamDnsInput);
-              })
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding(16)
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // ===== 🧩 DNS 代理端口 =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.t('dnsProxyPortTitle') })
-          Column({ space: 10 }) {
-            Text(this.t('dnsProxyPortHint'))
-              .fontSize(12)
-              .lineHeight(18)
-              .fontColor(this.secondaryTextColor())
-              .width('100%')
-
-            TextInput({ text: this.dnsProxyPort, placeholder: `${AGH_DNS_PORT}` })
-              .type(InputType.Number)
-              .width('100%')
-              .height(44)
-              .fontSize(15)
-              .enabled(!this.dnsProxyRunning)
-              .opacity(this.dnsProxyRunning ? 0.5 : 1)
-              .backgroundColor(this.sheetInputSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .borderRadius(14)
-              .border({ width: 1, color: this.sheetBorderTone() })
-              .padding({ left: 12, right: 12 })
-              .onChange((value: string) => {
-                this.onDnsProxyPortChange(value);
-              })
-
-            if (this.dnsProxyPortFeedback.length > 0) {
-              Text(this.dnsProxyPortFeedback)
-                .fontSize(12)
-                .fontColor('#C0392B')
-                .width('100%')
-            }
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding(16)
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // ===== 🖥️ AdGuardHome 面板端口 =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.t('aghPanelPortTitle') })
-          Column({ space: 10 }) {
-            Text(this.t('aghPanelPortHint'))
-              .fontSize(12)
-              .lineHeight(18)
-              .fontColor(this.secondaryTextColor())
-              .width('100%')
-
-            TextInput({ text: this.aghHttpPort, placeholder: `${AGH_HTTP_PORT}` })
-              .type(InputType.Number)
-              .width('100%')
-              .height(44)
-              .fontSize(15)
-              .enabled(!this.dnsProxyRunning && !this.status.running)
-              .opacity((this.dnsProxyRunning || this.status.running) ? 0.5 : 1)
-              .backgroundColor(this.sheetInputSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .borderRadius(14)
-              .border({ width: 1, color: this.sheetBorderTone() })
-              .padding({ left: 12, right: 12 })
-              .onChange((value: string) => {
-                this.onAghHttpPortChange(value);
-              })
-
-            if (this.aghHttpPortFeedback.length > 0) {
-              Text(this.aghHttpPortFeedback)
-                .fontSize(12)
-                .fontColor('#C0392B')
-                .width('100%')
-            }
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding(16)
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: 'VPN' })
-          Column({ space: 12 }) {
-            Row({ space: 12 }) {
-              this.SettingsIconText({
-                glyph: '⇄', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
-                title: this.tri('Full VPN (experimental)', '全量 VPN（实验）', '全量 VPN（實驗）'),
-                desc: this.appTunnelAvailable ?
-                  this.tri('Works with both DNS engines. Routes TCP and UDP in selected-app mode.',
-                    '轻量和完整模式均可使用。在「仅代理」模式下接管所选应用的 TCP 和 UDP。',
-                    '輕量與完整模式均可使用。在「僅代理」模式下接管所選應用程式的 TCP 和 UDP。') :
-                  this.tri('The tunnel core is unavailable in this build.', '当前安装包缺少全量 VPN 内核。',
-                    '目前的安裝套件缺少全量 VPN 核心。')
-              })
-              Toggle({ type: ToggleType.Switch, isOn: this.appTunnelEnabled && this.appTunnelAvailable })
-                .enabled(this.appTunnelAvailable && !this.proxyModeEnabled)
-                .onChange((enabled: boolean) => this.saveAppTunnel(enabled, false))
-            }
-            .width('100%')
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-            Row({ space: 12 }) {
-              this.SettingsIconText({
-                glyph: '6', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
-                title: this.tri('Block IPv6 DNS lookups', '屏蔽 IPv6 解析', '封鎖 IPv6 解析'),
-                desc: this.tri('Return an empty answer for AAAA queries and keep IPv4 DNS working.',
-                  '对 AAAA 查询返回空结果，IPv4 解析照常。', '對 AAAA 查詢傳回空結果，IPv4 解析照常。')
-              })
-              Toggle({ type: ToggleType.Switch, isOn: this.blockAaaa })
-                .enabled(this.canChangeFilterSettings())
-                .onChange((value: boolean) => this.updateIpv6Blocking(value, this.blockIpv6Connections))
-            }
-            .width('100%')
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-            Row({ space: 12 }) {
-              this.SettingsIconText({
-                glyph: '⊘', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
-                title: this.tri('Block IPv6 connections', '阻断 IPv6 连接', '阻擋 IPv6 連線'),
-                desc: this.tri('VPN only. Blocks IPv6 traffic from apps routed through this VPN.',
-                  '仅在 VPN 模式生效，阻断经过本 VPN 的应用发出的 IPv6 流量。',
-                  '僅在 VPN 模式生效，阻擋經過本 VPN 的應用程式送出的 IPv6 流量。')
-              })
-              Toggle({ type: ToggleType.Switch, isOn: this.blockIpv6Connections })
-                .enabled(this.canChangeFilterSettings() && !this.proxyModeEnabled)
-                .onChange((value: boolean) => this.updateIpv6Blocking(this.blockAaaa, value))
-            }
-            .width('100%')
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding(16)
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // ===== 💾 缓存 =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('💾 Cache', '💾 缓存', '💾 快取') })
-          Column() {
-            Row({ space: 12 }) {
-              Column({ space: 2 }) {
-                Text(this.language === 'en' ? `${this.t('dnsCacheTtlLabel')} (s)` : `${this.t('dnsCacheTtlLabel')}（秒）`)
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.primaryTextColor())
-                Text(this.t('dnsCacheHint'))
-                  .fontSize(12)
-                  .lineHeight(17)
-                  .fontColor(this.secondaryTextColor())
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-              }
-              .layoutWeight(1)
-              .alignItems(HorizontalAlign.Start)
-
-              TextInput({ text: this.dnsCacheTtlInput, placeholder: `${DEFAULT_DNS_CACHE_TTL_SECONDS}` })
-                .width(96)
-                .height(40)
-                .fontSize(15)
-                .textAlign(TextAlign.Center)
-                .backgroundColor(this.sheetInputSurfaceTone())
-                .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                .borderRadius(12)
-                .border({ width: 1, color: this.sheetBorderTone() })
-                .padding({ left: 10, right: 10 })
-                .onChange((value: string) => {
-                  this.updateDnsCacheTtl(value);
-                })
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 4, bottom: 4 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // ===== 📊 日志 =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('📊 Logs', '📊 日志', '📊 日誌') })
-          Column() {
-            Row({ space: 12 }) {
-              Column({ space: 2 }) {
-                Text(this.t('logRetentionDaysLabel'))
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.primaryTextColor())
-                Text(this.t('logRetentionDaysHint'))
-                  .fontSize(12)
-                  .lineHeight(17)
-                  .fontColor(this.secondaryTextColor())
-              }
-              .layoutWeight(1)
-              .alignItems(HorizontalAlign.Start)
-
-              Row({ space: 6 }) {
-                TextInput({ text: this.logRetentionDaysInput, placeholder: `${DEFAULT_LOG_RETENTION_DAYS}` })
-                  .type(InputType.Number)
-                  .width(72)
-                  .height(40)
-                  .fontSize(15)
-                  .textAlign(TextAlign.Center)
-                  .backgroundColor(this.sheetInputSurfaceTone())
-                  .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                  .borderRadius(12)
-                  .border({ width: 1, color: this.sheetBorderTone() })
-                  .padding({ left: 8, right: 8 })
-                  .onChange((value: string) => {
-                    this.logRetentionDaysInput = value;
-                  })
-                  .onBlur(() => this.updateLogRetentionDays(this.logRetentionDaysInput))
-                  .onSubmit(() => this.updateLogRetentionDays(this.logRetentionDaysInput))
-                Text(this.language === 'en' ? 'd' : '天')
-                  .fontSize(12)
-                  .fontColor(this.secondaryTextColor())
-              }
-              .alignItems(VerticalAlign.Center)
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row({ space: 12 }) {
-              Column({ space: 2 }) {
-                Text(this.t('logMaxSizeMbLabel'))
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.primaryTextColor())
-                Text(this.t('logMaxSizeMbHint'))
-                  .fontSize(12)
-                  .lineHeight(17)
-                  .fontColor(this.secondaryTextColor())
-              }
-              .layoutWeight(1)
-              .alignItems(HorizontalAlign.Start)
-
-              Row({ space: 6 }) {
-                TextInput({ text: this.logMaxSizeMbInput, placeholder: `${DEFAULT_LOG_MAX_SIZE_MB}` })
-                  .type(InputType.Number)
-                  .width(72)
-                  .height(40)
-                  .fontSize(15)
-                  .textAlign(TextAlign.Center)
-                  .backgroundColor(this.sheetInputSurfaceTone())
-                  .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                  .borderRadius(12)
-                  .border({ width: 1, color: this.sheetBorderTone() })
-                  .padding({ left: 8, right: 8 })
-                  .onChange((value: string) => {
-                    this.logMaxSizeMbInput = value;
-                  })
-                  .onBlur(() => this.updateLogMaxSizeMb(this.logMaxSizeMbInput))
-                  .onSubmit(() => this.updateLogMaxSizeMb(this.logMaxSizeMbInput))
-                Text('MB')
-                  .fontSize(12)
-                  .fontColor(this.secondaryTextColor())
-              }
-              .alignItems(VerticalAlign.Center)
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row({ space: 12 }) {
-              Column({ space: 2 }) {
-                Text(this.t('clearDnsLogOnStart'))
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.primaryTextColor())
-                Text(this.t('clearDnsLogOnStartHint'))
-                  .fontSize(12)
-                  .lineHeight(17)
-                  .fontColor(this.secondaryTextColor())
-              }
-              .layoutWeight(1)
-              .alignItems(HorizontalAlign.Start)
-
-              Toggle({ type: ToggleType.Switch, isOn: this.clearDnsLogOnStart })
-                .onChange((value: boolean) => {
-                  this.updateClearDnsLogOnStart(value);
-                })
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-
-            Divider().strokeWidth(1).color(this.cardBorderTone())
-
-            Row({ space: 12 }) {
-              Column({ space: 2 }) {
-                Text(this.t('clearDebugLogOnStart'))
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.primaryTextColor())
-                Text(this.t('clearDebugLogOnStartHint'))
-                  .fontSize(12)
-                  .lineHeight(17)
-                  .fontColor(this.secondaryTextColor())
-              }
-              .layoutWeight(1)
-              .alignItems(HorizontalAlign.Start)
-
-              Toggle({ type: ToggleType.Switch, isOn: this.clearDebugLogOnStart })
-                .onChange((value: boolean) => {
-                  this.updateClearDebugLogOnStart(value);
-                })
-            }
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .alignItems(VerticalAlign.Center)
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 4, bottom: 4 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // ===== 🐛 调试 =====
-        Column({ space: 8 }) {
-          this.SettingsGroupTitle({ text: this.tri('🐛 Debug', '🐛 调试', '🐛 偵錯') })
-          Row({ space: 12 }) {
-            this.SettingsIconText({ glyph: '⋯', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
-              title: this.t('debugLog'),
-              desc: this.debugLines.length === 0
-                ? this.t('noDebugLogs')
-                : this.tri(`${this.debugLines.length} lines · tap to view`,
-                    `${this.debugLines.length} 条 · 点击查看`, `${this.debugLines.length} 條 · 點擊查看`) })
-            Text('›')
-              .fontSize(20)
-              .fontColor(this.secondaryTextColor())
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
-          .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-          .backgroundColor(this.elevatedSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(22)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .shadow({ radius: 12, color: this.cardShadowTone() })
-          .linearGradient({
-            angle: 145,
-            colors: this.isDarkModeActive()
-              ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
-              : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
-          })
-          .onClick(() => {
-            this.refreshDebugLog();
-            this.debugSheetFeedbackText = '';
-            this.showDebugSheet = true;
-          })
-          .bindSheet(this.showDebugSheet, this.DebugLogSheet(), {
-            height: '82%',
-            backgroundColor: this.sheetSurfaceTone(),
-            showClose: false,
-            onDisappear: () => {
-              this.showDebugSheet = false;
-            }
-          })
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
       .constraintSize({ minHeight: '100%' })
       .justifyContent(FlexAlign.Start)
       .alignItems(HorizontalAlign.Start)
-      .padding({ left: 16, right: 16, top: 8, bottom: Math.max(12, this.avoidPaddingBottom) })
+      .padding({ left: this.contentSideInset(), right: this.contentSideInset(), top: 8,
+        bottom: Math.max(16, this.avoidPaddingBottom) })
     }
     .width('100%')
     .height('100%')
     .scrollBar(BarState.Off)
     .clip(false)
     .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+  }
+
+  @Builder
+  private ProtectionSettings() {
+    Column() {
+      this.MeLink({ name: ME_PAGE_NETWORK, icon: $r('sys.symbol.link'),
+        description: this.tri('VPN, per-app routing and DNS proxy', 'VPN、分应用与代理端口', 'VPN、分應用與代理連接埠') })
+      Divider().color(this.cardBorderTone())
+      this.MeLink({ name: ME_PAGE_DNS, icon: $r('sys.symbol.link'),
+        description: this.tri('Upstream DNS, cache and rewrites', '上游、缓存与 DNS 重写', '上游、快取與 DNS 重寫') })
+      Divider().color(this.cardBorderTone())
+      Row({ space: 10 }) {
+        this.MeLinkIcon($r('sys.symbol.gearshape'))
+        Text(this.tri('Filtering engine', '过滤引擎', '過濾引擎'))
+          .layoutWeight(1)
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+        this.EngineModePicker(36)
+      }
+      .width('100%')
+      .constraintSize({ minHeight: 56 })
+      .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+      Divider().color(this.cardBorderTone())
+      this.MeLink({ name: ME_PAGE_WEB, icon: $r('sys.symbol.doc_text'),
+        description: this.tri('Web service, port and dashboard', 'Web 服务、端口与面板入口', 'Web 服務、連接埠與面板入口') })
+    }
+    .width('100%')
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(16)
+    .border({ width: 1, color: this.cardBorderTone() })
+  }
+
+  @Builder
+  private PalettePreview(palette: ShieldPalette) {
+    Button({ type: ButtonType.Normal }) {
+      Column({ space: 8 }) {
+        Stack({ alignContent: Alignment.BottomStart }) {
+          Column()
+            .width('100%')
+            .height(58)
+            .linearGradient({ angle: 135, colors: [[palette.swatches[0], 0], [palette.swatches[1], 1]] })
+          Row({ space: 6 }) {
+            Blank()
+              .width(48)
+              .height(16)
+              .backgroundColor(this.isDarkModeActive() ? palette.dark.card : palette.light.card)
+              .borderRadius(5)
+            Blank()
+              .width(22)
+              .height(16)
+              .backgroundColor(palette.light.action)
+              .borderRadius(5)
+          }
+          .margin({ left: 9, bottom: 9 })
+        }
+        .width('100%')
+        .height(58)
+        .borderRadius(9)
+        .clip(true)
+
+        Row({ space: 5 }) {
+          Text(this.tri(palette.en, palette.zh, palette.hant))
+            .fontSize(13)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+          if (this.paletteId === palette.id) {
+            Text('✓')
+              .width(18)
+              .height(18)
+              .textAlign(TextAlign.Center)
+              .fontSize(12)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#FFFFFF')
+              .backgroundColor(this.actionTone())
+              .borderRadius(9)
+          }
+        }
+        .width('100%')
+        .constraintSize({ minHeight: 22 })
+      }
+      .width('100%')
+      .padding(8)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .padding(0)
+    .backgroundColor(this.paletteId === palette.id ? this.selectedChipSurfaceTone() : this.cardSurfaceTone())
+    .borderRadius(13)
+    .border({ width: 1, radius: 13, color: this.paletteId === palette.id ? this.accentBlueTone() : this.cardBorderTone() })
+    .clip(true)
+    .accessibilitySelected(this.paletteId === palette.id)
+    .onClick(() => this.setPalette(palette.id))
+  }
+
+  @Builder
+  private AppearanceSettings() {
+    Column({ space: 9 }) {
+      this.SettingsGroupTitle({ text: this.tri('Display mode', '显示模式', '顯示模式') })
+      Row({ space: 5 }) {
+        this.ThemeSegButton({ label: this.t('themeAuto'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET })
+        this.ThemeSegButton({ label: this.t('themeLight'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT })
+        this.ThemeSegButton({ label: this.t('themeDark'), mode: ConfigurationConstant.ColorMode.COLOR_MODE_DARK })
+      }
+      .width('100%')
+      .padding(5)
+      .backgroundColor(this.softPanelTone())
+      .borderRadius(13)
+      .border({ width: 1, color: this.cardBorderTone() })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+
+    Column({ space: 9 }) {
+      this.SettingsGroupTitle({ text: this.tri('Color themes', '主题配色', '主題配色') })
+      GridRow({
+        columns: { xs: 2, sm: 3 },
+        gutter: 8,
+        breakpoints: { value: ['490vp'], reference: BreakpointsReference.ComponentSize }
+      }) {
+        ForEach(SHIELD_PALETTES, (palette: ShieldPalette) => {
+          GridCol() {
+            this.PalettePreview(palette)
+          }
+        }, (palette: ShieldPalette) => palette.id)
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private BackgroundSettings() {
+    Column() {
+      Row({ space: 12 }) {
+        this.SettingsIconText({ glyph: '⚡', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+          title: this.t('autoStartFilter'), desc: this.t('autoStartFilterHint') })
+        Toggle({ type: ToggleType.Switch, isOn: this.autoStartFilterEnabled })
+          .onChange((value: boolean) => {
+            this.onAutoStartFilterChange(value).catch((err: BusinessError) => {
+              this.errorText = this.errorMessage(err);
+            });
+          })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14 })
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(16)
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.tri('🔋 Background', '🔋 后台保活', '🔋 背景保活') })
+      Column() {
+        Row({ space: 12 }) {
+          this.SettingsIconText({ glyph: '♪', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF8F2', iconFg: '#179160',
+            title: this.t('audioKeepAlive'), desc: this.t('audioKeepAliveHint') })
+          Toggle({ type: ToggleType.Switch, isOn: this.audioKeepAliveEnabled })
+            .selectedColor(this.accentGreenTone())
+            .onChange((value: boolean) => {
+              this.toggleAudioKeepAlive(value).catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            })
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+
+        Row({ space: 12 }) {
+          this.SettingsIconText({ glyph: '◉', iconBg: this.isDarkModeActive() ? '#3A2E12' : '#FBEFD7', iconFg: '#C77E12',
+            title: this.t('locationKeepAlive'), desc: this.t('locationKeepAliveHint') })
+          Toggle({ type: ToggleType.Switch, isOn: this.locationKeepAliveEnabled })
+            .onChange((value: boolean) => {
+              this.onLocationKeepAliveChange(value).catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            })
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+
+        Row({ space: 12 }) {
+          this.SettingsIconText({ glyph: '⇅', iconBg: this.isDarkModeActive() ? '#1E2E4A' : '#E8F1FE', iconFg: '#2F6FDB',
+            title: this.t('dataTransferKeepAlive'), desc: this.t('dataTransferKeepAliveHint') })
+          Toggle({ type: ToggleType.Switch, isOn: this.dataTransferKeepAliveEnabled })
+            .onChange((value: boolean) => {
+              this.onDataTransferKeepAliveChange(value).catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            })
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        if (this.keepAliveStatusText.length > 0) {
+          Text(this.keepAliveStatusText)
+            .fontSize(12)
+            .fontColor(this.keepAliveRunning ? this.accentGreenTone() : this.secondaryTextColor())
+            .width('100%')
+            .margin({ top: 4, bottom: 4 })
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 16, right: 16, top: 6, bottom: 6 })
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .shadow({ radius: 12, color: this.cardShadowTone() })
+      .linearGradient({
+        angle: 145,
+        colors: this.isDarkModeActive()
+          ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+          : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.t('notificationGroup') })
+      Column() {
+        Row({ space: 12 }) {
+          this.SettingsIconText({ glyph: '🔔', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+            title: this.t('persistentNotification'), desc: this.t('persistentNotificationHint') })
+          Toggle({ type: ToggleType.Switch, isOn: this.persistentNotificationEnabled })
+            .onChange((value: boolean) => {
+              this.onPersistentNotificationChange(value).catch((err: BusinessError) => {
+                this.errorText = this.errorMessage(err);
+              });
+            })
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        if (this.persistentNotificationEnabled) {
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+
+          Row({ space: 12 }) {
+            Column({ space: 2 }) {
+              Text(this.t('notificationRefreshInterval'))
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.primaryTextColor())
+              Text(this.t('notificationRefreshIntervalHint'))
+                .fontSize(12)
+                .lineHeight(17)
+                .fontColor(this.secondaryTextColor())
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 6 })
+          .alignItems(VerticalAlign.Center)
+
+          Row({ space: 5 }) {
+            this.NotifyIntervalSegButton(1)
+            this.NotifyIntervalSegButton(2)
+            this.NotifyIntervalSegButton(3)
+            this.NotifyIntervalSegButton(4)
+            this.NotifyIntervalSegButton(5)
+          }
+          .width('100%')
+          .padding(5)
+          .margin({ bottom: 6 })
+          .backgroundColor(this.softPanelTone())
+          .borderRadius(14)
+          .border({ width: 1, color: this.cardBorderTone() })
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 16, right: 16, top: 6, bottom: 6 })
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .shadow({ radius: 12, color: this.cardShadowTone() })
+      .linearGradient({
+        angle: 145,
+        colors: this.isDarkModeActive()
+          ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+          : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private DiagnosticsSettings() {
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.tri('📊 Logs', '📊 日志', '📊 日誌') })
+      Column() {
+        Row({ space: 12 }) {
+          Column({ space: 2 }) {
+            Text(this.t('logRetentionDaysLabel'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.t('logRetentionDaysHint'))
+              .fontSize(12)
+              .lineHeight(17)
+              .fontColor(this.secondaryTextColor())
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Row({ space: 6 }) {
+            TextInput({ text: this.logRetentionDaysInput, placeholder: `${DEFAULT_LOG_RETENTION_DAYS}` })
+              .type(InputType.Number)
+              .width(72)
+              .height(40)
+              .fontSize(15)
+              .textAlign(TextAlign.Center)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(12)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 8, right: 8 })
+              .onChange((value: string) => {
+                this.logRetentionDaysInput = value;
+              })
+              .onBlur(() => this.updateLogRetentionDays(this.logRetentionDaysInput))
+              .onSubmit(() => this.updateLogRetentionDays(this.logRetentionDaysInput))
+            Text(this.language === 'en' ? 'd' : '天')
+              .fontSize(12)
+              .fontColor(this.secondaryTextColor())
+          }
+          .alignItems(VerticalAlign.Center)
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+
+        Row({ space: 12 }) {
+          Column({ space: 2 }) {
+            Text(this.t('logMaxSizeMbLabel'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.t('logMaxSizeMbHint'))
+              .fontSize(12)
+              .lineHeight(17)
+              .fontColor(this.secondaryTextColor())
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Row({ space: 6 }) {
+            TextInput({ text: this.logMaxSizeMbInput, placeholder: `${DEFAULT_LOG_MAX_SIZE_MB}` })
+              .type(InputType.Number)
+              .width(72)
+              .height(40)
+              .fontSize(15)
+              .textAlign(TextAlign.Center)
+              .backgroundColor(this.sheetInputSurfaceTone())
+              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+              .borderRadius(12)
+              .border({ width: 1, color: this.sheetBorderTone() })
+              .padding({ left: 8, right: 8 })
+              .onChange((value: string) => {
+                this.logMaxSizeMbInput = value;
+              })
+              .onBlur(() => this.updateLogMaxSizeMb(this.logMaxSizeMbInput))
+              .onSubmit(() => this.updateLogMaxSizeMb(this.logMaxSizeMbInput))
+            Text('MB')
+              .fontSize(12)
+              .fontColor(this.secondaryTextColor())
+          }
+          .alignItems(VerticalAlign.Center)
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+
+        Row({ space: 12 }) {
+          Column({ space: 2 }) {
+            Text(this.t('clearDnsLogOnStart'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.t('clearDnsLogOnStartHint'))
+              .fontSize(12)
+              .lineHeight(17)
+              .fontColor(this.secondaryTextColor())
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Toggle({ type: ToggleType.Switch, isOn: this.clearDnsLogOnStart })
+            .onChange((value: boolean) => {
+              this.updateClearDnsLogOnStart(value);
+            })
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+
+        Row({ space: 12 }) {
+          Column({ space: 2 }) {
+            Text(this.t('clearDebugLogOnStart'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.t('clearDebugLogOnStartHint'))
+              .fontSize(12)
+              .lineHeight(17)
+              .fontColor(this.secondaryTextColor())
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Toggle({ type: ToggleType.Switch, isOn: this.clearDebugLogOnStart })
+            .onChange((value: boolean) => {
+              this.updateClearDebugLogOnStart(value);
+            })
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .shadow({ radius: 12, color: this.cardShadowTone() })
+      .linearGradient({
+        angle: 145,
+        colors: this.isDarkModeActive()
+          ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+          : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.tri('🐛 Debug', '🐛 调试', '🐛 偵錯') })
+      Row({ space: 12 }) {
+        this.SettingsIconText({ glyph: '⋯', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+          title: this.t('debugLog'),
+          desc: this.debugLines.length === 0
+            ? this.t('noDebugLogs')
+            : this.tri(`${this.debugLines.length} lines · tap to view`,
+                `${this.debugLines.length} 条 · 点击查看`, `${this.debugLines.length} 條 · 點擊查看`) })
+        Text('›')
+          .fontSize(20)
+          .fontColor(this.secondaryTextColor())
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .shadow({ radius: 12, color: this.cardShadowTone() })
+      .linearGradient({
+        angle: 145,
+        colors: this.isDarkModeActive()
+          ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+          : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+      })
+      .onClick(() => {
+        this.refreshDebugLog();
+        this.debugSheetFeedbackText = '';
+        this.showDebugSheet = true;
+      })
+      .bindSheet(this.showDebugSheet, this.DebugLogSheet(), {
+        height: '82%',
+        backgroundColor: this.sheetSurfaceTone(),
+        showClose: false,
+        onDisappear: () => {
+          this.showDebugSheet = false;
+        }
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private BackupSettings() {
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.t('configBackupGroup') })
+      Column() {
+        Row({ space: 12 }) {
+          this.SettingsIconText({ glyph: '⬇', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+            title: this.t('importConfig'), desc: this.t('importConfigHint') })
+          Text('›')
+            .fontSize(20)
+            .fontColor(this.secondaryTextColor())
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+        .onClick(() => {
+          this.importConfigFile().catch((err: BusinessError) => {
+            this.errorText = this.errorMessage(err);
+          });
+        })
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+
+        Row({ space: 12 }) {
+          this.SettingsIconText({ glyph: '⬆', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+            title: this.t('exportConfig'), desc: this.t('exportConfigHint') })
+          Text('›')
+            .fontSize(20)
+            .fontColor(this.secondaryTextColor())
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+        .onClick(() => {
+          this.exportConfigFile().catch((err: BusinessError) => {
+            this.errorText = this.errorMessage(err);
+          });
+        })
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 16, right: 16, top: 6, bottom: 6 })
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .shadow({ radius: 12, color: this.cardShadowTone() })
+      .linearGradient({
+        angle: 145,
+        colors: this.isDarkModeActive()
+          ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+          : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private NetworkSettings() {
+    this.NetworkModeControl()
+    Column() {
+      Row({ space: 12 }) {
+        this.SettingsIconText({ glyph: '⊞', iconBg: this.isDarkModeActive() ? '#163238' : '#E3F6F9', iconFg: '#0891B2',
+          title: this.t('appSplitTitle'), desc: this.appSplitSummary() })
+        Text('›')
+          .fontSize(20)
+          .fontColor(this.secondaryTextColor())
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .alignItems(VerticalAlign.Center)
+      .onClick(() => {
+        this.meStack.pushPathByName(ME_PAGE_APP_SPLIT, null);
+      })
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14 })
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(16)
+    if (this.proxyModeEnabled) {
+      Column({ space: 8 }) {
+        this.SettingsGroupTitle({ text: this.t('dnsProxyPortTitle') })
+        Column({ space: 10 }) {
+          Text(this.t('dnsProxyPortHint'))
+            .fontSize(12)
+            .lineHeight(18)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+
+          TextInput({ text: this.dnsProxyPort, placeholder: `${AGH_DNS_PORT}` })
+            .type(InputType.Number)
+            .width('100%')
+            .height(44)
+            .fontSize(15)
+            .enabled(!this.dnsProxyRunning)
+            .opacity(this.dnsProxyRunning ? 0.5 : 1)
+            .backgroundColor(this.sheetInputSurfaceTone())
+            .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+            .borderRadius(14)
+            .border({ width: 1, color: this.sheetBorderTone() })
+            .padding({ left: 12, right: 12 })
+            .onChange((value: string) => {
+              this.onDnsProxyPortChange(value);
+            })
+
+          if (this.dnsProxyPortFeedback.length > 0) {
+            Text(this.dnsProxyPortFeedback)
+              .fontSize(12)
+              .fontColor('#C0392B')
+              .width('100%')
+          }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(16)
+        .backgroundColor(this.elevatedSurfaceTone())
+        .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+        .borderRadius(22)
+        .border({ width: 1, color: this.cardBorderTone() })
+        .shadow({ radius: 12, color: this.cardShadowTone() })
+        .linearGradient({
+          angle: 145,
+          colors: this.isDarkModeActive()
+            ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+            : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+        })
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+    }
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: 'VPN' })
+      Column({ space: 12 }) {
+        Row({ space: 12 }) {
+          this.SettingsIconText({
+            glyph: '⇄', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
+            title: this.tri('Full VPN (experimental)', '全量 VPN（实验）', '全量 VPN（實驗）'),
+            desc: this.appTunnelAvailable ?
+              this.tri('Works with both DNS engines. Routes TCP and UDP in selected-app mode.',
+                '轻量和完整模式均可使用。在「仅代理」模式下接管所选应用的 TCP 和 UDP。',
+                '輕量與完整模式均可使用。在「僅代理」模式下接管所選應用程式的 TCP 和 UDP。') :
+              this.tri('The tunnel core is unavailable in this build.', '当前安装包缺少全量 VPN 内核。',
+                '目前的安裝套件缺少全量 VPN 核心。')
+          })
+          Toggle({ type: ToggleType.Switch, isOn: this.appTunnelEnabled && this.appTunnelAvailable })
+            .enabled(this.appTunnelAvailable && !this.proxyModeEnabled)
+            .onChange((enabled: boolean) => this.saveAppTunnel(enabled, false))
+        }
+        .width('100%')
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+        Row({ space: 12 }) {
+          this.SettingsIconText({
+            glyph: '⊘', iconBg: this.softPanelTone(), iconFg: this.accentBlueTone(),
+            title: this.tri('Block IPv6 connections', '阻断 IPv6 连接', '阻擋 IPv6 連線'),
+            desc: this.tri('VPN only. Blocks IPv6 traffic from apps routed through this VPN.',
+              '仅在 VPN 模式生效，阻断经过本 VPN 的应用发出的 IPv6 流量。',
+              '僅在 VPN 模式生效，阻擋經過本 VPN 的應用程式送出的 IPv6 流量。')
+          })
+          Toggle({ type: ToggleType.Switch, isOn: this.blockIpv6Connections })
+            .enabled(this.canChangeFilterSettings() && !this.proxyModeEnabled)
+            .onChange((value: boolean) => this.updateIpv6Blocking(this.blockAaaa, value))
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding(16)
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private DnsSettings() {
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.tri('Upstream DNS', '上游 DNS', '上游 DNS') })
+      Column({ space: 10 }) {
+        // Auto upstream: follow the system/router DNS (VPN mode). The manual
+        // list below stays editable and is used as the fallback.
+        Row({ space: 12 }) {
+          Column({ space: 2 }) {
+            Text(this.t('upstreamAutoTitle'))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.primaryTextColor())
+            Text(this.t('upstreamAutoHint'))
+              .fontSize(12)
+              .lineHeight(17)
+              .fontColor(this.secondaryTextColor())
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+          .opacity(this.upstreamAutoAvailable() ? 1 : 0.4)
+          Toggle({ type: ToggleType.Switch, isOn: this.upstreamAutoEnabled && this.upstreamAutoAvailable() })
+            .enabled(this.upstreamAutoAvailable())
+            .opacity(this.upstreamAutoAvailable() ? 1 : 0.4)
+            .onChange((value: boolean) => {
+              this.onUpstreamAutoChange(value);
+            })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        // Proxy mode can't follow the system DNS — explain why it's greyed out.
+        if (!this.upstreamAutoAvailable()) {
+          Text(this.tri('Unavailable in DNS-proxy mode — the manual upstream below is used.',
+            '纯 DNS 代理模式下不可用，将使用下方手动填写的上游。',
+            '純 DNS 代理模式下不可用，將使用下方手動填寫的上游。'))
+            .fontSize(12)
+            .lineHeight(17)
+            .fontColor(this.mutedTextColor())
+            .width('100%')
+        } else if (this.upstreamAutoEnabled) {
+          Text(this.effectiveUpstreamDisplay().length > 0
+            ? this.t('upstreamAutoCurrent', this.effectiveUpstreamDisplay())
+            : this.t('upstreamAutoWaiting'))
+            .fontSize(12)
+            .lineHeight(17)
+            .fontColor(this.accentBlueTone())
+            .width('100%')
+          Divider().strokeWidth(1).color(this.cardBorderTone())
+        }
+
+        Text(this.t('upstreamDnsHint'))
+          .fontSize(12)
+          .lineHeight(18)
+          .fontColor(this.secondaryTextColor())
+          .width('100%')
+
+        TextArea({ text: this.upstreamDnsInput, placeholder: DEFAULT_UPSTREAM_DNS_IP })
+          .width('100%')
+          .height(80)
+          .fontSize(15)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+          .borderRadius(14)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+          .onChange((value: string) => {
+            this.onUpstreamDnsInputChange(value);
+          })
+
+        Flex({ wrap: FlexWrap.Wrap }) {
+          Button('AliDNS')
+            .type(ButtonType.Normal)
+            .fontSize(13)
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(this.softPanelTone())
+            .borderRadius(10)
+            .border({ width: 1, color: this.cardBorderTone() })
+            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+            .margin({ right: 8, bottom: 8 })
+            .onClick(() => {
+              this.addUpstreamPreset('223.5.5.5');
+            })
+          Button('DNSPod')
+            .type(ButtonType.Normal)
+            .fontSize(13)
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(this.softPanelTone())
+            .borderRadius(10)
+            .border({ width: 1, color: this.cardBorderTone() })
+            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+            .margin({ right: 8, bottom: 8 })
+            .onClick(() => {
+              this.addUpstreamPreset('119.29.29.29');
+            })
+          Button('Baidu')
+            .type(ButtonType.Normal)
+            .fontSize(13)
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(this.softPanelTone())
+            .borderRadius(10)
+            .border({ width: 1, color: this.cardBorderTone() })
+            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+            .margin({ right: 8, bottom: 8 })
+            .onClick(() => {
+              this.addUpstreamPreset('180.76.76.76');
+            })
+          Button('AdGuard')
+            .type(ButtonType.Normal)
+            .fontSize(13)
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(this.softPanelTone())
+            .borderRadius(10)
+            .border({ width: 1, color: this.cardBorderTone() })
+            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+            .margin({ right: 8, bottom: 8 })
+            .onClick(() => {
+              this.addUpstreamPreset('94.140.14.14');
+            })
+        }
+        .width('100%')
+
+        // Encrypted upstreams (DoH/DoT) — only the full AdGuardHome engine can
+        // resolve these, so the row is greyed out and disabled on lite mode.
+        Text(this.t('upstreamDnsEncryptedLabel'))
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+          .opacity(this.fullModeEnabled ? 1 : 0.4)
+          .width('100%')
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(this.upstreamEncryptedPresets(), (preset: UpstreamPreset) => {
+            Button(preset.label)
+              .type(ButtonType.Normal)
+              .fontSize(13)
+              .fontColor(this.primaryTextColor())
+              .backgroundColor(this.softPanelTone())
+              .borderRadius(10)
+              .border({ width: 1, color: this.cardBorderTone() })
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .margin({ right: 8, bottom: 8 })
+              .enabled(this.fullModeEnabled)
+              .opacity(this.fullModeEnabled ? 1 : 0.4)
+              .onClick(() => {
+                this.addUpstreamPreset(preset.value);
+              })
+          }, (preset: UpstreamPreset) => preset.value)
+        }
+        .width('100%')
+
+        if (this.upstreamInputHasUnsupportedForLite()) {
+          Text(this.t('upstreamDnsLiteOnlyIp'))
+            .fontSize(12)
+            .lineHeight(18)
+            .fontColor(this.isDarkModeActive() ? '#F5A524' : '#B54708')
+            .width('100%')
+        }
+
+        Button(this.t('upstreamDnsApply'))
+          .type(ButtonType.Normal)
+          .width('100%')
+          .height(42)
+          .fontSize(15)
+          .fontColor(Color.White)
+          .backgroundColor(this.actionTone())
+          .borderRadius(12)
+          .onClick(() => {
+            this.applyUpstreamDns(this.upstreamDnsInput);
+          })
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding(16)
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .shadow({ radius: 12, color: this.cardShadowTone() })
+      .linearGradient({
+        angle: 145,
+        colors: this.isDarkModeActive()
+          ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+          : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.tri('Resolution options', '解析选项', '解析選項') })
+      Column() {
+        Row({ space: 12 }) {
+          this.SettingsIconText({
+            glyph: $r('sys.symbol.clock'),
+            title: this.language === 'en' ? this.t('dnsCacheTtlLabel') + ' (s)' : this.t('dnsCacheTtlLabel') + '（秒）',
+            desc: this.t('dnsCacheHint')
+          })
+          TextInput({ text: this.dnsCacheTtlInput, placeholder: `${DEFAULT_DNS_CACHE_TTL_SECONDS}` })
+            .width(88)
+            .height(40)
+            .fontSize(15)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(this.sheetInputSurfaceTone())
+            .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+            .borderRadius(12)
+            .border({ width: 1, color: this.sheetBorderTone() })
+            .padding({ left: 10, right: 10 })
+            .onChange((value: string) => {
+              this.updateDnsCacheTtl(value);
+            })
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+
+        Row({ space: 12 }) {
+          this.SettingsIconText({
+            glyph: $r('sys.symbol.lock_shield'),
+            title: this.tri('Block IPv6 DNS lookups', '屏蔽 IPv6 解析', '封鎖 IPv6 解析'),
+            desc: this.tri('Empty answers for AAAA. IPv4 works normally.',
+              'AAAA 返回空结果，IPv4 解析照常。', 'AAAA 傳回空結果，IPv4 解析照常。')
+          })
+          Toggle({ type: ToggleType.Switch, isOn: this.blockAaaa })
+            .enabled(this.canChangeFilterSettings())
+            .onChange((value: boolean) => this.updateIpv6Blocking(value, this.blockIpv6Connections))
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+        Row({ space: 12 }) {
+          this.SettingsIconText({
+            glyph: $r('sys.symbol.square_and_pencil'),
+            dimmed: !this.fullModeEnabled,
+            title: this.tri('DNS rewrites', 'DNS 重写', 'DNS 重寫'),
+            desc: this.tri(`${this.dnsRewrites.length} rewrites`,
+              `共 ${this.dnsRewrites.length} 条`, `共 ${this.dnsRewrites.length} 條`) })
+          SymbolGlyph($r('sys.symbol.chevron_right'))
+            .fontSize(13)
+            .fontColor([this.fullModeEnabled ? this.secondaryTextColor() : this.mutedTextColor()])
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+        .onClick(() => {
+          if (!this.fullModeEnabled) {
+            this.notifyFullEngineRequired();
+            return;
+          }
+          this.rewriteFeedbackText = '';
+          this.rewriteAddDomainInput = '';
+          this.rewriteAddAnswerInput = '';
+          this.showRewritesSheet = true;
+        })
+        .bindContentCover(this.showRewritesSheet, this.RewritesSheet(), {
+          modalTransition: ModalTransition.DEFAULT,
+          onDisappear: () => {
+            this.showRewritesSheet = false;
+          }
+        })
+
+        Divider().strokeWidth(1).color(this.cardBorderTone())
+
+        // Advanced DNS — full engine only.
+        Row({ space: 12 }) {
+          this.SettingsIconText({
+            glyph: $r('sys.symbol.gearshape'),
+            dimmed: !this.fullModeEnabled,
+            title: this.tri('Advanced DNS', 'DNS 高级设置', 'DNS 進階設定'),
+            desc: `${this.blockingModeLabel(this.advancedDns.blockingMode)} · ${this.upstreamModeLabel(this.advancedDns.upstreamMode)}` })
+          SymbolGlyph($r('sys.symbol.chevron_right'))
+            .fontSize(13)
+            .fontColor([this.fullModeEnabled ? this.secondaryTextColor() : this.mutedTextColor()])
+        }
+        .width('100%')
+        .padding({ top: 10, bottom: 10 })
+        .alignItems(VerticalAlign.Center)
+        .onClick(() => {
+          if (!this.fullModeEnabled) {
+            this.notifyFullEngineRequired();
+            return;
+          }
+          this.cacheSizeInput = `${this.advancedDns.cacheSizeMb}`;
+          this.ratelimitInput = `${this.advancedDns.ratelimit}`;
+          this.showAdvancedDnsSheet = true;
+        })
+        .bindContentCover(this.showAdvancedDnsSheet, this.AdvancedDnsSheet(), {
+          modalTransition: ModalTransition.DEFAULT,
+          onDisappear: () => {
+            this.showAdvancedDnsSheet = false;
+          }
+        })
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14 })
+      .backgroundColor(this.cardSurfaceTone())
+      .borderRadius(16)
+      .border({ width: 1, color: this.cardBorderTone() })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private WebSettings() {
+    Column() {
+      Row({ space: 12 }) {
+        this.SettingsIconText({ glyph: '🌐', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+          title: this.tri('Web dashboard service', 'Web 管理面板服务', 'Web 管理面板服務'),
+          desc: this.tri('Off saves battery · toggling restarts the filter',
+            '默认关闭更省电 · 切换后自动重启过滤', '預設關閉更省電 · 切換後自動重啟過濾') })
+        Toggle({ type: ToggleType.Switch, isOn: this.aghWebEnabled })
+          .enabled(this.fullModeEnabled)
+          .onChange((value: boolean) => {
+            this.updateAghWebEnabled(value);
+          })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .alignItems(VerticalAlign.Center)
+      .opacity(this.fullModeEnabled ? 1 : 0.4)
+
+      Divider().strokeWidth(1).color(this.cardBorderTone())
+
+      // AdGuardHome dashboard — full engine + dashboard service + running.
+      Row({ space: 12 }) {
+        this.SettingsIconText({ glyph: '⌘', iconBg: this.isDarkModeActive() ? '#22324A' : '#EEF3FA', iconFg: '#2B5B95',
+          title: this.tri('AdGuardHome dashboard', 'AdGuardHome 管理面板', 'AdGuardHome 管理面板'),
+          desc: this.tri('Opens in browser · needs full engine running', '浏览器打开 · 需完整引擎并正在运行', '瀏覽器開啟 · 需完整引擎並正在執行') })
+        Text('↗')
+          .fontSize(18)
+          .fontColor(this.secondaryTextColor())
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .alignItems(VerticalAlign.Center)
+      // Enabled whenever the full engine is running with the dashboard
+      // service on, in either VPN or DNS-proxy mode.
+      .opacity(this.fullModeEnabled && this.aghWebEnabled && this.activeRunning() ? 1 : 0.4)
+      .onClick(() => {
+        if (!this.fullModeEnabled) {
+          this.notifyFullEngineRequired();
+          return;
+        }
+        if (!this.aghWebEnabled) {
+          try {
+            this.ensurePromptAction()?.showToast({
+              message: this.tri('Turn on the web dashboard service first',
+                '请先开启 Web 管理面板服务', '請先開啟 Web 管理面板服務')
+            });
+          } catch (_) {
+          }
+          return;
+        }
+        if (!this.activeRunning()) {
+          try {
+            this.ensurePromptAction()?.showToast({
+              message: this.tri('Start filtering first', '请先启动过滤', '請先啟動過濾')
+            });
+          } catch (_) {
+          }
+          return;
+        }
+        this.openAghInBrowser();
+      })
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14 })
+    .backgroundColor(this.cardSurfaceTone())
+    .borderRadius(16)
+    Column({ space: 8 }) {
+      this.SettingsGroupTitle({ text: this.t('aghPanelPortTitle') })
+      Column({ space: 10 }) {
+        Text(this.t('aghPanelPortHint'))
+          .fontSize(12)
+          .lineHeight(18)
+          .fontColor(this.secondaryTextColor())
+          .width('100%')
+
+        TextInput({ text: this.aghHttpPort, placeholder: `${AGH_HTTP_PORT}` })
+          .type(InputType.Number)
+          .width('100%')
+          .height(44)
+          .fontSize(15)
+          .enabled(!this.dnsProxyRunning && !this.status.running)
+          .opacity((this.dnsProxyRunning || this.status.running) ? 0.5 : 1)
+          .backgroundColor(this.sheetInputSurfaceTone())
+          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+          .borderRadius(14)
+          .border({ width: 1, color: this.sheetBorderTone() })
+          .padding({ left: 12, right: 12 })
+          .onChange((value: string) => {
+            this.onAghHttpPortChange(value);
+          })
+
+        if (this.aghHttpPortFeedback.length > 0) {
+          Text(this.aghHttpPortFeedback)
+            .fontSize(12)
+            .fontColor('#C0392B')
+            .width('100%')
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding(16)
+      .backgroundColor(this.elevatedSurfaceTone())
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
+      .borderRadius(22)
+      .border({ width: 1, color: this.cardBorderTone() })
+      .shadow({ radius: 12, color: this.cardShadowTone() })
+      .linearGradient({
+        angle: 145,
+        colors: this.isDarkModeActive()
+          ? [['#1C283BDB', 0.0], ['#22324ADB', 1.0]]
+          : [['#FFFFFF', 0.0], ['#F6F8FB', 1.0]]
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
@@ -12595,13 +12218,79 @@ struct Index {
   }
 
   @Builder
+  private SidebarTab(index: number, icon: Resource, label: string) {
+    Row({ space: 10 }) {
+      SymbolGlyph(icon).fontSize(18)
+        .fontColor([this.currentTab === index ? this.selectedChipTextTone() : this.secondaryTextColor()])
+      Text(label).fontSize(14).fontWeight(FontWeight.Medium)
+        .fontColor(this.currentTab === index ? this.selectedChipTextTone() : this.secondaryTextColor())
+    }
+    .width('100%')
+    .height(44)
+    .padding({ left: 12, right: 12 })
+    .backgroundColor(this.currentTab === index ? this.selectedChipSurfaceTone() : Color.Transparent)
+    .borderRadius(12)
+    .onClick(() => {
+      if (this.currentTab !== index) {
+        this.currentTab = index;
+        this.savePersistState();
+      }
+    })
+  }
+
+  @Builder
+  private SidebarTabs() {
+    Row() {
+      Column({ space: 6 }) {
+        Row({ space: 8 }) {
+          Image($r('app.media.foreground')).width(34).height(34)
+            .objectFit(ImageFit.Contain).backgroundColor(Color.White).borderRadius(9)
+          Text(this.t('appTitle')).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.primaryTextColor())
+        }
+        .width('100%')
+        .padding({ left: 6, bottom: 14 })
+        this.SidebarTab(0, $r('sys.symbol.house'), this.t('tabHome'))
+        this.SidebarTab(1, $r('sys.symbol.gearshape'), this.t('tabConfig'))
+        this.SidebarTab(2, $r('sys.symbol.person'), this.t('tabMe'))
+        Blank()
+        Row({ space: 8 }) {
+          Column() {}
+            .width(7).height(7).borderRadius(4)
+            .backgroundColor(this.activeRunning() ? this.accentGreenTone() : this.secondaryTextColor())
+          Text(this.activeRunning() ? this.t('active') : this.t('idle'))
+            .fontSize(12).fontColor(this.secondaryTextColor())
+        }
+        .width('100%')
+        .padding(10)
+        .backgroundColor(this.canvasTone())
+        .borderRadius(9)
+      }
+      .width(170)
+      .height('100%')
+      .padding({ left: 12, right: 12, top: this.contentTopInset() + 14,
+        bottom: this.avoidPaddingBottom + 14 })
+      .backgroundColor(this.paletteColors().sidebar)
+      .border({ width: { right: 1 }, color: this.cardBorderTone() })
+      Column() {
+        this.CurrentTabPage()
+      }
+      .height('100%')
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
   private TabHost() {
     Stack({ alignContent: Alignment.Bottom }) {
       this.PageBackdrop()
 
       Stack({ alignContent: Alignment.TopStart }) {
         Column() {
-          if (deviceInfo.sdkApiVersion >= 23) {
+          if (this.useSidebarLayout()) {
+            this.SidebarTabs()
+          } else if (deviceInfo.sdkApiVersion >= 23) {
             HdsTabs({ barPosition: BarPosition.End, index: this.currentTab }) {
               TabContent() {
                 this.TabRoot(0)
@@ -12609,10 +12298,8 @@ struct Index {
               .width('100%')
               .height('100%')
               .backgroundColor('#00000000')
-              .tabBar(new BottomTabBarStyle(
-                { normal: new SymbolGlyphModifier($r('sys.symbol.house')), selected: new SymbolGlyphModifier($r('sys.symbol.house_fill')) },
-                this.t('tabHome')
-              ))
+              .tabBar(this.bottomTabStyle($r('sys.symbol.house'), $r('sys.symbol.house_fill'),
+                this.t('tabHome')))
 
               TabContent() {
                 this.TabRoot(1)
@@ -12620,10 +12307,8 @@ struct Index {
               .width('100%')
               .height('100%')
               .backgroundColor('#00000000')
-              .tabBar(new BottomTabBarStyle(
-                { normal: new SymbolGlyphModifier($r('sys.symbol.gearshape')), selected: new SymbolGlyphModifier($r('sys.symbol.gearshape_fill')) },
-                this.t('tabConfig')
-              ))
+              .tabBar(this.bottomTabStyle($r('sys.symbol.gearshape'), $r('sys.symbol.gearshape_fill'),
+                this.t('tabConfig')))
 
               TabContent() {
                 this.TabRoot(2)
@@ -12631,10 +12316,8 @@ struct Index {
               .width('100%')
               .height('100%')
               .backgroundColor('#00000000')
-              .tabBar(new BottomTabBarStyle(
-                { normal: new SymbolGlyphModifier($r('sys.symbol.person')), selected: new SymbolGlyphModifier($r('sys.symbol.person_fill')) },
-                this.t('tabMe')
-              ))
+              .tabBar(this.bottomTabStyle($r('sys.symbol.person'), $r('sys.symbol.person_fill'),
+                this.t('tabMe')))
             }
             .backgroundColor('#00000000')
             .barOverlap(true)
@@ -12673,7 +12356,7 @@ struct Index {
       }
       .width('100%')
       .height('100%')
-      if (deviceInfo.sdkApiVersion < 23) {
+      if (!this.useSidebarLayout() && deviceInfo.sdkApiVersion < 23) {
         this.ClassicTabHost()
       }
 
@@ -12715,6 +12398,16 @@ struct Index {
     .width('100%')
     .height('100%')
     .backgroundColor(this.canvasTone())
+  }
+
+  private bottomTabStyle(icon: Resource, selected: Resource, label: string): BottomTabBarStyle {
+    return new BottomTabBarStyle({
+      normal: new SymbolGlyphModifier(icon).fontColor([this.secondaryTextColor()]),
+      selected: new SymbolGlyphModifier(selected).fontColor([this.accentBlueTone()])
+    }, label).labelStyle({
+      selectedColor: this.accentBlueTone(),
+      unselectedColor: this.secondaryTextColor()
+    });
   }
 
   build() {
