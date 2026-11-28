@@ -222,7 +222,7 @@ type LanguageKey =
   | 'ruleVisualMode' | 'ruleTextMode' | 'ruleRawMode' | 'ruleDomainField' | 'ruleMatchScope'
   | 'ruleActionField'
   | 'ruleExactDomain' | 'ruleIncludeSubdomains' | 'ruleWildcardScope' | 'ruleQueryType' | 'ruleAnyQuery' | 'rulePreviewTitle'
-  | 'rulePreviewEmpty' | 'ruleInvalidDomain' | 'ruleSingleLineOnly' | 'ruleMoreActions' | 'ruleUpdateLine'
+  | 'rulePreviewEmpty' | 'ruleInvalidDomain' | 'ruleSingleLineOnly' | 'ruleMoreActions' | 'ruleEditLine' | 'ruleUpdateLine'
   | 'ruleDomainAndSubdomains' | 'ruleDomainOnlyPreview' | 'ruleSubdomainsOnlyPreview' | 'ruleBlockPreview' | 'ruleAllowPreview'
   | 'rulePreviewAllQueries' | 'rulePreviewIpv4Queries' | 'rulePreviewIpv6Queries' | 'rulePreviewSource'
   | 'rulePreviewHostsAddress' | 'rulePreviewNeedsFullEngine' | 'rulePreviewComment' | 'rulePreviewAdvanced'
@@ -502,6 +502,7 @@ function resolveStringResource(key: LanguageKey): number {
     case 'ruleInvalidDomain': return $r('app.string.ruleInvalidDomain').id;
     case 'ruleSingleLineOnly': return $r('app.string.ruleSingleLineOnly').id;
     case 'ruleMoreActions': return $r('app.string.ruleMoreActions').id;
+    case 'ruleEditLine': return $r('app.string.ruleEditLine').id;
     case 'ruleUpdateLine': return $r('app.string.ruleUpdateLine').id;
     case 'ruleDomainAndSubdomains': return $r('app.string.ruleDomainAndSubdomains').id;
     case 'ruleDomainOnlyPreview': return $r('app.string.ruleDomainOnlyPreview').id;
@@ -3489,7 +3490,7 @@ struct Index {
   }
 
   private confirmRemoveAllCustomBlockRules(): void {
-    if (this.editingRuleProfileId !== CUSTOM_BLOCK_RULE_PROFILE_ID || this.ruleEditorLineCount === 0) {
+    if (!this.ruleEditorCanRemoveAll()) {
       return;
     }
     this.getUIContext().showAlertDialog({
@@ -9900,7 +9901,13 @@ struct Index {
   @Builder
   private CurrentTabPage() {
     Column() {
-      this.TabRoot(this.currentTab)
+      if (this.currentTab === 0) {
+        this.TabRoot(0)
+      } else if (this.currentTab === 1) {
+        this.TabRoot(1)
+      } else {
+        this.TabRoot(2)
+      }
     }
     .width('100%')
     .height('100%')
@@ -12261,20 +12268,49 @@ struct Index {
     .alignItems(HorizontalAlign.Start)
   }
 
+  private ruleEditorCanRemoveAll(): boolean {
+    return this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID && this.ruleEditorLineCount > 0;
+  }
+
+  private exportRulesFromEditor(): void {
+    this.exportRuleEditorContent().catch((err: BusinessError) => {
+      this.errorText = this.errorMessage(err);
+      this.promptAction?.showToast({ message: this.t('exportRulesFailed') });
+    });
+  }
+
   private ruleEditorMenu(): MenuElement[] {
     const actions: MenuElement[] = [{
       value: this.t('exportRules'),
-      action: () => {
-        this.exportRuleEditorContent().catch((err: BusinessError) => {
-          this.errorText = this.errorMessage(err);
-          this.promptAction?.showToast({ message: this.t('exportRulesFailed') });
-        });
-      }
+      action: () => this.exportRulesFromEditor()
     }];
-    if (this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID && this.ruleEditorLineCount > 0) {
+    if (this.ruleEditorCanRemoveAll()) {
       actions.push({ value: this.t('removeAllRuleLines'), action: () => this.confirmRemoveAllCustomBlockRules() });
     }
     return actions;
+  }
+
+  @Builder
+  private RuleEditorApplyButton(inHeader: boolean) {
+    Button(this.t(this.ruleComposerOpen ? (this.editingRuleLineIndex < 0 ? 'addRuleLine' : 'ruleUpdateLine') :
+      'saveRules'), { type: ButtonType.Normal })
+      .width(inHeader ? undefined : '100%')
+      .height(inHeader ? 38 : 46)
+      .padding({ left: 16, right: 16 })
+      .borderRadius(inHeader ? 12 : 14)
+      .fontSize(inHeader ? 14 : 15)
+      .fontWeight(FontWeight.Medium)
+      .fontColor(Color.White)
+      .backgroundColor(this.actionTone())
+      .enabled(!this.ruleComposerOpen || this.ruleComposerCanApply())
+      .opacity(!this.ruleComposerOpen || this.ruleComposerCanApply() ? 1 : 0.5)
+      .onClick(() => {
+        if (this.ruleComposerOpen) {
+          this.applyRuleComposer();
+        } else {
+          this.applyRuleEditorChanges();
+        }
+      })
   }
 
   @Builder
@@ -12298,7 +12334,8 @@ struct Index {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(this.ruleComposerOpen ?
-          this.t(this.editingRuleLineIndex < 0 ? 'addRuleLine' : 'ruleUpdateLine') : this.editingRuleNameText)
+          this.t(this.useWideRuleEditor() ? 'ruleEditLine' :
+            (this.editingRuleLineIndex < 0 ? 'addRuleLine' : 'ruleUpdateLine')) : this.editingRuleNameText)
           .fontSize(22)
           .fontWeight(FontWeight.Bold)
           .fontColor(this.primaryTextColor())
@@ -12308,7 +12345,9 @@ struct Index {
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
 
-      if (!this.ruleComposerOpen) {
+      if (this.useWideRuleEditor()) {
+        this.RuleEditorApplyButton(true)
+      } else if (!this.ruleComposerOpen) {
         Button('···', { type: ButtonType.Normal })
           .width(40)
           .height(40)
@@ -12329,8 +12368,9 @@ struct Index {
       .width(40)
       .height(40)
       .padding(0)
-      .backgroundColor(this.softPanelTone())
-      .borderRadius(12)
+      .backgroundColor(this.useWideRuleEditor() ? this.cardSurfaceTone() : this.softPanelTone())
+      .border({ width: this.useWideRuleEditor() ? 1 : 0, color: this.cardBorderTone() })
+      .borderRadius(this.useWideRuleEditor() ? 20 : 12)
       .accessibilityText(this.t('closeEditor'))
       .onClick(() => {
         if (this.ruleComposerOpen) {
@@ -12360,8 +12400,8 @@ struct Index {
   }
 
   @Builder
-  private RuleVisualFields() {
-    Column({ space: 9 }) {
+  private RuleVisualInput() {
+    Column({ space: 8 }) {
       Text(this.t(this.ruleComposerFieldLabel()))
         .fontSize(14)
         .fontWeight(FontWeight.Medium)
@@ -12380,7 +12420,14 @@ struct Index {
           this.ruleComposerFieldText = value;
           this.ruleComposerError = '';
         })
-      this.RuleVisualPreview()
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private RuleVisualOptions() {
+    Column({ space: 9 }) {
       if (this.ruleComposerTemplate === undefined) {
         if (this.ruleComposerShowImageCondition) {
           this.RuleImageConditionOptions()
@@ -12409,6 +12456,33 @@ struct Index {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private RuleVisualFields() {
+    if (this.useWideRuleEditor() && this.windowWidthVp >= 880) {
+      Row({ space: 18 }) {
+        Column({ space: 12 }) {
+          this.RuleVisualInput()
+          this.RuleVisualOptions()
+        }
+        .layoutWeight(3)
+        Column() {
+          this.RuleVisualPreview()
+        }
+        .layoutWeight(2)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+    } else {
+      Column({ space: 9 }) {
+        this.RuleVisualInput()
+        this.RuleVisualPreview()
+        this.RuleVisualOptions()
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+    }
   }
 
   @Builder
@@ -12563,7 +12637,7 @@ struct Index {
           this.RuleEditorChoice(this.t('ruleRawMode'), () => this.ruleComposerRaw,
             () => this.selectRuleComposerMode(true))
         }
-        .width('100%')
+        .width(this.useWideRuleEditor() ? 320 : '100%')
         .padding(4)
         .backgroundColor(this.softPanelTone())
         .borderRadius(13)
@@ -12662,7 +12736,21 @@ struct Index {
   }
 
   @Builder
-  private RuleEditorList() {
+  private RuleEditorSecondaryAction(label: LanguageKey, color: ResourceColor, action: () => void) {
+    Button(this.t(label), { type: ButtonType.Normal })
+      .height(38)
+      .padding({ left: 12, right: 12 })
+      .fontSize(13)
+      .fontWeight(FontWeight.Medium)
+      .fontColor(color)
+      .backgroundColor(this.cardSurfaceTone())
+      .border({ width: 1, color: this.cardBorderTone() })
+      .borderRadius(10)
+      .onClick(action)
+  }
+
+  @Builder
+  private RuleEditorToolbar() {
     Row({ space: 10 }) {
       Text(this.ruleEditorCommentCount > 0 ? this.t('ruleListWithComments',
         this.ruleEditorLineCount - this.ruleEditorCommentCount, this.ruleEditorCommentCount) :
@@ -12671,25 +12759,38 @@ struct Index {
         .fontWeight(FontWeight.Medium)
         .fontColor(this.secondaryTextColor())
         .layoutWeight(1)
-      Button() {
-        Row({ space: 5 }) {
-          SymbolGlyph($r('sys.symbol.plus'))
-            .fontSize(14)
-            .fontColor([this.selectedChipTextTone()])
-          Text(this.t('addRuleLine'))
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.selectedChipTextTone())
+      if (this.useWideRuleEditor()) {
+        if (this.ruleEditorCanRemoveAll()) {
+          this.RuleEditorSecondaryAction('removeAllRuleLines', this.isDarkModeActive() ? '#FFABAB' : '#A52C23',
+            () => this.confirmRemoveAllCustomBlockRules())
         }
+        this.RuleEditorSecondaryAction('exportRules', this.primaryTextColor(), () => this.exportRulesFromEditor())
       }
-      .height(42)
-      .padding({ left: 12, right: 12 })
-      .backgroundColor(this.selectedChipSurfaceTone())
-      .borderRadius(12)
-      .accessibilityText(this.t('addRuleLine'))
-      .onClick(() => this.openRuleComposer())
+      if (!this.ruleEditorTextMode) {
+        Button() {
+          Row({ space: 5 }) {
+            SymbolGlyph($r('sys.symbol.plus'))
+              .fontSize(this.useWideRuleEditor() ? 13 : 14)
+              .fontColor([this.selectedChipTextTone()])
+            Text(this.t('addRuleLine'))
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.selectedChipTextTone())
+          }
+        }
+        .height(this.useWideRuleEditor() ? 38 : 42)
+        .padding({ left: 12, right: 12 })
+        .backgroundColor(this.selectedChipSurfaceTone())
+        .borderRadius(this.useWideRuleEditor() ? 10 : 12)
+        .accessibilityText(this.t('addRuleLine'))
+        .onClick(() => this.openRuleComposer())
+      }
     }
     .width('100%')
+  }
+
+  @Builder
+  private RuleEditorList() {
     if (this.ruleEditorLineCount > 0) {
       List({ space: 8 }) {
         LazyForEach(this.ruleEditorLines, (item: RuleLineItem) => {
@@ -12719,10 +12820,46 @@ struct Index {
     }
   }
 
+  private useWideRuleEditor(): boolean {
+    return this.windowWidthVp >= 620 &&
+      (deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === '2in1');
+  }
+
+  private ruleEditorSheetOptions(): SheetOptions {
+    const wide: boolean = this.useWideRuleEditor();
+    return {
+      height: '90%',
+      width: wide ? Math.min(920, this.windowWidthVp - 64) : undefined,
+      preferType: wide ? SheetType.CENTER : undefined,
+      maskColor: wide ? (this.isDarkModeActive() ? '#85000000' : '#520C1426') : undefined,
+      enableOutsideInteractive: wide ? false : undefined,
+      radius: wide ? LengthMetrics.vp(28) : undefined,
+      shadow: wide ? ShadowStyle.OUTER_FLOATING_MD : undefined,
+      backgroundColor: this.canvasTone(),
+      showClose: false,
+      keyboardAvoidMode: SheetKeyboardAvoidMode.RESIZE_ONLY,
+      onWillDismiss: (action: DismissSheetAction) => {
+        if (this.ruleComposerOpen) {
+          this.closeRuleComposer();
+          return;
+        }
+        action.dismiss();
+      },
+      onDisappear: () => {
+        if (this.showRuleEditorSheet) {
+          this.closeRuleEditor();
+        }
+      }
+    };
+  }
+
   @Builder
   private RuleEditorSheet() {
-    Column({ space: 14 }) {
+    Column({ space: this.useWideRuleEditor() ? 12 : 14 }) {
       this.RuleEditorHeader()
+      if (this.useWideRuleEditor()) {
+        Divider().color(this.cardBorderTone())
+      }
       if (!this.ruleComposerOpen && !this.builtInRuleEditorActive()) {
         Row({ space: 6 }) {
           this.RuleEditorChoice(this.t('ruleVisualMode'), () => !this.ruleEditorTextMode,
@@ -12730,10 +12867,13 @@ struct Index {
           this.RuleEditorChoice(this.t('ruleTextMode'), () => this.ruleEditorTextMode,
             () => this.selectRuleEditorMode(true))
         }
-        .width('100%')
+        .width(this.useWideRuleEditor() ? 320 : '100%')
         .padding(4)
         .backgroundColor(this.softPanelTone())
         .borderRadius(13)
+      }
+      if (!this.ruleComposerOpen && (!this.ruleEditorTextMode || this.useWideRuleEditor())) {
+        this.RuleEditorToolbar()
       }
       if (this.ruleComposerOpen) {
         this.RuleComposer()
@@ -12751,28 +12891,15 @@ struct Index {
           .padding(12)
           .onChange((value: string) => this.setRuleEditorDraft(value))
       }
-      Button(this.t(this.ruleComposerOpen ? (this.editingRuleLineIndex < 0 ? 'addRuleLine' : 'ruleUpdateLine') :
-        'saveRules'), { type: ButtonType.Normal })
-        .width('100%')
-        .height(46)
-        .borderRadius(14)
-        .fontSize(15)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(Color.White)
-        .backgroundColor(this.actionTone())
-        .enabled(!this.ruleComposerOpen || this.ruleComposerCanApply())
-        .opacity(!this.ruleComposerOpen || this.ruleComposerCanApply() ? 1 : 0.5)
-        .onClick(() => {
-          if (this.ruleComposerOpen) {
-            this.applyRuleComposer();
-          } else {
-            this.applyRuleEditorChanges();
-          }
-        })
+      if (!this.useWideRuleEditor()) {
+        this.RuleEditorApplyButton(false)
+      }
     }
     .width('100%')
     .height('100%')
-    .padding({ left: 18, right: 18, top: 12, bottom: Math.max(12, this.avoidPaddingBottom + 6) })
+    .alignItems(HorizontalAlign.Start)
+    .padding({ left: 18, right: 18, top: 12,
+      bottom: this.useWideRuleEditor() ? 16 : Math.max(12, this.avoidPaddingBottom + 6) })
     .backgroundColor(this.canvasTone())
   }
 
@@ -12789,6 +12916,7 @@ struct Index {
     .padding({ left: 12, right: 12 })
     .backgroundColor(this.currentTab === index ? this.selectedChipSurfaceTone() : Color.Transparent)
     .borderRadius(12)
+    .accessibilitySelected(this.currentTab === index)
     .onClick(() => {
       if (this.currentTab !== index) {
         this.currentTab = index;
@@ -12904,25 +13032,7 @@ struct Index {
         .justifyContent(FlexAlign.Start)
         .alignItems(HorizontalAlign.Start)
         .align(Alignment.TopStart)
-        .bindSheet(this.showRuleEditorSheet, this.RuleEditorSheet(), {
-          height: '90%',
-          backgroundColor: this.canvasTone(),
-          showClose: false,
-          keyboardAvoidMode: SheetKeyboardAvoidMode.RESIZE_ONLY,
-          onWillDismiss: (action: DismissSheetAction) => {
-            if (this.ruleComposerOpen &&
-              (action.reason === DismissReason.PRESS_BACK || action.reason === DismissReason.SLIDE)) {
-              this.closeRuleComposer();
-              return;
-            }
-            action.dismiss();
-          },
-          onDisappear: () => {
-            if (this.showRuleEditorSheet) {
-              this.closeRuleEditor();
-            }
-          }
-        })
+        .bindSheet(this.showRuleEditorSheet, this.RuleEditorSheet(), this.ruleEditorSheetOptions())
       }
       .width('100%')
       .height('100%')

@@ -287,6 +287,7 @@
     { "name": "ruleInvalidDomain", "value": "请输入有效的域名，例如 example.com。" },
     { "name": "ruleSingleLineOnly", "value": "修改单条规则时，请只输入一行。" },
     { "name": "ruleMoreActions", "value": "更多规则操作" },
+    { "name": "ruleEditLine", "value": "编辑规则" },
     { "name": "ruleUpdateLine", "value": "更新规则" },
     { "name": "ruleDomainAndSubdomains", "value": "%s 和它的子域名（例如 %s）" },
     { "name": "ruleBlockPreview", "value": "这条规则会拦截应用对 %s 发起的%s。" },

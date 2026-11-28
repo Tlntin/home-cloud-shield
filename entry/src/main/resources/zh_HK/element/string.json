@@ -287,6 +287,7 @@
     { "name": "ruleInvalidDomain", "value": "請輸入有效的網域，例如 example.com。" },
     { "name": "ruleSingleLineOnly", "value": "修改單條規則時，請只輸入一行。" },
     { "name": "ruleMoreActions", "value": "更多規則操作" },
+    { "name": "ruleEditLine", "value": "編輯規則" },
     { "name": "ruleUpdateLine", "value": "更新規則" },
     { "name": "ruleDomainAndSubdomains", "value": "%s 和它的子網域（例如 %s）" },
     { "name": "ruleBlockPreview", "value": "這條規則會攔截應用程式對 %s 發出的%s。" },

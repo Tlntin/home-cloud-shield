@@ -287,6 +287,7 @@
     { "name": "ruleInvalidDomain", "value": "Enter a valid domain, such as example.com." },
     { "name": "ruleSingleLineOnly", "value": "Enter one line when editing a single rule." },
     { "name": "ruleMoreActions", "value": "More rule actions" },
+    { "name": "ruleEditLine", "value": "Edit Rule" },
     { "name": "ruleUpdateLine", "value": "Update Rule" },
     { "name": "ruleDomainAndSubdomains", "value": "%s and its subdomains (such as %s)" },
     { "name": "ruleBlockPreview", "value": "For %s, this rule blocks %s." },
