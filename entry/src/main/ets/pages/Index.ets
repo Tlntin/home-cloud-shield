@@ -23,7 +23,8 @@ import {
   LOG_MAINTENANCE_INTERVAL_MS, LogReader, maintainLogFiles
 } from '../data/LogRetention';
 import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/ConfigSync';
-import { formatRuleEditTemplate, formatVisualDnsRule, normalizeRuleDomain, parseVisualDnsRule, ruleEditTemplate,
+import { formatRuleEditTemplate, formatVisualDnsRule, normalizeDomainPattern, normalizeRuleDomain,
+  parseVisualDnsRule, ruleEditTemplate,
   RuleEditorLineSource, RuleEditTemplate, RuleLineItem, RuleMatchScope, RuleQueryType,
   VisualDnsRule } from '../data/DnsRuleComposer';
 import { aghSubscriptionId, seedAghSubscriptionCache, subscriptionCacheName } from '../data/SubscriptionCache';
@@ -225,7 +226,10 @@ type LanguageKey =
   | 'ruleDomainAndSubdomains' | 'ruleDomainOnlyPreview' | 'ruleSubdomainsOnlyPreview' | 'ruleBlockPreview' | 'ruleAllowPreview'
   | 'rulePreviewAllQueries' | 'rulePreviewIpv4Queries' | 'rulePreviewIpv6Queries' | 'rulePreviewSource'
   | 'rulePreviewHostsAddress' | 'rulePreviewNeedsFullEngine' | 'rulePreviewComment' | 'rulePreviewAdvanced'
-  | 'rulePreviewDomainConditions' | 'rulePreviewRegexBlock' | 'rulePreviewRegexAllow' | 'rulePreviewPriority'
+  | 'rulePreviewDomainConditions' | 'rulePreviewRegexBlock' | 'rulePreviewRegexAllow'
+  | 'rulePrioritySwitch' | 'rulePreviewPriorityBlock' | 'rulePreviewPriorityAllow'
+  | 'ruleImageCondition' | 'ruleAnyResource' | 'ruleImagesOnly' | 'rulePreviewImageLite' | 'rulePreviewImageFull'
+  | 'ruleDomainPatternField' | 'rulePatternScope' | 'rulePreviewPatternTarget' | 'ruleInvalidDomainPattern'
   | 'ruleRegexField' | 'ruleExpressionField'
   | 'continueLabel' | 'keepAliveWarnTitle' | 'keepAliveWarnMessage'
   | 'dnsProxyTitle' | 'dnsProxyDesc' | 'dnsProxyCopied' | 'dnsProxyStart' | 'dnsProxyStop'
@@ -515,7 +519,18 @@ function resolveStringResource(key: LanguageKey): number {
     case 'rulePreviewDomainConditions': return $r('app.string.rulePreviewDomainConditions').id;
     case 'rulePreviewRegexBlock': return $r('app.string.rulePreviewRegexBlock').id;
     case 'rulePreviewRegexAllow': return $r('app.string.rulePreviewRegexAllow').id;
-    case 'rulePreviewPriority': return $r('app.string.rulePreviewPriority').id;
+    case 'rulePrioritySwitch': return $r('app.string.rulePrioritySwitch').id;
+    case 'rulePreviewPriorityBlock': return $r('app.string.rulePreviewPriorityBlock').id;
+    case 'rulePreviewPriorityAllow': return $r('app.string.rulePreviewPriorityAllow').id;
+    case 'ruleImageCondition': return $r('app.string.ruleImageCondition').id;
+    case 'ruleAnyResource': return $r('app.string.ruleAnyResource').id;
+    case 'ruleImagesOnly': return $r('app.string.ruleImagesOnly').id;
+    case 'rulePreviewImageLite': return $r('app.string.rulePreviewImageLite').id;
+    case 'rulePreviewImageFull': return $r('app.string.rulePreviewImageFull').id;
+    case 'ruleDomainPatternField': return $r('app.string.ruleDomainPatternField').id;
+    case 'rulePatternScope': return $r('app.string.rulePatternScope').id;
+    case 'rulePreviewPatternTarget': return $r('app.string.rulePreviewPatternTarget').id;
+    case 'ruleInvalidDomainPattern': return $r('app.string.ruleInvalidDomainPattern').id;
     case 'ruleRegexField': return $r('app.string.ruleRegexField').id;
     case 'ruleExpressionField': return $r('app.string.ruleExpressionField').id;
     case 'swipeAgainToExit': return $r('app.string.swipeAgainToExit').id;
@@ -1115,6 +1130,9 @@ struct Index {
   @State ruleComposerScope: RuleMatchScope = 'domainAndSubdomains';
   @State ruleComposerAllow: boolean = false;
   @State ruleComposerQueryType: RuleQueryType = 'all';
+  @State ruleComposerImageOnly: boolean = false;
+  @State ruleComposerImportant: boolean = false;
+  @State ruleComposerShowImageCondition: boolean = false;
   @State ruleComposerError: string = '';
   @State domainSortDescending: boolean = true;
   @State domainActionFilter: QueryActionFilter = 'all';
@@ -3226,6 +3244,7 @@ struct Index {
   private openRuleComposer(item?: RuleLineItem): void {
     this.editingRuleLineIndex = item?.index ?? -1;
     this.ruleComposerRawText = item?.line ?? '';
+    this.ruleComposerShowImageCondition = false;
     this.loadVisualRule(this.ruleComposerRawText);
     this.ruleComposerError = '';
     this.ruleComposerRaw = false;
@@ -3243,6 +3262,8 @@ struct Index {
     this.ruleComposerScope = 'domainAndSubdomains';
     this.ruleComposerAllow = this.editingAllowRules();
     this.ruleComposerQueryType = 'all';
+    this.ruleComposerImageOnly = false;
+    this.ruleComposerImportant = false;
     if (line.length === 0 || /[\r\n]/.test(line)) {
       return;
     }
@@ -3257,6 +3278,9 @@ struct Index {
     this.ruleComposerScope = rule.scope;
     this.ruleComposerAllow = rule.allow;
     this.ruleComposerQueryType = rule.queryType;
+    this.ruleComposerImageOnly = rule.imageOnly;
+    this.ruleComposerImportant = rule.important;
+    this.ruleComposerShowImageCondition = this.ruleComposerShowImageCondition || rule.imageOnly;
   }
 
   private visualRulePreview(): string {
@@ -3264,22 +3288,35 @@ struct Index {
     if (template !== undefined) {
       return formatRuleEditTemplate(template, this.ruleComposerFieldText);
     }
-    const domain: string = normalizeRuleDomain(this.ruleComposerFieldText);
+    const domain: string = this.ruleComposerHost();
     return domain ? formatVisualDnsRule(domain, this.ruleComposerAllow, this.ruleComposerScope,
-      this.ruleComposerQueryType) : '';
+      this.ruleComposerQueryType, this.ruleComposerImageOnly, this.ruleComposerImportant) : '';
+  }
+
+  private ruleComposerHost(): string {
+    return this.ruleComposerScope === 'pattern' ? normalizeDomainPattern(this.ruleComposerFieldText) :
+      normalizeRuleDomain(this.ruleComposerFieldText);
   }
 
   private ruleQueryTypeLabel(type: RuleQueryType): string {
     return type === 'all' ? this.t('ruleAnyQuery') : (type === 'A' ? 'IPv4 (A)' : 'IPv6 (AAAA)');
   }
 
-  private describeDomainFilter(domain: string, allow: boolean, scope: RuleMatchScope, type: RuleQueryType): string {
-    const target: string = scope === 'exact' ? this.t('ruleDomainOnlyPreview', domain) :
-      this.t(scope === 'wildcard' && this.fullModeEnabled ? 'ruleSubdomainsOnlyPreview' : 'ruleDomainAndSubdomains',
-        domain, `www.${domain}`);
+  private describeDomainFilter(domain: string, allow: boolean, scope: RuleMatchScope, type: RuleQueryType,
+    important: boolean = false): string {
+    let target: string;
+    if (scope === 'pattern') {
+      target = this.t('rulePreviewPatternTarget', domain, domain.replace(/\*/g, 'x'));
+    } else {
+      target = scope === 'exact' ? this.t('ruleDomainOnlyPreview', domain) :
+        this.t(scope === 'wildcard' && this.fullModeEnabled ? 'ruleSubdomainsOnlyPreview' : 'ruleDomainAndSubdomains',
+          domain, `www.${domain}`);
+    }
     const queries: string = this.t(type === 'A' ? 'rulePreviewIpv4Queries' :
       (type === 'AAAA' ? 'rulePreviewIpv6Queries' : 'rulePreviewAllQueries'));
-    return this.t(allow ? 'ruleAllowPreview' : 'ruleBlockPreview', target, queries);
+    const explanation: string = this.t(allow ? 'ruleAllowPreview' : 'ruleBlockPreview', target, queries);
+    return important ? `${explanation}\n${this.t(allow ? 'rulePreviewPriorityAllow' : 'rulePreviewPriorityBlock')}` :
+      explanation;
   }
 
   private describeExistingDomainRule(domain: string, template: RuleEditTemplate): string {
@@ -3310,15 +3347,18 @@ struct Index {
     const type: RuleQueryType = modifiers.includes('dnstype=aaaa') ? 'AAAA' :
       (modifiers.includes('dnstype=a') ? 'A' : 'all');
     const scope: RuleMatchScope = wildcard ? 'wildcard' : (subdomains ? 'domainAndSubdomains' : 'exact');
-    const explanation: string = this.describeDomainFilter(domain, prefix.startsWith('@@'), scope, type);
-    return modifiers.includes('important') ? `${explanation}\n${this.t('rulePreviewPriority')}` : explanation;
+    return this.describeDomainFilter(domain, prefix.startsWith('@@'), scope, type, modifiers.includes('important'));
   }
 
   private visualRuleEffect(): string {
     const template: RuleEditTemplate | undefined = this.ruleComposerTemplate;
     if (template === undefined) {
-      return this.describeDomainFilter(normalizeRuleDomain(this.ruleComposerFieldText), this.ruleComposerAllow,
-        this.ruleComposerScope, this.ruleComposerQueryType);
+      if (this.ruleComposerImageOnly && this.fullModeEnabled) {
+        return this.t('rulePreviewImageFull');
+      }
+      const explanation: string = this.describeDomainFilter(this.ruleComposerHost(), this.ruleComposerAllow,
+        this.ruleComposerScope, this.ruleComposerQueryType, this.ruleComposerImportant);
+      return this.ruleComposerImageOnly ? `${this.t('rulePreviewImageLite')}\n${explanation}` : explanation;
     }
     switch (template.field) {
       case 'domain': return this.describeExistingDomainRule(normalizeRuleDomain(this.ruleComposerFieldText), template);
@@ -3336,6 +3376,9 @@ struct Index {
   }
 
   private ruleComposerFieldLabel(): LanguageKey {
+    if (this.ruleComposerTemplate === undefined && this.ruleComposerScope === 'pattern') {
+      return 'ruleDomainPatternField';
+    }
     switch (this.ruleComposerTemplate?.field) {
       case 'pattern': return 'ruleRegexField';
       case 'comment': return 'ruleCommentLabel';
@@ -3383,7 +3426,8 @@ struct Index {
       const visual: VisualDnsRule | undefined = this.ruleComposerRaw || this.ruleComposerTemplate !== undefined
         ? undefined : parseVisualDnsRule(original);
       if (pending[0] === original || (visual !== undefined &&
-        pending[0] === formatVisualDnsRule(visual.domain, visual.allow, visual.scope, visual.queryType))) {
+        pending[0] === formatVisualDnsRule(visual.domain, visual.allow, visual.scope, visual.queryType, visual.imageOnly,
+          visual.important))) {
         this.closeRuleComposer();
         return;
       }
@@ -12306,10 +12350,10 @@ struct Index {
       .constraintSize({ minHeight: 40 })
       .padding({ left: 5, right: 5, top: 6, bottom: 6 })
       .fontSize(13)
-      .fontWeight(selected() ? FontWeight.Medium : FontWeight.Regular)
-      .fontColor(selected() ? this.selectedChipTextTone() : this.secondaryTextColor())
-      .backgroundColor(selected() ? this.selectedChipSurfaceTone() : Color.Transparent)
-      .border({ width: 1, color: selected() ? this.selectedOutlineTone() : Color.Transparent })
+      .fontWeight(selected() ? FontWeight.Bold : FontWeight.Medium)
+      .fontColor(selected() ? this.selectedChipTextTone() : this.primaryTextColor())
+      .backgroundColor(selected() ? this.selectedChipSurfaceTone() : this.cardSurfaceTone())
+      .border({ width: 1, color: selected() ? this.selectedOutlineTone() : this.cardBorderTone() })
       .borderRadius(10)
       .accessibilitySelected(selected())
       .onClick(action)
@@ -12338,8 +12382,56 @@ struct Index {
         })
       this.RuleVisualPreview()
       if (this.ruleComposerTemplate === undefined) {
+        if (this.ruleComposerShowImageCondition) {
+          this.RuleImageConditionOptions()
+        }
+        Row({ space: 12 }) {
+          Text(this.t('rulePrioritySwitch'))
+            .fontSize(14)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+            .layoutWeight(1)
+          Toggle({ type: ToggleType.Switch, isOn: this.ruleComposerImportant })
+            .selectedColor(this.actionTone())
+            .accessibilityText(this.t('rulePrioritySwitch'))
+            .onChange((value: boolean) => {
+              this.ruleComposerImportant = value;
+              this.ruleComposerError = '';
+            })
+        }
+        .width('100%')
+        .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+        .backgroundColor(this.cardSurfaceTone())
+        .border({ width: 1, color: this.cardBorderTone() })
+        .borderRadius(12)
         this.RuleStandardOptions()
       }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private RuleImageConditionOptions() {
+    Column({ space: 8 }) {
+      Text(this.t('ruleImageCondition'))
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.primaryTextColor())
+      Row({ space: 4 }) {
+        this.RuleEditorChoice(this.t('ruleAnyResource'), () => !this.ruleComposerImageOnly, () => {
+          this.ruleComposerImageOnly = false;
+          this.ruleComposerError = '';
+        })
+        this.RuleEditorChoice(this.t('ruleImagesOnly'), () => this.ruleComposerImageOnly, () => {
+          this.ruleComposerImageOnly = true;
+          this.ruleComposerError = '';
+        })
+      }
+      .width('100%')
+      .padding(4)
+      .backgroundColor(this.softPanelTone())
+      .borderRadius(13)
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -12386,6 +12478,12 @@ struct Index {
           this.ruleComposerScope = 'wildcard';
           this.ruleComposerError = '';
         })
+        if (this.ruleComposerScope === 'pattern' || this.ruleComposerFieldText.includes('*')) {
+          this.RuleEditorChoice(this.t('rulePatternScope'), () => this.ruleComposerScope === 'pattern', () => {
+            this.ruleComposerScope = 'pattern';
+            this.ruleComposerError = '';
+          })
+        }
       }
       .width('100%')
       .padding(4)
@@ -12440,7 +12538,8 @@ struct Index {
           .wordBreak(WordBreak.BREAK_ALL)
           .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
       } else {
-        Text(this.t(this.ruleComposerFieldLabel() !== 'ruleDomainField' ? 'writeRulesHere' :
+        Text(this.t(this.ruleComposerFieldLabel() === 'ruleDomainPatternField' ? 'ruleInvalidDomainPattern' :
+          this.ruleComposerFieldLabel() !== 'ruleDomainField' ? 'writeRulesHere' :
           (this.ruleComposerFieldText.trim().length > 0 ? 'ruleInvalidDomain' : 'rulePreviewEmpty')))
           .fontSize(13)
           .fontColor(this.ruleComposerFieldLabel() === 'ruleDomainField' && this.ruleComposerFieldText.trim().length > 0 ?

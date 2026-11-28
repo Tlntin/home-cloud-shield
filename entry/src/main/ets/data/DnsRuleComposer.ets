@@ -1,13 +1,15 @@
 import { parseAppSplitDnsAllowlist } from './AppSplit';
 
 export type RuleQueryType = 'all' | 'A' | 'AAAA';
-export type RuleMatchScope = 'exact' | 'domainAndSubdomains' | 'wildcard';
+export type RuleMatchScope = 'exact' | 'domainAndSubdomains' | 'wildcard' | 'pattern';
 
 export interface VisualDnsRule {
   domain: string;
   allow: boolean;
   scope: RuleMatchScope;
   queryType: RuleQueryType;
+  imageOnly: boolean;
+  important: boolean;
 }
 
 export interface RuleEditTemplate {
@@ -82,6 +84,11 @@ export function normalizeRuleDomain(input: string): string {
   return parseAppSplitDnsAllowlist(value)?.[0] ?? '';
 }
 
+export function normalizeDomainPattern(input: string): string {
+  const value: string = input.trim().toLowerCase().replace(/\.$/, '');
+  return value.includes('*') && normalizeRuleDomain(value.replace(/\*/g, 'a')) ? value : '';
+}
+
 function domainEditTemplate(parts: RegExpExecArray | null): RuleEditTemplate | undefined {
   if (parts === null || !normalizeRuleDomain(parts[2])) {
     return undefined;
@@ -117,25 +124,49 @@ export function formatRuleEditTemplate(template: RuleEditTemplate, value: string
 }
 
 export function formatVisualDnsRule(domain: string, allow: boolean, scope: RuleMatchScope,
-  queryType: RuleQueryType): string {
+  queryType: RuleQueryType, imageOnly: boolean = false, important: boolean = false): string {
   const host: string = scope === 'exact' ? `|${domain}|` : `${scope === 'wildcard' ? '||*.' : '||'}${domain}^`;
-  return `${allow ? '@@' : ''}${host}${queryType === 'all' ? '' : `$dnstype=${queryType}`}`;
+  const modifiers: string[] = [];
+  if (imageOnly) {
+    modifiers.push('image');
+  }
+  if (important) {
+    modifiers.push('important');
+  }
+  if (queryType !== 'all') {
+    modifiers.push(`dnstype=${queryType}`);
+  }
+  return `${allow ? '@@' : ''}${host}${modifiers.length > 0 ? `$${modifiers.join(',')}` : ''}`;
 }
 
 export function parseVisualDnsRule(line: string): VisualDnsRule | undefined {
-  const parts: RegExpExecArray | null = /^(@@)?(\|\|\*\.|\|\||\|)([a-z0-9.-]+)(\^|\|)(?:\$dnstype=(A|AAAA))?$/i.exec(line);
+  const parts: RegExpExecArray | null = /^(@@)?(\|\||\|)([a-z0-9.*-]+)(\^|\|)(?:\$([^\s]+))?$/i.exec(line);
   if (parts === null || (parts[2] !== '|' && parts[4] !== '^')) {
     return undefined;
   }
-  const domain: string = normalizeRuleDomain(parts[3]);
+  const host: string = parts[3];
+  const wildcard: boolean = host.startsWith('*.') && !host.slice(2).includes('*');
+  const pattern: boolean = !wildcard && host.includes('*');
+  if ((wildcard || pattern) && parts[2] === '|') {
+    return undefined;
+  }
+  const domain: string = pattern ? normalizeDomainPattern(host) : normalizeRuleDomain(wildcard ? host.slice(2) : host);
   if (!domain) {
     return undefined;
   }
-  const type: string | undefined = parts[5]?.toUpperCase();
+  const modifiers: string[] = parts[5]?.toLowerCase().split(',') ?? [];
+  if (new Set<string>(modifiers).size !== modifiers.length ||
+    (modifiers.includes('dnstype=a') && modifiers.includes('dnstype=aaaa')) ||
+    modifiers.some((modifier: string) =>
+      modifier !== 'image' && modifier !== 'important' && modifier !== 'dnstype=a' && modifier !== 'dnstype=aaaa')) {
+    return undefined;
+  }
   return {
     domain,
     allow: parts[1] === '@@',
-    scope: parts[2] === '||*.' ? 'wildcard' : (parts[2] === '||' ? 'domainAndSubdomains' : 'exact'),
-    queryType: type === 'A' || type === 'AAAA' ? type : 'all',
+    scope: pattern ? 'pattern' : (wildcard ? 'wildcard' : (parts[2] === '||' ? 'domainAndSubdomains' : 'exact')),
+    queryType: modifiers.includes('dnstype=a') ? 'A' : (modifiers.includes('dnstype=aaaa') ? 'AAAA' : 'all'),
+    imageOnly: modifiers.includes('image'),
+    important: modifiers.includes('important'),
   };
 }
