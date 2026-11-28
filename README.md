@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.1.3-orange)
+![Version](https://img.shields.io/badge/Version-v0.1.4-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `栖云盾` 是一个面向 **HarmonyOS 6.0+** 的本地 DNS 过滤应用：通过**本地 VPN** 或**纯 DNS 代理**接管 DNS 流量，按 **AdGuard 风格规则**拦截广告与跟踪域名，内置**轻量级 / 完整（AdGuardHome）双过滤引擎**。
 
-项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.1.3**（[更新日志](#更新日志)）
+项目地址：<https://github.com/Tlntin/home-cloud-shield> ｜ 当前版本：**v0.1.4**（[更新日志](#更新日志)）
 
 ## 目录
 
@@ -76,12 +76,12 @@
 
 ## 更新日志
 
-当前版本 **v0.1.3**（2026-11-26）更新了配置页和「我的」页面。
+当前版本 **v0.1.4**（2026-11-28）优化了自定义规则编辑和平板横屏布局。
 
-- 规则配置按可用宽度自动切换列数，导入订阅时可填写备注。
-- 在「我的」可通过下拉菜单切换语言，在「外观」可预览并选择主题配色。
+- 导入规则支持逐条可视化编辑、文本编辑和实时预览，注释会单独标记。
+- 平板横屏使用系统居中弹窗，左侧编辑、右侧预览，保存和更新操作位于右上角。
 
-完整变更（中英双语）：[v0.1.3](./docs/CHANGELOG-0.1.3.md) ｜ [v0.1.2](./docs/CHANGELOG-0.1.2.md) ｜ [v0.1.1](./docs/CHANGELOG-0.1.1.md) ｜ [v0.1.0](./docs/CHANGELOG-0.1.0.md) ｜ [v0.0.9](./docs/CHANGELOG-0.0.9.md) ｜ [v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
+完整变更（中英双语）：[v0.1.4](./docs/CHANGELOG-0.1.4.md) ｜ [v0.1.3](./docs/CHANGELOG-0.1.3.md) ｜ [v0.1.2](./docs/CHANGELOG-0.1.2.md) ｜ [v0.1.1](./docs/CHANGELOG-0.1.1.md) ｜ [v0.1.0](./docs/CHANGELOG-0.1.0.md) ｜ [v0.0.9](./docs/CHANGELOG-0.0.9.md) ｜ [v0.0.8](./docs/CHANGELOG-0.0.8.md) ｜ [v0.0.7](./docs/CHANGELOG-0.0.7.md) ｜ [v0.0.6](./docs/CHANGELOG-0.0.6.md) ｜ [v0.0.5](./docs/CHANGELOG-0.0.5.md) ｜ [v0.0.4](./docs/CHANGELOG-0.0.4.md) ｜ [v0.0.3 及更早](./docs/CHANGELOG-0.0.3.md)
 
 ## 引擎与网络模式
 

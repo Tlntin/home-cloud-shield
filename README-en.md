@@ -9,12 +9,12 @@
 ![OpenHarmony](https://img.shields.io/badge/OpenHarmony-App-blue)
 ![ArkTS](https://img.shields.io/badge/ArkTS-C%2B%2B%20Bridge-6f42c1)
 ![AdGuardHome](https://img.shields.io/badge/AdGuardHome-v0.107.64-2ea44f)
-![Version](https://img.shields.io/badge/Version-v0.1.3-orange)
+![Version](https://img.shields.io/badge/Version-v0.1.4-orange)
 ![License](https://img.shields.io/badge/License-GPL--3.0--only-red)
 
 `home_cloud_shield` is a local DNS filtering app for **HarmonyOS 6.0+**: it intercepts DNS traffic through a **local VPN** or a **pure DNS proxy**, blocks ad and tracking domains with **AdGuard-style rules**, and ships a **dual filtering engine** (lightweight / full AdGuardHome).
 
-Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.1.3** ([Changelog](#changelog))
+Project URL: <https://github.com/Tlntin/home-cloud-shield> | Current version: **v0.1.4** ([Changelog](#changelog))
 
 ## Table of Contents
 
@@ -76,12 +76,12 @@ Auto-Installer is a free, cross-platform HarmonyOS app deployment and debugging 
 
 ## Changelog
 
-Version **v0.1.3** (2026-11-26) updates the Config and Me pages.
+Version **v0.1.4** (2026-11-28) improves custom rule editing and the landscape tablet layout.
 
-- The Config page adapts its column count to the available width. You can give imported subscriptions a custom name.
-- Use the language dropdown on Me and preview color themes under Appearance.
+- Edit imported rules individually or as text, with live previews and labeled comments.
+- On landscape tablets, the system dialog places the editor and live preview side by side, with Save and Update actions in the top right.
 
-Full bilingual changelogs: [v0.1.3](./docs/CHANGELOG-0.1.3.md) | [v0.1.2](./docs/CHANGELOG-0.1.2.md) | [v0.1.1](./docs/CHANGELOG-0.1.1.md) | [v0.1.0](./docs/CHANGELOG-0.1.0.md) | [v0.0.9](./docs/CHANGELOG-0.0.9.md) | [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
+Full bilingual changelogs: [v0.1.4](./docs/CHANGELOG-0.1.4.md) | [v0.1.3](./docs/CHANGELOG-0.1.3.md) | [v0.1.2](./docs/CHANGELOG-0.1.2.md) | [v0.1.1](./docs/CHANGELOG-0.1.1.md) | [v0.1.0](./docs/CHANGELOG-0.1.0.md) | [v0.0.9](./docs/CHANGELOG-0.0.9.md) | [v0.0.8](./docs/CHANGELOG-0.0.8.md) | [v0.0.7](./docs/CHANGELOG-0.0.7.md) | [v0.0.6](./docs/CHANGELOG-0.0.6.md) | [v0.0.5](./docs/CHANGELOG-0.0.5.md) | [v0.0.4](./docs/CHANGELOG-0.0.4.md) | [v0.0.3 and earlier](./docs/CHANGELOG-0.0.3.md)
 
 ## Engines and Network Modes
 
