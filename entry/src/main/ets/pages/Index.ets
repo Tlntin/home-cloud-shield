@@ -23,6 +23,8 @@ import {
   LOG_MAINTENANCE_INTERVAL_MS, LogReader, maintainLogFiles
 } from '../data/LogRetention';
 import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/ConfigSync';
+import { formatVisualDnsRule, normalizeRuleDomain, parseVisualDnsRule, RuleQueryType,
+  VisualDnsRule } from '../data/DnsRuleComposer';
 import { aghSubscriptionId, seedAghSubscriptionCache, subscriptionCacheName } from '../data/SubscriptionCache';
 import { blurTitleBar } from '../components/BlurTitleBar';
 import { DEFAULT_SHIELD_PALETTE, paletteAlpha, SHIELD_PALETTES, ShieldColors, ShieldPalette,
@@ -214,6 +216,10 @@ type LanguageKey =
   | 'tapDomainToCreateRule' | 'addRuleLine' | 'customBlockRulePlaceholder' | 'customAllowRulePlaceholder'
   | 'confirmDeleteRuleLine' | 'removeAllRuleLines' | 'confirmRemoveAllBlockRules'
   | 'noCustomRulesHint' | 'swipeAgainToExit'
+  | 'ruleListTitle' | 'ruleVisualMode' | 'ruleRawMode' | 'ruleDomainField' | 'ruleMatchScope'
+  | 'ruleExactDomain' | 'ruleIncludeSubdomains' | 'ruleQueryType' | 'ruleAnyQuery' | 'rulePreviewTitle'
+  | 'rulePreviewEmpty' | 'ruleInvalidDomain' | 'ruleSingleLineOnly' | 'ruleMoreActions' | 'ruleUpdateLine'
+  | 'ruleDomainAndSubdomains' | 'ruleBlockPreview' | 'ruleAllowPreview'
   | 'continueLabel' | 'keepAliveWarnTitle' | 'keepAliveWarnMessage'
   | 'dnsProxyTitle' | 'dnsProxyDesc' | 'dnsProxyCopied' | 'dnsProxyStart' | 'dnsProxyStop'
   | 'dnsProxyDashboard' | 'dnsProxyDashboardDesc' | 'dnsProxyRunningStatus' | 'dnsProxyStoppedStatus'
@@ -466,6 +472,24 @@ function resolveStringResource(key: LanguageKey): number {
     case 'removeAllRuleLines': return $r('app.string.removeAllRuleLines').id;
     case 'confirmRemoveAllBlockRules': return $r('app.string.confirmRemoveAllBlockRules').id;
     case 'noCustomRulesHint': return $r('app.string.noCustomRulesHint').id;
+    case 'ruleListTitle': return $r('app.string.ruleListTitle').id;
+    case 'ruleVisualMode': return $r('app.string.ruleVisualMode').id;
+    case 'ruleRawMode': return $r('app.string.ruleRawMode').id;
+    case 'ruleDomainField': return $r('app.string.ruleDomainField').id;
+    case 'ruleMatchScope': return $r('app.string.ruleMatchScope').id;
+    case 'ruleExactDomain': return $r('app.string.ruleExactDomain').id;
+    case 'ruleIncludeSubdomains': return $r('app.string.ruleIncludeSubdomains').id;
+    case 'ruleQueryType': return $r('app.string.ruleQueryType').id;
+    case 'ruleAnyQuery': return $r('app.string.ruleAnyQuery').id;
+    case 'rulePreviewTitle': return $r('app.string.rulePreviewTitle').id;
+    case 'rulePreviewEmpty': return $r('app.string.rulePreviewEmpty').id;
+    case 'ruleInvalidDomain': return $r('app.string.ruleInvalidDomain').id;
+    case 'ruleSingleLineOnly': return $r('app.string.ruleSingleLineOnly').id;
+    case 'ruleMoreActions': return $r('app.string.ruleMoreActions').id;
+    case 'ruleUpdateLine': return $r('app.string.ruleUpdateLine').id;
+    case 'ruleDomainAndSubdomains': return $r('app.string.ruleDomainAndSubdomains').id;
+    case 'ruleBlockPreview': return $r('app.string.ruleBlockPreview').id;
+    case 'ruleAllowPreview': return $r('app.string.ruleAllowPreview').id;
     case 'swipeAgainToExit': return $r('app.string.swipeAgainToExit').id;
     case 'continueLabel': return $r('app.string.continueLabel').id;
     case 'keepAliveWarnTitle': return $r('app.string.keepAliveWarnTitle').id;
@@ -670,6 +694,7 @@ interface RuleLineItem {
   key: string;
   line: string;
   index: number;
+  domain: string;
 }
 
 type QueryActionFilter = 'all' | 'allowed' | 'blocked';
@@ -1055,7 +1080,14 @@ struct Index {
   @State showRuleEditorSheet: boolean = false;
   @State editingRuleProfileId: string = '';
   @State editingRuleNameText: string = '';
-  @State ruleLineInputText: string = '';
+  @State editingRuleLineIndex: number = -1;
+  @State ruleComposerOpen: boolean = false;
+  @State ruleComposerRaw: boolean = false;
+  @State ruleComposerDomain: string = '';
+  @State ruleComposerRawText: string = '';
+  @State ruleComposerSubdomains: boolean = true;
+  @State ruleComposerQueryType: RuleQueryType = 'all';
+  @State ruleComposerError: string = '';
   @State domainSortDescending: boolean = true;
   @State domainActionFilter: QueryActionFilter = 'all';
   @State dnsSearchText: string = '';
@@ -3106,7 +3138,7 @@ struct Index {
     }
     this.editingRuleProfileId = profileId;
     this.editingRuleNameText = profile.name;
-    this.ruleLineInputText = '';
+    this.closeRuleComposer();
     this.rulesText = profile.content;
     this.showRuleEditorSheet = true;
   }
@@ -3115,8 +3147,8 @@ struct Index {
     this.showRuleEditorSheet = false;
     this.editingRuleProfileId = '';
     this.editingRuleNameText = '';
-    this.ruleLineInputText = '';
-    this.loadRulesText();
+    this.closeRuleComposer();
+    this.rulesText = this.buildMergedRulesText();
   }
 
   private editingRuleProfile(): RuleProfile | undefined {
@@ -3128,59 +3160,140 @@ struct Index {
   }
 
   private builtInRuleInputPlaceholder(): string {
-    if (this.editingRuleProfileId === CUSTOM_ALLOW_RULE_PROFILE_ID) {
+    if (this.editingAllowRules()) {
       return this.t('customAllowRulePlaceholder');
     }
     return this.t('customBlockRulePlaceholder');
   }
 
+  private editingAllowRules(): boolean {
+    return this.editingRuleProfileId === CUSTOM_ALLOW_RULE_PROFILE_ID;
+  }
+
   private editingRuleLineItems(): RuleLineItem[] {
-    return this.ruleProfileLines(this.rulesText).map((line: string, index: number) => {
+    return this.normalizeRuleContent(this.rulesText).split('\n').map((raw: string, index: number) => {
+      const line: string = raw.trim();
       const item: RuleLineItem = {
         key: `${index}_${line}`,
         line,
         index,
+        domain: parseVisualDnsRule(line)?.domain ?? '',
       };
       return item;
-    });
+    }).filter((item: RuleLineItem) => item.line.length > 0);
   }
 
-  private formatBuiltInRuleLine(value: string): string {
-    const trimmed: string = value.trim();
-    if (trimmed.length === 0) {
-      return '';
-    }
-    if (trimmed.startsWith('@@') || trimmed.startsWith('||') || trimmed.startsWith('!')) {
-      return trimmed;
-    }
-    return this.buildRuleLineForDomain(trimmed, this.editingRuleProfileId === CUSTOM_ALLOW_RULE_PROFILE_ID);
+  private openRuleComposer(item?: RuleLineItem): void {
+    this.editingRuleLineIndex = item?.index ?? -1;
+    this.ruleComposerRawText = item?.line ?? '';
+    this.ruleComposerDomain = '';
+    this.ruleComposerSubdomains = true;
+    this.ruleComposerQueryType = 'all';
+    this.ruleComposerError = '';
+    this.ruleComposerRaw = item !== undefined && !this.loadVisualRule(item.line);
+    this.ruleComposerOpen = true;
   }
 
-  private addRuleLineToEditor(): void {
-    const currentLines: string[] = this.ruleProfileLines(this.rulesText);
-    const pendingLines: string[] = this.normalizeRuleContent(this.ruleLineInputText)
-      .split('\n')
-      .map((line: string) => this.formatBuiltInRuleLine(line))
-      .filter((line: string) => line.length > 0);
-    if (pendingLines.length === 0) {
+  private closeRuleComposer(): void {
+    this.ruleComposerOpen = false;
+    this.editingRuleLineIndex = -1;
+  }
+
+  private loadVisualRule(line: string): boolean {
+    const rule: VisualDnsRule | undefined = parseVisualDnsRule(line);
+    if (rule === undefined || rule.allow !== this.editingAllowRules()) {
+      return false;
+    }
+    this.ruleComposerDomain = rule.domain;
+    this.ruleComposerSubdomains = rule.includeSubdomains;
+    this.ruleComposerQueryType = rule.queryType;
+    return true;
+  }
+
+  private visualRulePreview(): string {
+    const domain: string = normalizeRuleDomain(this.ruleComposerDomain);
+    return domain ? formatVisualDnsRule(domain, this.editingAllowRules(), this.ruleComposerSubdomains,
+      this.ruleComposerQueryType) : '';
+  }
+
+  private ruleQueryTypeLabel(type: RuleQueryType): string {
+    return type === 'all' ? this.t('ruleAnyQuery') : (type === 'A' ? 'IPv4 (A)' : 'IPv6 (AAAA)');
+  }
+
+  private visualRuleEffect(): string {
+    const domain: string = normalizeRuleDomain(this.ruleComposerDomain);
+    const scope: string = this.ruleComposerSubdomains ? this.t('ruleDomainAndSubdomains', domain) : domain;
+    return this.t(this.editingAllowRules() ? 'ruleAllowPreview' : 'ruleBlockPreview', scope,
+      this.ruleQueryTypeLabel(this.ruleComposerQueryType));
+  }
+
+  private selectRuleComposerMode(raw: boolean): void {
+    if (raw === this.ruleComposerRaw) {
       return;
     }
-    let changed = false;
-    pendingLines.forEach((line: string) => {
-      if (!currentLines.includes(line)) {
-        currentLines.push(line);
-        changed = true;
+    if (raw) {
+      const preview: string = this.visualRulePreview();
+      if (preview) {
+        this.ruleComposerRawText = preview;
       }
-    });
-    if (!changed) {
+    } else if (!this.loadVisualRule(this.ruleComposerRawText.trim())) {
+      this.ruleComposerDomain = '';
+      this.ruleComposerSubdomains = true;
+      this.ruleComposerQueryType = 'all';
+    }
+    this.ruleComposerRaw = raw;
+    this.ruleComposerError = '';
+  }
+
+  private ruleComposerCanApply(): boolean {
+    return this.ruleComposerRaw ? this.ruleComposerRawText.trim().length > 0 : this.visualRulePreview().length > 0;
+  }
+
+  private applyRuleComposer(): void {
+    const preview: string = this.visualRulePreview();
+    const pending: string[] = this.ruleComposerRaw ? this.ruleProfileLines(this.ruleComposerRawText) :
+      (preview ? [preview] : []);
+    if (pending.length === 0) {
       return;
     }
-    this.rulesText = currentLines.join('\n');
-    this.ruleLineInputText = '';
+    const index: number = this.editingRuleLineIndex;
+    const lines: string[] = this.normalizeRuleContent(this.rulesText).split('\n');
+    const existing: Set<string> = new Set<string>(lines.map((line: string) => line.trim()));
+    if (index >= 0) {
+      if (pending.length !== 1) {
+        this.ruleComposerError = this.t('ruleSingleLineOnly');
+        return;
+      }
+      if (pending[0] === lines[index].trim()) {
+        this.closeRuleComposer();
+        return;
+      }
+      if (existing.has(pending[0])) {
+        this.ruleComposerError = this.t('ruleAlreadyExists', pending[0]);
+        return;
+      }
+      lines[index] = pending[0];
+      this.rulesText = lines.join('\n');
+    } else {
+      const additions: string[] = [];
+      for (const line of pending) {
+        if (!existing.has(line)) {
+          existing.add(line);
+          additions.push(line);
+        }
+      }
+      if (additions.length === 0) {
+        this.ruleComposerError = this.t('ruleAlreadyExists', pending[0]);
+        return;
+      }
+      const content: string = this.normalizeRuleContent(this.rulesText).trimEnd();
+      this.rulesText = (content ? `${content}\n` : '') + additions.join('\n');
+    }
+    this.closeRuleComposer();
   }
 
   private confirmDeleteRuleLine(lineIndex: number): void {
-    const lines: string[] = this.ruleProfileLines(this.rulesText);
+    const lines: string[] = this.normalizeRuleContent(this.rulesText).split('\n');
     if (lineIndex < 0 || lineIndex >= lines.length) {
       return;
     }
@@ -3201,9 +3314,8 @@ struct Index {
           value: this.t('confirm'),
           action: () => {
             try {
-              const nextLines: string[] = this.ruleProfileLines(this.rulesText);
-              nextLines.splice(lineIndex, 1);
-              this.rulesText = nextLines.join('\n');
+              lines.splice(lineIndex, 1);
+              this.rulesText = lines.join('\n');
             } catch (err) {
               this.errorText = this.errorMessage(err);
             }
@@ -3227,7 +3339,6 @@ struct Index {
           action: () => {
             if (this.showRuleEditorSheet && this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID) {
               this.rulesText = '';
-              this.ruleLineInputText = '';
               this.applyRuleEditorChanges();
               this.saveRules();
               this.restartFullEngineForConfig();
@@ -3714,7 +3825,7 @@ struct Index {
   }
 
   private buildRuleLineForDomain(domain: string, allow: boolean): string {
-    return allow ? `@@||${domain}^` : `||${domain}^`;
+    return formatVisualDnsRule(domain, allow, true, 'all');
   }
 
   private ruleProfileLines(profileContent: string): string[] {
@@ -3854,9 +3965,6 @@ struct Index {
   }
 
   private applyRuleEditorChanges(): void {
-    if (this.builtInRuleEditorActive()) {
-      this.addRuleLineToEditor();
-    }
     const next: RuleProfile[] = [];
     let changed = false;
     this.ruleProfiles.forEach((profile: RuleProfile) => {
@@ -11990,231 +12098,404 @@ struct Index {
     .alignItems(HorizontalAlign.Start)
   }
 
-  @Builder
-  private RuleEditorSheet() {
-    Column({ space: 12 }) {
-      Row({ space: 8 }) {
-        this.IconBubble(this.sectionGlyph('rules'), this.isDarkModeActive() ? '#22324A' : '#EEF3FA', '#2B5B95', 24, 12)
-        Column({ space: 2 }) {
-          Text(this.t('rulesEditor'))
-            .fontSize(20)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.primaryTextColor())
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
+﻿
+  private ruleEditorMenu(): MenuElement[] {
+    const actions: MenuElement[] = [{
+      value: this.t('exportRules'),
+      action: () => {
+        this.exportRuleEditorContent().catch((err: BusinessError) => {
+          this.errorText = this.errorMessage(err);
+          this.promptAction?.showToast({ message: this.t('exportRulesFailed') });
+        });
       }
-      .width('100%')
+    }];
+    if (this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID && this.rulesText.trim().length > 0) {
+      actions.push({ value: this.t('removeAllRuleLines'), action: () => this.confirmRemoveAllCustomBlockRules() });
+    }
+    return actions;
+  }
 
-      Row({ space: 8 }) {
-        Text(this.editingRuleProfile()?.name ?? this.editingRuleNameText)
-          .layoutWeight(1)
-          .fontSize(16)
-          .fontWeight(FontWeight.Medium)
+  @Builder
+  private RuleEditorHeader() {
+    Row({ space: 10 }) {
+      if (this.ruleComposerOpen) {
+        Button(this.t('back'), { type: ButtonType.Normal })
+          .height(40)
+          .padding({ left: 12, right: 12 })
+          .borderRadius(12)
+          .backgroundColor(this.softPanelTone())
+          .fontSize(14)
+          .fontColor(this.primaryTextColor())
+          .onClick(() => this.closeRuleComposer())
+      } else {
+        SymbolGlyph($r('sys.symbol.doc_text'))
+          .fontSize(19)
+          .fontColor([this.selectedChipTextTone()])
+          .width(42)
+          .height(42)
+          .borderRadius(13)
+          .backgroundColor(this.selectedChipSurfaceTone())
+      }
+      Column({ space: 3 }) {
+        Text(this.ruleComposerOpen ? this.editingRuleNameText : this.t('rulesEditor'))
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.ruleComposerOpen ?
+          this.t(this.editingRuleLineIndex < 0 ? 'addRuleLine' : 'ruleUpdateLine') : this.editingRuleNameText)
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
           .fontColor(this.primaryTextColor())
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        if (this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID) {
-          Button(this.t('removeAllRuleLines'), { type: ButtonType.Normal })
-            .height(32)
-            .padding({ left: 12, right: 12 })
-            .fontSize(13)
-            .fontColor(this.isDarkModeActive() ? '#FF8A8A' : '#B42318')
-            .backgroundColor(this.softRedTone())
-            .borderRadius(10)
-            .enabled(this.rulesText.trim().length > 0)
-            .onClick(() => this.confirmRemoveAllCustomBlockRules())
-        }
       }
-        .width('100%')
-        .height(44)
-        .alignItems(VerticalAlign.Center)
-        .backgroundColor(this.sheetInputSurfaceTone())
-        .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-        .borderRadius(14)
-        .border({ width: 1, color: this.sheetBorderTone() })
-        .padding({ left: 12, right: 12 })
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
 
-      Row({ space: 8 }) {
-        Text('||domain^')
-          .fontSize(11)
-          .fontColor('#185B45')
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-          .backgroundColor(this.softGreenTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-          .border({ width: 1, color: this.cardBorderTone() })
+      if (!this.ruleComposerOpen) {
+        Button('···', { type: ButtonType.Normal })
+          .width(40)
+          .height(40)
+          .padding(0)
+          .fontSize(22)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+          .backgroundColor(this.softPanelTone())
           .borderRadius(12)
-        Text('@@ whitelist')
-          .fontSize(11)
-          .fontColor('#2B5B95')
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-          .backgroundColor(this.softBlueTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .borderRadius(12)
-        Text('IPv6')
-          .fontSize(11)
-          .fontColor(this.accentAmberTone())
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-          .backgroundColor(this.coolNeutralChipSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .borderRadius(12)
+          .accessibilityText(this.t('ruleMoreActions'))
+          .bindMenu(this.ruleEditorMenu())
+        Button() {
+          SymbolGlyph($r('sys.symbol.xmark'))
+            .fontSize(15)
+            .fontColor([this.primaryTextColor()])
+        }
+        .width(40)
+        .height(40)
+        .padding(0)
+        .backgroundColor(this.softPanelTone())
+        .borderRadius(12)
+        .accessibilityText(this.t('closeEditor'))
+        .onClick(() => this.closeRuleEditor())
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  private RuleEditorChoice(label: string, selected: () => boolean, action: () => void) {
+    Button(label, { type: ButtonType.Normal })
+      .layoutWeight(1)
+      .constraintSize({ minHeight: 40 })
+      .padding({ left: 5, right: 5, top: 6, bottom: 6 })
+      .fontSize(13)
+      .fontWeight(selected() ? FontWeight.Medium : FontWeight.Regular)
+      .fontColor(selected() ? this.selectedChipTextTone() : this.secondaryTextColor())
+      .backgroundColor(selected() ? this.selectedChipSurfaceTone() : Color.Transparent)
+      .border({ width: 1, color: selected() ? this.selectedOutlineTone() : Color.Transparent })
+      .borderRadius(10)
+      .accessibilitySelected(selected())
+      .onClick(action)
+  }
+
+  @Builder
+  private RuleVisualFields() {
+    Column({ space: 9 }) {
+      Text(this.t('ruleDomainField'))
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.primaryTextColor())
+      TextInput({ text: this.ruleComposerDomain, placeholder: 'example.com' })
+        .id('rule-composer-domain')
+        .width('100%')
+        .height(48)
+        .type(InputType.URL)
+        .fontSize(16)
+        .backgroundColor(this.cardSurfaceTone())
+        .border({ width: 1, color: this.cardBorderTone() })
+        .borderRadius(12)
+        .padding({ left: 12, right: 12 })
+        .onChange((value: string) => {
+          this.ruleComposerDomain = value;
+          this.ruleComposerError = '';
+        })
+      this.RuleVisualPreview()
+      Text(this.t('ruleMatchScope'))
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.primaryTextColor())
+        .margin({ top: 4 })
+      Row({ space: 4 }) {
+        this.RuleEditorChoice(this.t('ruleExactDomain'), () => !this.ruleComposerSubdomains, () => {
+          this.ruleComposerSubdomains = false;
+          this.ruleComposerError = '';
+        })
+        this.RuleEditorChoice(this.t('ruleIncludeSubdomains'), () => this.ruleComposerSubdomains, () => {
+          this.ruleComposerSubdomains = true;
+          this.ruleComposerError = '';
+        })
       }
       .width('100%')
+      .padding(4)
+      .backgroundColor(this.softPanelTone())
+      .borderRadius(13)
+      Text(this.t('ruleQueryType'))
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.primaryTextColor())
+        .margin({ top: 4 })
+      Row({ space: 4 }) {
+        ForEach(['all', 'A', 'AAAA'] as RuleQueryType[], (type: RuleQueryType) => {
+          this.RuleEditorChoice(this.ruleQueryTypeLabel(type), () => this.ruleComposerQueryType === type, () => {
+            this.ruleComposerQueryType = type;
+            this.ruleComposerError = '';
+          })
+        }, (type: RuleQueryType) => type)
+      }
+      .width('100%')
+      .padding(4)
+      .backgroundColor(this.softPanelTone())
+      .borderRadius(13)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
 
-      if (this.builtInRuleEditorActive()) {
-        Column({ space: 10 }) {
-          Row({ space: 8 }) {
-            TextInput({ text: this.ruleLineInputText, placeholder: this.builtInRuleInputPlaceholder() })
-              .layoutWeight(1)
-              .height(44)
-              .fontSize(14)
-              .backgroundColor(this.sheetInputSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .borderRadius(14)
-              .border({ width: 1, color: this.sheetBorderTone() })
-              .padding({ left: 12, right: 12 })
-              .onChange((value: string) => {
-                this.ruleLineInputText = value;
-              })
-            Button(this.t('addRuleLine'))
-              .height(44)
-              .padding({ left: 16, right: 16 })
-              .backgroundColor(this.coolChipSurfaceTone())
-              .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-              .fontColor(this.selectedChipTextTone())
-              .borderRadius(14)
-              .border({ width: 1, color: this.cardBorderTone() })
-              .onClick(() => {
-                this.addRuleLineToEditor();
-              })
-          }
+  @Builder
+  private RuleVisualPreview() {
+    Column({ space: 8 }) {
+      Text(this.t('rulePreviewTitle'))
+        .fontSize(13)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.selectedChipTextTone())
+      if (this.visualRulePreview().length > 0) {
+        Text(this.visualRulePreview())
           .width('100%')
-
-          Column() {
-            if (this.editingRuleLineItems().length === 0) {
-              Text(this.t('noCustomRulesHint'))
-                .fontSize(13)
-                .lineHeight(20)
-                .textAlign(TextAlign.Center)
-                .fontColor(this.secondaryTextColor())
-            } else {
-              List({ space: 8 }) {
-                ForEach(this.editingRuleLineItems(), (item: RuleLineItem) => {
-                  ListItem() {
-                    Row({ space: 10 }) {
-                      Text(item.line)
-                        .layoutWeight(1)
-                        .fontSize(14)
-                        .fontColor(this.primaryTextColor())
-                        .maxLines(2)
-                        .textOverflow({ overflow: TextOverflow.Ellipsis })
-
-                      Button() {
-                        Text('×')
-                          .fontSize(18)
-                          .fontWeight(FontWeight.Medium)
-                          .fontColor('#B42318')
-                      }
-                      .width(32)
-                      .height(32)
-                      .backgroundColor(this.warmChipSurfaceTone())
-                      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                      .borderRadius(16)
-                      .border({ width: 1, color: this.cardBorderTone() })
-                      .onClick(() => {
-                        this.confirmDeleteRuleLine(item.index);
-                      })
-                    }
-                    .width('100%')
-                    .alignItems(VerticalAlign.Center)
-                    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
-                    .backgroundColor(this.softPanelTone())
-                    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-                    .borderRadius(14)
-                    .border({ width: 1, color: this.cardBorderTone() })
-                  }
-                }, (item: RuleLineItem) => item.key)
-              }
-              .width('100%')
-              .height('100%')
-              .scrollBar(BarState.Auto)
-            }
-          }
+          .fontSize(13)
+          .fontFamily('monospace')
+          .fontColor(this.selectedChipTextTone())
+          .wordBreak(WordBreak.BREAK_ALL)
+          .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
+        Text(this.visualRuleEffect())
           .width('100%')
-          .height(306)
-          .justifyContent(FlexAlign.Center)
-          .padding(12)
-          .backgroundColor(this.sheetInputSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(18)
-          .border({ width: 1, color: this.sheetBorderTone() })
-          .shadow({ radius: 10, color: this.sheetShadowTone() })
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+          .wordBreak(WordBreak.BREAK_WORD)
+      } else {
+        Text(this.t(this.ruleComposerDomain.trim().length > 0 ? 'ruleInvalidDomain' : 'rulePreviewEmpty'))
+          .fontSize(13)
+          .fontColor(this.ruleComposerDomain.trim().length > 0 ?
+            (this.isDarkModeActive() ? '#FFABAB' : '#A52C23') : this.secondaryTextColor())
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding(12)
+    .backgroundColor(this.selectedChipSurfaceTone())
+    .borderRadius(14)
+  }
+
+  @Builder
+  private RuleComposer() {
+    Scroll() {
+      Column({ space: 14 }) {
+        Row({ space: 6 }) {
+          this.RuleEditorChoice(this.t('ruleVisualMode'), () => !this.ruleComposerRaw,
+            () => this.selectRuleComposerMode(false))
+          this.RuleEditorChoice(this.t('ruleRawMode'), () => this.ruleComposerRaw,
+            () => this.selectRuleComposerMode(true))
         }
         .width('100%')
+        .padding(4)
+        .backgroundColor(this.softPanelTone())
+        .borderRadius(13)
+        if (this.ruleComposerRaw) {
+          TextArea({ text: this.ruleComposerRawText, placeholder: this.builtInRuleInputPlaceholder() })
+            .width('100%')
+            .height(170)
+            .fontSize(14)
+            .fontFamily('monospace')
+            .backgroundColor(this.cardSurfaceTone())
+            .border({ width: 1, color: this.cardBorderTone() })
+            .borderRadius(12)
+            .padding(12)
+            .onChange((value: string) => {
+              this.ruleComposerRawText = value;
+              this.ruleComposerError = '';
+            })
+        } else {
+          this.RuleVisualFields()
+        }
+        if (this.ruleComposerError.length > 0) {
+          Text(this.ruleComposerError)
+            .fontSize(13)
+            .fontColor(this.isDarkModeActive() ? '#FFABAB' : '#A52C23')
+            .width('100%')
+            .wordBreak(WordBreak.BREAK_ALL)
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding({ bottom: 4 })
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .align(Alignment.TopStart)
+    .scrollBar(BarState.Auto)
+  }
+
+  @Builder
+  private RuleEditorListItem(item: RuleLineItem) {
+    Row({ space: 8 }) {
+      Column({ space: 4 }) {
+        if (item.domain.length > 0) {
+          Text(item.domain)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.primaryTextColor())
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        Text(item.line)
+          .fontSize(13)
+          .fontFamily('monospace')
+          .fontColor(item.domain.length > 0 ? this.secondaryTextColor() : this.primaryTextColor())
+          .maxLines(item.domain.length > 0 ? 1 : 2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Button(this.t('editRule'), { type: ButtonType.Normal })
+        .height(40)
+        .padding({ left: 11, right: 11 })
+        .fontSize(13)
+        .fontColor(this.selectedChipTextTone())
+        .backgroundColor(this.selectedChipSurfaceTone())
+        .borderRadius(10)
+        .onClick(() => this.openRuleComposer(item))
+      Button() {
+        SymbolGlyph($r('sys.symbol.trash'))
+          .fontSize(16)
+          .fontColor([this.isDarkModeActive() ? '#FFABAB' : '#A52C23'])
+      }
+      .width(40)
+      .height(40)
+      .padding(0)
+      .backgroundColor(Color.Transparent)
+      .borderRadius(10)
+      .accessibilityText(this.t('deleteRule'))
+      .onClick(() => this.confirmDeleteRuleLine(item.index))
+    }
+    .width('100%')
+    .padding({ left: 13, right: 6, top: 9, bottom: 9 })
+    .backgroundColor(this.cardSurfaceTone())
+    .border({ width: 1, color: this.cardBorderTone() })
+    .borderRadius(14)
+  }
+
+  @Builder
+  private RuleEditorList() {
+    Row({ space: 10 }) {
+      Text(this.t('ruleListTitle', this.ruleProfileLines(this.rulesText).length))
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.secondaryTextColor())
+        .layoutWeight(1)
+      Button() {
+        Row({ space: 5 }) {
+          SymbolGlyph($r('sys.symbol.plus'))
+            .fontSize(14)
+            .fontColor([this.selectedChipTextTone()])
+          Text(this.t('addRuleLine'))
+            .fontSize(14)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.selectedChipTextTone())
+        }
+      }
+      .height(42)
+      .padding({ left: 12, right: 12 })
+      .backgroundColor(this.selectedChipSurfaceTone())
+      .borderRadius(12)
+      .accessibilityText(this.t('addRuleLine'))
+      .onClick(() => this.openRuleComposer())
+    }
+    .width('100%')
+    if (this.rulesText.trim().length > 0) {
+      List({ space: 8 }) {
+        ForEach(this.editingRuleLineItems(), (item: RuleLineItem) => {
+          ListItem() {
+            this.RuleEditorListItem(item)
+          }
+        }, (item: RuleLineItem) => item.key)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Auto)
+    } else {
+      Column() {
+        Text(this.t('noCustomRulesHint'))
+          .fontSize(14)
+          .fontColor(this.secondaryTextColor())
+          .textAlign(TextAlign.Center)
+          .padding(18)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+      .backgroundColor(this.cardSurfaceTone())
+      .border({ width: 1, color: this.cardBorderTone() })
+      .borderRadius(14)
+    }
+  }
+
+  @Builder
+  private RuleEditorSheet() {
+    Column({ space: 14 }) {
+      this.RuleEditorHeader()
+      if (this.ruleComposerOpen) {
+        this.RuleComposer()
+      } else if (this.builtInRuleEditorActive()) {
+        this.RuleEditorList()
       } else {
         TextArea({ text: this.rulesText, placeholder: this.t('writeRulesHere') })
           .width('100%')
-          .height(360)
-          .backgroundColor(this.sheetInputSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-          .borderRadius(18)
-          .border({ width: 1, color: this.sheetBorderTone() })
-          .fontSize(13)
+          .layoutWeight(1)
+          .fontSize(14)
+          .fontFamily('monospace')
+          .backgroundColor(this.cardSurfaceTone())
+          .border({ width: 1, color: this.cardBorderTone() })
+          .borderRadius(14)
           .padding(12)
-          .shadow({ radius: 10, color: this.sheetShadowTone() })
           .onChange((value: string) => {
             this.rulesText = value;
           })
       }
-
-      Row({ space: 12 }) {
-        Button(this.t('closeEditor'))
-          .height(42)
-          .layoutWeight(1)
-          .backgroundColor(this.coolNeutralChipSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-          .fontColor(this.primaryTextColor())
-          .borderRadius(14)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .onClick(() => {
-            this.closeRuleEditor();
-          })
-        Button(this.t('exportRules'))
-          .height(42)
-          .layoutWeight(1)
-          .backgroundColor(this.coolNeutralChipSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-          .fontColor(this.primaryTextColor())
-          .borderRadius(14)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .onClick(() => {
-            this.exportRuleEditorContent().catch((err: BusinessError) => {
-              this.errorText = this.errorMessage(err);
-              this.promptAction?.showToast({ message: this.t('exportRulesFailed') });
-            });
-          })
-        Button(this.t('saveRules'))
-          .height(42)
-          .layoutWeight(1)
-          .backgroundColor(this.coolChipSurfaceTone())
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-          .fontColor(this.selectedChipTextTone())
-          .borderRadius(14)
-          .border({ width: 1, color: this.cardBorderTone() })
-          .onClick(() => {
+      Button(this.t(this.ruleComposerOpen ? (this.editingRuleLineIndex < 0 ? 'addRuleLine' : 'ruleUpdateLine') :
+        'saveRules'), { type: ButtonType.Normal })
+        .width('100%')
+        .height(46)
+        .borderRadius(14)
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(Color.White)
+        .backgroundColor(this.actionTone())
+        .enabled(!this.ruleComposerOpen || this.ruleComposerCanApply())
+        .opacity(!this.ruleComposerOpen || this.ruleComposerCanApply() ? 1 : 0.5)
+        .onClick(() => {
+          if (this.ruleComposerOpen) {
+            this.applyRuleComposer();
+          } else {
             this.applyRuleEditorChanges();
-          })
-      }
-      .width('100%')
+          }
+        })
     }
     .width('100%')
-    .padding({ left: 18, right: 18, top: 18, bottom: Math.max(18, this.avoidPaddingBottom + 12) })
-    .backgroundColor(this.sheetSurfaceTone())
-    .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-    .border({ width: 1, color: this.sheetBorderTone() })
-    .shadow({ radius: 18, color: this.sheetShadowTone(), offsetX: 0, offsetY: -4 })
+    .height('100%')
+    .padding({ left: 18, right: 18, top: 12, bottom: Math.max(12, this.avoidPaddingBottom + 6) })
+    .backgroundColor(this.canvasTone())
   }
 
   @Builder
@@ -12346,11 +12627,14 @@ struct Index {
         .alignItems(HorizontalAlign.Start)
         .align(Alignment.TopStart)
         .bindSheet(this.showRuleEditorSheet, this.RuleEditorSheet(), {
-          height: SheetSize.FIT_CONTENT,
-          backgroundColor: Color.Transparent,
+          height: '90%',
+          backgroundColor: this.canvasTone(),
+          showClose: false,
+          keyboardAvoidMode: SheetKeyboardAvoidMode.RESIZE_ONLY,
           onDisappear: () => {
-            this.showRuleEditorSheet = false;
-            this.editingRuleProfileId = '';
+            if (this.showRuleEditorSheet) {
+              this.closeRuleEditor();
+            }
           }
         })
       }
