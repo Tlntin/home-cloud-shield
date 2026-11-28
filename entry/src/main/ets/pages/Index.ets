@@ -23,7 +23,8 @@ import {
   LOG_MAINTENANCE_INTERVAL_MS, LogReader, maintainLogFiles
 } from '../data/LogRetention';
 import { ConfigSyncConfirmation, ConfigSyncDevice, configSync } from '../data/ConfigSync';
-import { formatVisualDnsRule, normalizeRuleDomain, parseVisualDnsRule, RuleQueryType,
+import { formatRuleEditTemplate, formatVisualDnsRule, normalizeRuleDomain, parseVisualDnsRule, ruleEditTemplate,
+  RuleEditorLineSource, RuleEditTemplate, RuleLineItem, RuleMatchScope, RuleQueryType,
   VisualDnsRule } from '../data/DnsRuleComposer';
 import { aghSubscriptionId, seedAghSubscriptionCache, subscriptionCacheName } from '../data/SubscriptionCache';
 import { blurTitleBar } from '../components/BlurTitleBar';
@@ -216,10 +217,16 @@ type LanguageKey =
   | 'tapDomainToCreateRule' | 'addRuleLine' | 'customBlockRulePlaceholder' | 'customAllowRulePlaceholder'
   | 'confirmDeleteRuleLine' | 'removeAllRuleLines' | 'confirmRemoveAllBlockRules'
   | 'noCustomRulesHint' | 'swipeAgainToExit'
-  | 'ruleListTitle' | 'ruleVisualMode' | 'ruleRawMode' | 'ruleDomainField' | 'ruleMatchScope'
-  | 'ruleExactDomain' | 'ruleIncludeSubdomains' | 'ruleQueryType' | 'ruleAnyQuery' | 'rulePreviewTitle'
+  | 'ruleListTitle' | 'ruleListWithComments' | 'ruleCommentLabel'
+  | 'ruleVisualMode' | 'ruleTextMode' | 'ruleRawMode' | 'ruleDomainField' | 'ruleMatchScope'
+  | 'ruleActionField'
+  | 'ruleExactDomain' | 'ruleIncludeSubdomains' | 'ruleWildcardScope' | 'ruleQueryType' | 'ruleAnyQuery' | 'rulePreviewTitle'
   | 'rulePreviewEmpty' | 'ruleInvalidDomain' | 'ruleSingleLineOnly' | 'ruleMoreActions' | 'ruleUpdateLine'
-  | 'ruleDomainAndSubdomains' | 'ruleBlockPreview' | 'ruleAllowPreview'
+  | 'ruleDomainAndSubdomains' | 'ruleDomainOnlyPreview' | 'ruleSubdomainsOnlyPreview' | 'ruleBlockPreview' | 'ruleAllowPreview'
+  | 'rulePreviewAllQueries' | 'rulePreviewIpv4Queries' | 'rulePreviewIpv6Queries' | 'rulePreviewSource'
+  | 'rulePreviewHostsAddress' | 'rulePreviewNeedsFullEngine' | 'rulePreviewComment' | 'rulePreviewAdvanced'
+  | 'rulePreviewDomainConditions' | 'rulePreviewRegexBlock' | 'rulePreviewRegexAllow' | 'rulePreviewPriority'
+  | 'ruleRegexField' | 'ruleExpressionField'
   | 'continueLabel' | 'keepAliveWarnTitle' | 'keepAliveWarnMessage'
   | 'dnsProxyTitle' | 'dnsProxyDesc' | 'dnsProxyCopied' | 'dnsProxyStart' | 'dnsProxyStop'
   | 'dnsProxyDashboard' | 'dnsProxyDashboardDesc' | 'dnsProxyRunningStatus' | 'dnsProxyStoppedStatus'
@@ -473,12 +480,17 @@ function resolveStringResource(key: LanguageKey): number {
     case 'confirmRemoveAllBlockRules': return $r('app.string.confirmRemoveAllBlockRules').id;
     case 'noCustomRulesHint': return $r('app.string.noCustomRulesHint').id;
     case 'ruleListTitle': return $r('app.string.ruleListTitle').id;
+    case 'ruleListWithComments': return $r('app.string.ruleListWithComments').id;
+    case 'ruleCommentLabel': return $r('app.string.ruleCommentLabel').id;
     case 'ruleVisualMode': return $r('app.string.ruleVisualMode').id;
+    case 'ruleTextMode': return $r('app.string.ruleTextMode').id;
     case 'ruleRawMode': return $r('app.string.ruleRawMode').id;
+    case 'ruleActionField': return $r('app.string.ruleActionField').id;
     case 'ruleDomainField': return $r('app.string.ruleDomainField').id;
     case 'ruleMatchScope': return $r('app.string.ruleMatchScope').id;
     case 'ruleExactDomain': return $r('app.string.ruleExactDomain').id;
     case 'ruleIncludeSubdomains': return $r('app.string.ruleIncludeSubdomains').id;
+    case 'ruleWildcardScope': return $r('app.string.ruleWildcardScope').id;
     case 'ruleQueryType': return $r('app.string.ruleQueryType').id;
     case 'ruleAnyQuery': return $r('app.string.ruleAnyQuery').id;
     case 'rulePreviewTitle': return $r('app.string.rulePreviewTitle').id;
@@ -488,8 +500,24 @@ function resolveStringResource(key: LanguageKey): number {
     case 'ruleMoreActions': return $r('app.string.ruleMoreActions').id;
     case 'ruleUpdateLine': return $r('app.string.ruleUpdateLine').id;
     case 'ruleDomainAndSubdomains': return $r('app.string.ruleDomainAndSubdomains').id;
+    case 'ruleDomainOnlyPreview': return $r('app.string.ruleDomainOnlyPreview').id;
+    case 'ruleSubdomainsOnlyPreview': return $r('app.string.ruleSubdomainsOnlyPreview').id;
     case 'ruleBlockPreview': return $r('app.string.ruleBlockPreview').id;
     case 'ruleAllowPreview': return $r('app.string.ruleAllowPreview').id;
+    case 'rulePreviewAllQueries': return $r('app.string.rulePreviewAllQueries').id;
+    case 'rulePreviewIpv4Queries': return $r('app.string.rulePreviewIpv4Queries').id;
+    case 'rulePreviewIpv6Queries': return $r('app.string.rulePreviewIpv6Queries').id;
+    case 'rulePreviewSource': return $r('app.string.rulePreviewSource').id;
+    case 'rulePreviewHostsAddress': return $r('app.string.rulePreviewHostsAddress').id;
+    case 'rulePreviewNeedsFullEngine': return $r('app.string.rulePreviewNeedsFullEngine').id;
+    case 'rulePreviewComment': return $r('app.string.rulePreviewComment').id;
+    case 'rulePreviewAdvanced': return $r('app.string.rulePreviewAdvanced').id;
+    case 'rulePreviewDomainConditions': return $r('app.string.rulePreviewDomainConditions').id;
+    case 'rulePreviewRegexBlock': return $r('app.string.rulePreviewRegexBlock').id;
+    case 'rulePreviewRegexAllow': return $r('app.string.rulePreviewRegexAllow').id;
+    case 'rulePreviewPriority': return $r('app.string.rulePreviewPriority').id;
+    case 'ruleRegexField': return $r('app.string.ruleRegexField').id;
+    case 'ruleExpressionField': return $r('app.string.ruleExpressionField').id;
     case 'swipeAgainToExit': return $r('app.string.swipeAgainToExit').id;
     case 'continueLabel': return $r('app.string.continueLabel').id;
     case 'keepAliveWarnTitle': return $r('app.string.keepAliveWarnTitle').id;
@@ -688,13 +716,6 @@ interface RuleProfile {
   enabled: boolean;
   updatedAt: number;
   builtIn?: boolean;
-}
-
-interface RuleLineItem {
-  key: string;
-  line: string;
-  index: number;
-  domain: string;
 }
 
 type QueryActionFilter = 'all' | 'allowed' | 'blocked';
@@ -1080,12 +1101,19 @@ struct Index {
   @State showRuleEditorSheet: boolean = false;
   @State editingRuleProfileId: string = '';
   @State editingRuleNameText: string = '';
+  @State ruleEditorDraft: string = '';
+  @State ruleEditorTextMode: boolean = false;
+  @State ruleEditorLineCount: number = 0;
+  @State ruleEditorCommentCount: number = 0;
+  private ruleEditorLines: RuleEditorLineSource = new RuleEditorLineSource();
   @State editingRuleLineIndex: number = -1;
   @State ruleComposerOpen: boolean = false;
   @State ruleComposerRaw: boolean = false;
-  @State ruleComposerDomain: string = '';
+  @State ruleComposerFieldText: string = '';
+  @State ruleComposerTemplate: RuleEditTemplate | undefined = undefined;
   @State ruleComposerRawText: string = '';
-  @State ruleComposerSubdomains: boolean = true;
+  @State ruleComposerScope: RuleMatchScope = 'domainAndSubdomains';
+  @State ruleComposerAllow: boolean = false;
   @State ruleComposerQueryType: RuleQueryType = 'all';
   @State ruleComposerError: string = '';
   @State domainSortDescending: boolean = true;
@@ -3139,7 +3167,8 @@ struct Index {
     this.editingRuleProfileId = profileId;
     this.editingRuleNameText = profile.name;
     this.closeRuleComposer();
-    this.rulesText = profile.content;
+    this.ruleEditorTextMode = false;
+    this.setRuleEditorDraft(profile.content);
     this.showRuleEditorSheet = true;
   }
 
@@ -3148,7 +3177,8 @@ struct Index {
     this.editingRuleProfileId = '';
     this.editingRuleNameText = '';
     this.closeRuleComposer();
-    this.rulesText = this.buildMergedRulesText();
+    this.ruleEditorTextMode = false;
+    this.setRuleEditorDraft('');
   }
 
   private editingRuleProfile(): RuleProfile | undefined {
@@ -3159,8 +3189,8 @@ struct Index {
     return this.isBuiltInRuleProfile(this.editingRuleProfileId);
   }
 
-  private builtInRuleInputPlaceholder(): string {
-    if (this.editingAllowRules()) {
+  private ruleComposerRawPlaceholder(): string {
+    if (this.ruleComposerAllow) {
       return this.t('customAllowRulePlaceholder');
     }
     return this.t('customBlockRulePlaceholder');
@@ -3170,27 +3200,35 @@ struct Index {
     return this.editingRuleProfileId === CUSTOM_ALLOW_RULE_PROFILE_ID;
   }
 
-  private editingRuleLineItems(): RuleLineItem[] {
-    return this.normalizeRuleContent(this.rulesText).split('\n').map((raw: string, index: number) => {
-      const line: string = raw.trim();
-      const item: RuleLineItem = {
-        key: `${index}_${line}`,
-        line,
-        index,
-        domain: parseVisualDnsRule(line)?.domain ?? '',
-      };
-      return item;
-    }).filter((item: RuleLineItem) => item.line.length > 0);
+  private setRuleEditorDraft(content: string): void {
+    this.ruleEditorDraft = this.normalizeRuleContent(content);
+    if (!this.ruleEditorTextMode) {
+      this.reloadRuleEditorLines();
+    }
+  }
+
+  private selectRuleEditorMode(textMode: boolean): void {
+    if (textMode === this.ruleEditorTextMode) {
+      return;
+    }
+    if (!textMode) {
+      this.reloadRuleEditorLines();
+    }
+    this.ruleEditorTextMode = textMode;
+  }
+
+  private reloadRuleEditorLines(): void {
+    this.ruleEditorLines.reload(this.ruleEditorDraft);
+    this.ruleEditorLineCount = this.ruleEditorLines.totalCount();
+    this.ruleEditorCommentCount = this.ruleEditorLines.commentCount();
   }
 
   private openRuleComposer(item?: RuleLineItem): void {
     this.editingRuleLineIndex = item?.index ?? -1;
     this.ruleComposerRawText = item?.line ?? '';
-    this.ruleComposerDomain = '';
-    this.ruleComposerSubdomains = true;
-    this.ruleComposerQueryType = 'all';
+    this.loadVisualRule(this.ruleComposerRawText);
     this.ruleComposerError = '';
-    this.ruleComposerRaw = item !== undefined && !this.loadVisualRule(item.line);
+    this.ruleComposerRaw = false;
     this.ruleComposerOpen = true;
   }
 
@@ -3199,20 +3237,35 @@ struct Index {
     this.editingRuleLineIndex = -1;
   }
 
-  private loadVisualRule(line: string): boolean {
-    const rule: VisualDnsRule | undefined = parseVisualDnsRule(line);
-    if (rule === undefined || rule.allow !== this.editingAllowRules()) {
-      return false;
+  private loadVisualRule(line: string): void {
+    this.ruleComposerFieldText = '';
+    this.ruleComposerTemplate = undefined;
+    this.ruleComposerScope = 'domainAndSubdomains';
+    this.ruleComposerAllow = this.editingAllowRules();
+    this.ruleComposerQueryType = 'all';
+    if (line.length === 0 || /[\r\n]/.test(line)) {
+      return;
     }
-    this.ruleComposerDomain = rule.domain;
-    this.ruleComposerSubdomains = rule.includeSubdomains;
+    const rule: VisualDnsRule | undefined = parseVisualDnsRule(line);
+    if (rule === undefined || (this.builtInRuleEditorActive() && rule.allow !== this.editingAllowRules())) {
+      const template: RuleEditTemplate = ruleEditTemplate(line);
+      this.ruleComposerTemplate = template;
+      this.ruleComposerFieldText = template.value;
+      return;
+    }
+    this.ruleComposerFieldText = rule.domain;
+    this.ruleComposerScope = rule.scope;
+    this.ruleComposerAllow = rule.allow;
     this.ruleComposerQueryType = rule.queryType;
-    return true;
   }
 
   private visualRulePreview(): string {
-    const domain: string = normalizeRuleDomain(this.ruleComposerDomain);
-    return domain ? formatVisualDnsRule(domain, this.editingAllowRules(), this.ruleComposerSubdomains,
+    const template: RuleEditTemplate | undefined = this.ruleComposerTemplate;
+    if (template !== undefined) {
+      return formatRuleEditTemplate(template, this.ruleComposerFieldText);
+    }
+    const domain: string = normalizeRuleDomain(this.ruleComposerFieldText);
+    return domain ? formatVisualDnsRule(domain, this.ruleComposerAllow, this.ruleComposerScope,
       this.ruleComposerQueryType) : '';
   }
 
@@ -3220,11 +3273,75 @@ struct Index {
     return type === 'all' ? this.t('ruleAnyQuery') : (type === 'A' ? 'IPv4 (A)' : 'IPv6 (AAAA)');
   }
 
+  private describeDomainFilter(domain: string, allow: boolean, scope: RuleMatchScope, type: RuleQueryType): string {
+    const target: string = scope === 'exact' ? this.t('ruleDomainOnlyPreview', domain) :
+      this.t(scope === 'wildcard' && this.fullModeEnabled ? 'ruleSubdomainsOnlyPreview' : 'ruleDomainAndSubdomains',
+        domain, `www.${domain}`);
+    const queries: string = this.t(type === 'A' ? 'rulePreviewIpv4Queries' :
+      (type === 'AAAA' ? 'rulePreviewIpv6Queries' : 'rulePreviewAllQueries'));
+    return this.t(allow ? 'ruleAllowPreview' : 'ruleBlockPreview', target, queries);
+  }
+
+  private describeExistingDomainRule(domain: string, template: RuleEditTemplate): string {
+    const prefix: string = template.prefix.trim();
+    const suffix: string = template.suffix;
+    if (!prefix.startsWith('|') && !prefix.startsWith('@@|')) {
+      const blockingAddress: boolean = ['0.0.0.0', '127.0.0.1', '::', '::1'].includes(prefix);
+      if (this.fullModeEnabled && prefix.length > 0 && !blockingAddress) {
+        return this.t('rulePreviewHostsAddress', domain, prefix);
+      }
+      if (!this.fullModeEnabled && ((prefix.length > 0 && !blockingAddress) || suffix.trim().startsWith('#'))) {
+        return this.t('rulePreviewNeedsFullEngine');
+      }
+      return this.describeDomainFilter(domain, false, this.fullModeEnabled ? 'exact' : 'domainAndSubdomains', 'all');
+    }
+
+    const parts: RegExpExecArray | null = /^([\^|]?)(?:\$(.*))?$/.exec(suffix);
+    const modifiers: string[] = parts?.[2]?.toLowerCase().split(',') ?? [];
+    const wildcard: boolean = prefix.endsWith('*.');
+    const subdomains: boolean = (wildcard ? prefix.slice(0, -2) : prefix).endsWith('||');
+    const anchor: string = parts?.[1] ?? '';
+    if ((subdomains && anchor === '|') || (this.fullModeEnabled && !subdomains && anchor === '') ||
+      (wildcard && (!subdomains || anchor !== '^')) ||
+      (modifiers.includes('dnstype=a') && modifiers.includes('dnstype=aaaa')) ||
+      modifiers.some((name: string) => name !== 'important' && name !== 'dnstype=a' && name !== 'dnstype=aaaa')) {
+      return this.t('rulePreviewDomainConditions', domain);
+    }
+    const type: RuleQueryType = modifiers.includes('dnstype=aaaa') ? 'AAAA' :
+      (modifiers.includes('dnstype=a') ? 'A' : 'all');
+    const scope: RuleMatchScope = wildcard ? 'wildcard' : (subdomains ? 'domainAndSubdomains' : 'exact');
+    const explanation: string = this.describeDomainFilter(domain, prefix.startsWith('@@'), scope, type);
+    return modifiers.includes('important') ? `${explanation}\n${this.t('rulePreviewPriority')}` : explanation;
+  }
+
   private visualRuleEffect(): string {
-    const domain: string = normalizeRuleDomain(this.ruleComposerDomain);
-    const scope: string = this.ruleComposerSubdomains ? this.t('ruleDomainAndSubdomains', domain) : domain;
-    return this.t(this.editingAllowRules() ? 'ruleAllowPreview' : 'ruleBlockPreview', scope,
-      this.ruleQueryTypeLabel(this.ruleComposerQueryType));
+    const template: RuleEditTemplate | undefined = this.ruleComposerTemplate;
+    if (template === undefined) {
+      return this.describeDomainFilter(normalizeRuleDomain(this.ruleComposerFieldText), this.ruleComposerAllow,
+        this.ruleComposerScope, this.ruleComposerQueryType);
+    }
+    switch (template.field) {
+      case 'domain': return this.describeExistingDomainRule(normalizeRuleDomain(this.ruleComposerFieldText), template);
+      case 'comment': return this.t('rulePreviewComment');
+      case 'pattern':
+        if (!this.fullModeEnabled) {
+          return this.t('rulePreviewNeedsFullEngine');
+        }
+        if (template.suffix === '/') {
+          return this.t(template.prefix.startsWith('@@') ? 'rulePreviewRegexAllow' : 'rulePreviewRegexBlock');
+        }
+        return this.t('rulePreviewAdvanced');
+      default: return this.t('rulePreviewAdvanced');
+    }
+  }
+
+  private ruleComposerFieldLabel(): LanguageKey {
+    switch (this.ruleComposerTemplate?.field) {
+      case 'pattern': return 'ruleRegexField';
+      case 'comment': return 'ruleCommentLabel';
+      case 'expression': return 'ruleExpressionField';
+      default: return 'ruleDomainField';
+    }
   }
 
   private selectRuleComposerMode(raw: boolean): void {
@@ -3236,10 +3353,8 @@ struct Index {
       if (preview) {
         this.ruleComposerRawText = preview;
       }
-    } else if (!this.loadVisualRule(this.ruleComposerRawText.trim())) {
-      this.ruleComposerDomain = '';
-      this.ruleComposerSubdomains = true;
-      this.ruleComposerQueryType = 'all';
+    } else {
+      this.loadVisualRule(this.ruleComposerRawText.trim());
     }
     this.ruleComposerRaw = raw;
     this.ruleComposerError = '';
@@ -3257,14 +3372,18 @@ struct Index {
       return;
     }
     const index: number = this.editingRuleLineIndex;
-    const lines: string[] = this.normalizeRuleContent(this.rulesText).split('\n');
+    const lines: string[] = this.ruleEditorDraft.split('\n');
     const existing: Set<string> = new Set<string>(lines.map((line: string) => line.trim()));
     if (index >= 0) {
       if (pending.length !== 1) {
         this.ruleComposerError = this.t('ruleSingleLineOnly');
         return;
       }
-      if (pending[0] === lines[index].trim()) {
+      const original: string = lines[index].trim();
+      const visual: VisualDnsRule | undefined = this.ruleComposerRaw || this.ruleComposerTemplate !== undefined
+        ? undefined : parseVisualDnsRule(original);
+      if (pending[0] === original || (visual !== undefined &&
+        pending[0] === formatVisualDnsRule(visual.domain, visual.allow, visual.scope, visual.queryType))) {
         this.closeRuleComposer();
         return;
       }
@@ -3273,7 +3392,7 @@ struct Index {
         return;
       }
       lines[index] = pending[0];
-      this.rulesText = lines.join('\n');
+      this.setRuleEditorDraft(lines.join('\n'));
     } else {
       const additions: string[] = [];
       for (const line of pending) {
@@ -3286,14 +3405,14 @@ struct Index {
         this.ruleComposerError = this.t('ruleAlreadyExists', pending[0]);
         return;
       }
-      const content: string = this.normalizeRuleContent(this.rulesText).trimEnd();
-      this.rulesText = (content ? `${content}\n` : '') + additions.join('\n');
+      const separator: string = this.ruleEditorDraft && !this.ruleEditorDraft.endsWith('\n') ? '\n' : '';
+      this.setRuleEditorDraft(this.ruleEditorDraft + separator + additions.join('\n'));
     }
     this.closeRuleComposer();
   }
 
   private confirmDeleteRuleLine(lineIndex: number): void {
-    const lines: string[] = this.normalizeRuleContent(this.rulesText).split('\n');
+    const lines: string[] = this.ruleEditorDraft.split('\n');
     if (lineIndex < 0 || lineIndex >= lines.length) {
       return;
     }
@@ -3315,7 +3434,7 @@ struct Index {
           action: () => {
             try {
               lines.splice(lineIndex, 1);
-              this.rulesText = lines.join('\n');
+              this.setRuleEditorDraft(lines.join('\n'));
             } catch (err) {
               this.errorText = this.errorMessage(err);
             }
@@ -3326,7 +3445,7 @@ struct Index {
   }
 
   private confirmRemoveAllCustomBlockRules(): void {
-    if (this.editingRuleProfileId !== CUSTOM_BLOCK_RULE_PROFILE_ID || !this.rulesText.trim()) {
+    if (this.editingRuleProfileId !== CUSTOM_BLOCK_RULE_PROFILE_ID || this.ruleEditorLineCount === 0) {
       return;
     }
     this.getUIContext().showAlertDialog({
@@ -3338,7 +3457,7 @@ struct Index {
           value: this.t('removeAllRuleLines'),
           action: () => {
             if (this.showRuleEditorSheet && this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID) {
-              this.rulesText = '';
+              this.setRuleEditorDraft('');
               this.applyRuleEditorChanges();
               this.saveRules();
               this.restartFullEngineForConfig();
@@ -3825,7 +3944,7 @@ struct Index {
   }
 
   private buildRuleLineForDomain(domain: string, allow: boolean): string {
-    return formatVisualDnsRule(domain, allow, true, 'all');
+    return formatVisualDnsRule(domain, allow, 'domainAndSubdomains', 'all');
   }
 
   private ruleProfileLines(profileContent: string): string[] {
@@ -3969,7 +4088,7 @@ struct Index {
     let changed = false;
     this.ruleProfiles.forEach((profile: RuleProfile) => {
       if (profile.id === this.editingRuleProfileId) {
-        const nextContent: string = this.normalizeRuleContent(this.rulesText);
+        const nextContent: string = this.ruleEditorDraft;
         next.push({
           id: profile.id,
           name: profile.name,
@@ -4483,7 +4602,7 @@ struct Index {
   }
 
   private async exportRuleEditorContent(): Promise<void> {
-    const content = this.normalizeRuleContent(this.rulesText).trim();
+    const content: string = this.ruleEditorDraft.trim();
     if (content.length === 0) {
       this.setConfigFeedback(this.noRulesToExportMessage());
       return;
@@ -12098,7 +12217,6 @@ struct Index {
     .alignItems(HorizontalAlign.Start)
   }
 
-﻿
   private ruleEditorMenu(): MenuElement[] {
     const actions: MenuElement[] = [{
       value: this.t('exportRules'),
@@ -12109,7 +12227,7 @@ struct Index {
         });
       }
     }];
-    if (this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID && this.rulesText.trim().length > 0) {
+    if (this.editingRuleProfileId === CUSTOM_BLOCK_RULE_PROFILE_ID && this.ruleEditorLineCount > 0) {
       actions.push({ value: this.t('removeAllRuleLines'), action: () => this.confirmRemoveAllCustomBlockRules() });
     }
     return actions;
@@ -12118,23 +12236,16 @@ struct Index {
   @Builder
   private RuleEditorHeader() {
     Row({ space: 10 }) {
-      if (this.ruleComposerOpen) {
-        Button(this.t('back'), { type: ButtonType.Normal })
-          .height(40)
-          .padding({ left: 12, right: 12 })
-          .borderRadius(12)
-          .backgroundColor(this.softPanelTone())
-          .fontSize(14)
-          .fontColor(this.primaryTextColor())
-          .onClick(() => this.closeRuleComposer())
-      } else {
-        SymbolGlyph($r('sys.symbol.doc_text'))
-          .fontSize(19)
-          .fontColor([this.selectedChipTextTone()])
-          .width(42)
-          .height(42)
-          .borderRadius(13)
-          .backgroundColor(this.selectedChipSurfaceTone())
+      if (!this.ruleComposerOpen) {
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.doc_text'))
+            .fontSize(19)
+            .fontColor([this.selectedChipTextTone()])
+        }
+        .width(42)
+        .height(42)
+        .borderRadius(13)
+        .backgroundColor(this.selectedChipSurfaceTone())
       }
       Column({ space: 3 }) {
         Text(this.ruleComposerOpen ? this.editingRuleNameText : this.t('rulesEditor'))
@@ -12165,19 +12276,25 @@ struct Index {
           .borderRadius(12)
           .accessibilityText(this.t('ruleMoreActions'))
           .bindMenu(this.ruleEditorMenu())
-        Button() {
-          SymbolGlyph($r('sys.symbol.xmark'))
-            .fontSize(15)
-            .fontColor([this.primaryTextColor()])
-        }
-        .width(40)
-        .height(40)
-        .padding(0)
-        .backgroundColor(this.softPanelTone())
-        .borderRadius(12)
-        .accessibilityText(this.t('closeEditor'))
-        .onClick(() => this.closeRuleEditor())
       }
+      Button() {
+        SymbolGlyph($r('sys.symbol.xmark'))
+          .fontSize(15)
+          .fontColor([this.primaryTextColor()])
+      }
+      .width(40)
+      .height(40)
+      .padding(0)
+      .backgroundColor(this.softPanelTone())
+      .borderRadius(12)
+      .accessibilityText(this.t('closeEditor'))
+      .onClick(() => {
+        if (this.ruleComposerOpen) {
+          this.closeRuleComposer();
+        } else {
+          this.closeRuleEditor();
+        }
+      })
     }
     .width('100%')
   }
@@ -12201,37 +12318,72 @@ struct Index {
   @Builder
   private RuleVisualFields() {
     Column({ space: 9 }) {
-      Text(this.t('ruleDomainField'))
+      Text(this.t(this.ruleComposerFieldLabel()))
         .fontSize(14)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.primaryTextColor())
-      TextInput({ text: this.ruleComposerDomain, placeholder: 'example.com' })
-        .id('rule-composer-domain')
+      TextInput({ text: this.ruleComposerFieldText,
+        placeholder: this.ruleComposerFieldLabel() === 'ruleDomainField' ? 'example.com' : '' })
         .width('100%')
         .height(48)
-        .type(InputType.URL)
+        .type(this.ruleComposerFieldLabel() === 'ruleDomainField' ? InputType.URL : InputType.Normal)
         .fontSize(16)
         .backgroundColor(this.cardSurfaceTone())
         .border({ width: 1, color: this.cardBorderTone() })
         .borderRadius(12)
         .padding({ left: 12, right: 12 })
         .onChange((value: string) => {
-          this.ruleComposerDomain = value;
+          this.ruleComposerFieldText = value;
           this.ruleComposerError = '';
         })
       this.RuleVisualPreview()
+      if (this.ruleComposerTemplate === undefined) {
+        this.RuleStandardOptions()
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private RuleStandardOptions() {
+    Column({ space: 9 }) {
+      if (!this.builtInRuleEditorActive()) {
+        Text(this.t('ruleActionField'))
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.primaryTextColor())
+        Row({ space: 4 }) {
+          this.RuleEditorChoice(this.t('addBlockRuleAction'), () => !this.ruleComposerAllow, () => {
+            this.ruleComposerAllow = false;
+            this.ruleComposerError = '';
+          })
+          this.RuleEditorChoice(this.t('addAllowRuleAction'), () => this.ruleComposerAllow, () => {
+            this.ruleComposerAllow = true;
+            this.ruleComposerError = '';
+          })
+        }
+        .width('100%')
+        .padding(4)
+        .backgroundColor(this.softPanelTone())
+        .borderRadius(13)
+      }
       Text(this.t('ruleMatchScope'))
         .fontSize(14)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.primaryTextColor())
         .margin({ top: 4 })
       Row({ space: 4 }) {
-        this.RuleEditorChoice(this.t('ruleExactDomain'), () => !this.ruleComposerSubdomains, () => {
-          this.ruleComposerSubdomains = false;
+        this.RuleEditorChoice(this.t('ruleExactDomain'), () => this.ruleComposerScope === 'exact', () => {
+          this.ruleComposerScope = 'exact';
           this.ruleComposerError = '';
         })
-        this.RuleEditorChoice(this.t('ruleIncludeSubdomains'), () => this.ruleComposerSubdomains, () => {
-          this.ruleComposerSubdomains = true;
+        this.RuleEditorChoice(this.t('ruleIncludeSubdomains'), () => this.ruleComposerScope === 'domainAndSubdomains', () => {
+          this.ruleComposerScope = 'domainAndSubdomains';
+          this.ruleComposerError = '';
+        })
+        this.RuleEditorChoice(this.t('ruleWildcardScope'), () => this.ruleComposerScope === 'wildcard', () => {
+          this.ruleComposerScope = 'wildcard';
           this.ruleComposerError = '';
         })
       }
@@ -12269,23 +12421,29 @@ struct Index {
         .fontWeight(FontWeight.Bold)
         .fontColor(this.selectedChipTextTone())
       if (this.visualRulePreview().length > 0) {
-        Text(this.visualRulePreview())
-          .width('100%')
-          .fontSize(13)
-          .fontFamily('monospace')
-          .fontColor(this.selectedChipTextTone())
-          .wordBreak(WordBreak.BREAK_ALL)
-          .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
         Text(this.visualRuleEffect())
           .width('100%')
-          .fontSize(14)
+          .fontSize(15)
+          .lineHeight(22)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.primaryTextColor())
           .wordBreak(WordBreak.BREAK_WORD)
+        Divider().color(this.sheetBorderTone())
+        Text(this.t('rulePreviewSource'))
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+        Text(this.visualRulePreview())
+          .width('100%')
+          .fontSize(12)
+          .fontFamily('monospace')
+          .fontColor(this.secondaryTextColor())
+          .wordBreak(WordBreak.BREAK_ALL)
+          .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
       } else {
-        Text(this.t(this.ruleComposerDomain.trim().length > 0 ? 'ruleInvalidDomain' : 'rulePreviewEmpty'))
+        Text(this.t(this.ruleComposerFieldLabel() !== 'ruleDomainField' ? 'writeRulesHere' :
+          (this.ruleComposerFieldText.trim().length > 0 ? 'ruleInvalidDomain' : 'rulePreviewEmpty')))
           .fontSize(13)
-          .fontColor(this.ruleComposerDomain.trim().length > 0 ?
+          .fontColor(this.ruleComposerFieldLabel() === 'ruleDomainField' && this.ruleComposerFieldText.trim().length > 0 ?
             (this.isDarkModeActive() ? '#FFABAB' : '#A52C23') : this.secondaryTextColor())
       }
     }
@@ -12311,7 +12469,7 @@ struct Index {
         .backgroundColor(this.softPanelTone())
         .borderRadius(13)
         if (this.ruleComposerRaw) {
-          TextArea({ text: this.ruleComposerRawText, placeholder: this.builtInRuleInputPlaceholder() })
+          TextArea({ text: this.ruleComposerRawText, placeholder: this.ruleComposerRawPlaceholder() })
             .width('100%')
             .height(170)
             .fontSize(14)
@@ -12349,7 +12507,15 @@ struct Index {
   private RuleEditorListItem(item: RuleLineItem) {
     Row({ space: 8 }) {
       Column({ space: 4 }) {
-        if (item.domain.length > 0) {
+        if (item.comment) {
+          Text(this.t('ruleCommentLabel'))
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.secondaryTextColor())
+            .backgroundColor(this.softPanelTone())
+            .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+            .borderRadius(5)
+        } else if (item.domain.length > 0) {
           Text(item.domain)
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
@@ -12360,12 +12526,13 @@ struct Index {
         Text(item.line)
           .fontSize(13)
           .fontFamily('monospace')
-          .fontColor(item.domain.length > 0 ? this.secondaryTextColor() : this.primaryTextColor())
+          .fontColor(item.comment || item.domain.length > 0 ? this.secondaryTextColor() : this.primaryTextColor())
           .maxLines(item.domain.length > 0 ? 1 : 2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
+      .onClick(() => this.openRuleComposer(item))
 
       Button(this.t('editRule'), { type: ButtonType.Normal })
         .height(40)
@@ -12398,7 +12565,9 @@ struct Index {
   @Builder
   private RuleEditorList() {
     Row({ space: 10 }) {
-      Text(this.t('ruleListTitle', this.ruleProfileLines(this.rulesText).length))
+      Text(this.ruleEditorCommentCount > 0 ? this.t('ruleListWithComments',
+        this.ruleEditorLineCount - this.ruleEditorCommentCount, this.ruleEditorCommentCount) :
+        this.t('ruleListTitle', this.ruleEditorLineCount))
         .fontSize(14)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.secondaryTextColor())
@@ -12422,13 +12591,13 @@ struct Index {
       .onClick(() => this.openRuleComposer())
     }
     .width('100%')
-    if (this.rulesText.trim().length > 0) {
+    if (this.ruleEditorLineCount > 0) {
       List({ space: 8 }) {
-        ForEach(this.editingRuleLineItems(), (item: RuleLineItem) => {
+        LazyForEach(this.ruleEditorLines, (item: RuleLineItem) => {
           ListItem() {
             this.RuleEditorListItem(item)
           }
-        }, (item: RuleLineItem) => item.key)
+        }, (item: RuleLineItem) => `${item.index}_${item.line}`)
       }
       .width('100%')
       .layoutWeight(1)
@@ -12455,12 +12624,24 @@ struct Index {
   private RuleEditorSheet() {
     Column({ space: 14 }) {
       this.RuleEditorHeader()
+      if (!this.ruleComposerOpen && !this.builtInRuleEditorActive()) {
+        Row({ space: 6 }) {
+          this.RuleEditorChoice(this.t('ruleVisualMode'), () => !this.ruleEditorTextMode,
+            () => this.selectRuleEditorMode(false))
+          this.RuleEditorChoice(this.t('ruleTextMode'), () => this.ruleEditorTextMode,
+            () => this.selectRuleEditorMode(true))
+        }
+        .width('100%')
+        .padding(4)
+        .backgroundColor(this.softPanelTone())
+        .borderRadius(13)
+      }
       if (this.ruleComposerOpen) {
         this.RuleComposer()
-      } else if (this.builtInRuleEditorActive()) {
+      } else if (!this.ruleEditorTextMode) {
         this.RuleEditorList()
       } else {
-        TextArea({ text: this.rulesText, placeholder: this.t('writeRulesHere') })
+        TextArea({ text: this.ruleEditorDraft, placeholder: this.t('writeRulesHere') })
           .width('100%')
           .layoutWeight(1)
           .fontSize(14)
@@ -12469,9 +12650,7 @@ struct Index {
           .border({ width: 1, color: this.cardBorderTone() })
           .borderRadius(14)
           .padding(12)
-          .onChange((value: string) => {
-            this.rulesText = value;
-          })
+          .onChange((value: string) => this.setRuleEditorDraft(value))
       }
       Button(this.t(this.ruleComposerOpen ? (this.editingRuleLineIndex < 0 ? 'addRuleLine' : 'ruleUpdateLine') :
         'saveRules'), { type: ButtonType.Normal })
@@ -12631,6 +12810,14 @@ struct Index {
           backgroundColor: this.canvasTone(),
           showClose: false,
           keyboardAvoidMode: SheetKeyboardAvoidMode.RESIZE_ONLY,
+          onWillDismiss: (action: DismissSheetAction) => {
+            if (this.ruleComposerOpen &&
+              (action.reason === DismissReason.PRESS_BACK || action.reason === DismissReason.SLIDE)) {
+              this.closeRuleComposer();
+              return;
+            }
+            action.dismiss();
+          },
           onDisappear: () => {
             if (this.showRuleEditorSheet) {
               this.closeRuleEditor();
